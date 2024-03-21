@@ -66,6 +66,17 @@ class PMem {
 			*p= reinterpret_cast<void*> (((unsigned long)poolId) << 48 | oid->off);
 			return true;
 		}
+
+		static bool dram_alloc(int poolId, size_t size, void **p, PMEMoid *oid) {
+			*p = malloc(size);
+
+			if(*p == nullptr){
+				std::cerr<<"alloc error"<<std::endl;	
+				return false;
+			}
+			return true;
+		}
+
 		static void free(void *pptr) {
 			// p -> pool_id and offset
 			// then perform free
@@ -73,6 +84,10 @@ class PMem {
 			void *rawPtr = (void *)(((unsigned long)pptr)& MASK + (unsigned long)baseAddresses[poolId]);
 			PMEMoid ptr = pmemobj_oid(rawPtr);
 			pmemobj_free(&ptr);
+		}
+
+		static void dram_free(void *pptr) {
+			free(pptr);
 		}
 
 		static void freeVaddr(void *vaddr) {

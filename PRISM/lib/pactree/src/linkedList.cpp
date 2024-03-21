@@ -39,7 +39,7 @@ ListNode* LinkedList::initialize() {
     genId =0;
     OpStruct* oplog = (OpStruct *)PMem::getOpLog(0);
 
-    PMem::alloc(1,sizeof(ListNode),(void **)&headPtr,&(oplog->newNodeOid));
+    PMem::dram_alloc(1,sizeof(ListNode),(void **)&headPtr,&(oplog->newNodeOid));
     ListNode* head = (ListNode*)new(headPtr.getVaddr()) ListNode();
     flushToNVM((char*)&headPtr,sizeof(pptr<ListNode>));
     smp_wmb();
@@ -47,7 +47,7 @@ ListNode* LinkedList::initialize() {
     OpStruct *oplog2 = (OpStruct *)PMem::getOpLog(1);
 
     pptr<ListNode> tailPtr;
-    PMem::alloc(1,sizeof(ListNode),(void **)&tailPtr, &(oplog->newNodeOid));
+    PMem::dram_alloc(1,sizeof(ListNode),(void **)&tailPtr, &(oplog->newNodeOid));
     ListNode* tail= (ListNode*)new(tailPtr.getVaddr()) ListNode();
 
     oplog->op=OpStruct::done;
