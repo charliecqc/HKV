@@ -1,0 +1,25 @@
+### PRISM INFO. ============================================================
+NUM_SOCKET: 2, NUM_THREADS: 32
+KV-item Size: 1024 B, READ_IO_SIZE: 4 KB, WRITE_CHUNK_SIZE: 128 KB
+SVC Size: 20 GB
+PWB Size: 32 GB (# = 32)
+VS: 1, Disks: 1
+READ_QD: 100, WRITE_QD: 4
+IO_COMPLETION_THREAD: 12
+### RESULTS ================================================================
+[PRISMImpl] Create KeyIndex 0
+YCSB_INSERT throughput 0.000000
+Elapsed_time 0.002251
+YCSB_C throughput 0.000000
+Elapsed_time 0.003920
+### SSD WAF ================================================================
+TOTAL_VALUESTORAGE_WRITE(MB)	0
+TOTAL_STORED_DATA(MB)	0
+SSD-level WAF	-nan
+### I/O Batching ===========================================================
+Avg_I/O_Batching	-nan
+### GET STATS ==============================================================
+SVC_Cnt	0		-nan
+PWB_Cnt	0		-nan
+VS_Cnt	0		-nan
+GET_Cnt	0
