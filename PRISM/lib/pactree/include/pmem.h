@@ -117,31 +117,6 @@ class PMem {
 			return true;
 		}
 
-		static bool dram_bind(int poolId, size_t size, void **root_p, int *is_created) {
-			// Allocate memory for root object in DRAM
-			root_obj* root = static_cast<root_obj*>(malloc(sizeof(root_obj)));
-    		if (root == nullptr) {
-        		std::cerr << "Failed to allocate memory for root object" << std::endl;
-        		return false;
-    		}
-
-			//assign root pointer
-			*root_p = root;
-			*is_created = 1;
-
-			baseAddresses[poolId] = reinterpret_cast<void*>(root);
-
-			// zero initialize memory
-			memset(root, 0, sizeof(root_obj));
-
-			return true;
-
-		}
-		static bool dram_unbind(int poolId) {
-			//nothing to do for unbinding from
-			return true;
-		}
-
 		static bool bindLog(int poolId, const char *nvm_path, size_t size) {
 			PMEMobjpool *pop;
 			int ret;
@@ -176,29 +151,6 @@ class PMem {
 			}
 			return true;
 		}
-
-		static bool dram_bindLog(int poolId, size_t size) {
-			// allocate memory for log in DRAM
-			void* log_memory = malloc(size);
-    		if (log_memory == nullptr) {
-        		std::cerr << "Failed to allocate memory for log" << std::endl;
-        		return false;
-    		}
-
-    		baseAddresses[poolId * 3 + 2] = log_memory;
-    		logVaddr[poolId] = log_memory;
-    		return true;
-		}
-
-		
-
-		static bool dram_unbindLog(int poolId) {
-			//free the allocated memory
-			free(baseAddresses[poolId * 3 + 2]);
-			return true;
-		}
-
-
 
 		static bool unbindLog(int poolId) {
 			PMEMobjpool *pop = reinterpret_cast<PMEMobjpool *>(baseAddresses[poolId*3+2]);

@@ -217,7 +217,7 @@ void pactreeImpl::createCombinerThread()
     combinerThead = new std::thread(combinerThreadExec, totalNumaActive);
 }
 
-/*pactreeImpl *initPT(int numa)
+pactreeImpl *initPT(int numa)
 {
     const char *path = "/mnt/pmem0/dl";
     size_t sz = 10UL * 1024UL * 1024UL * 1024UL; // 10GB
@@ -263,51 +263,6 @@ void pactreeImpl::createCombinerThread()
     flushToNVM((char *)root, sizeof(root_obj));
     smp_wmb();
     return pt;
-}*/
-
-pactreeImpl *initPT(int numa){
-	size_t sz = 10UL * 1024UL * 1024UL * 1024UL; //10Gb allocated in DRAM instead
-	int isCreated = 0;
-	int isCreated2 = 0;
-	root_obj *root = nullptr;
-	root_obj *sl_root = nullptr;
-
-    size_t sl_size = 10UL * 1024UL * 1024UL * 1024UL;
-
-    PMem::dram_bind(0, sl_size, (void **)&sl_root, &isCreated);
-    if (isCreated == 0)
-    {
-        printf("Reading Search layer from an existing pactree.\n");
-    }
-
-    PMem::dram_bindLog(0, sz); 
-
-    PMem::dram_bind(1, sz, (void **)&root, &isCreated2);
-
-#ifdef MULTIPOOL
-	//Additional pools if needed
-#endif
-
-	if(isCreated2 ==0){
-		//pactreeImpl *pt = (pactreeImpl *)pmemobj_direct(root->ptr[0]);
-        //pactreeImpl *pt = (pactreeImpl *)root->ptr[0];
-        pactreeImpl *pt = new pactreeImpl(numa, root);
-        pt->init(numa, sl_root);
-		return pt;
-	}
-
-    PMEMobjpool *pop = (PMEMobjpool *)PMem::getBaseOf(1);
-
-	// Allocate memory in DRAM for pactreeImpl object
-    pactreeImpl *pt = new pactreeImpl(numa, sl_root);
-    // Ensure memory allocation succeeded
-    if (pt == nullptr) {
-        // Handle allocation failure
-        return nullptr;
-    }
-
-    // No need to flush memory or perform memory barriers for DRAM allocations
-    return pt;
 }
 
 void pactreeImpl::init(int numNuma, root_obj *root)
@@ -337,6 +292,7 @@ void pactreeImpl::init(int numNuma, root_obj *root)
 
 pactreeImpl::pactreeImpl(int numNuma, root_obj *root)
 {
+
     assert(numNuma <= NUM_SOCKET);
     totalNumaActive = numNuma;
     wtArray = new std::vector<std::thread *>(totalNumaActive);

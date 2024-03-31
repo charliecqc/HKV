@@ -160,7 +160,7 @@ static ts_nvlog_store_t *_nvlog_store_create(unsigned long size,
 	/* size should be power of 2 */
 	if (unlikely(!is_power_of_2(size))) {
 	    size = nextPowerOf2(size); /* YJ modified */
-	    ts_trace(TS_INFO, "The log size is %d\n", size);
+	    ts_trace(TS_ERROR, "The log size is %d\n", size);
 	    if(unlikely(!is_power_of_2(size))) {
 		ts_trace(TS_ERROR,
 			"The requested log size is not power of 2\n");
@@ -170,9 +170,9 @@ static ts_nvlog_store_t *_nvlog_store_create(unsigned long size,
 	pthread_mutex_lock(&nvlog_lock);
 
 #ifndef TS_NVM_IS_DRAM
-	ts_trace(TS_INFO, "The log size is %d\n", size);
+	ts_trace(TS_ERROR, "The log size is %d\n", size);
 	/* TODO: check if following code is crash-consistent. */
-	ts_trace(TS_INFO, "The sizeof(*nvlog_store) 1: %lu\n", sizeof(*nvlog_store));
+	ts_trace(TS_ERROR, "The sizeof(*nvlog_store) 1: %lu\n", sizeof(*nvlog_store));
 	nvlog_store = (ts_nvlog_store_t *)nvm_alloc(sizeof(*nvlog_store));
 	//nvlog_store = (ts_nvlog_store_t *)nvm_aligned_alloc(L1_CACHE_BYTES, sizeof(*nvlog_store));
 	if (!nvlog_store) {
@@ -208,7 +208,7 @@ static ts_nvlog_store_t *_nvlog_store_create(unsigned long size,
 	 *			     |buff1|	    |buff2|	          |buffN|	*
 	 *			     +-----+	    +-----+	          +-----+	*
 	 ********************************************************************************/
-	ts_trace(TS_INFO, "The sizeof(*nvlog_store) 2: %lu\n", size + TS_CACHE_LINE_SIZE);
+	ts_trace(TS_ERROR, "The sizeof(*nvlog_store) 2: %lu\n", size + TS_CACHE_LINE_SIZE);
 	nvlog_store->_buffer =
 	    (unsigned char *)nvm_alloc(size + TS_CACHE_LINE_SIZE);
 	    //(unsigned char *)nvm_aligned_alloc(L1_CACHE_BYTES, sizeof(*nvlog_store));

@@ -8,7 +8,7 @@
 #ipmctl create -goal persistentmemorytype=appdirect
 #ipmctl create -goal persistentmemorytype=appdirectnotinterleaved
 
-if [ "$(id -u)" -ne 0 ]; then
+if [ $EUID -ne 0 ]; then
     echo "This script must be run as root" 
     exit 1
 fi

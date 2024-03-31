@@ -7,8 +7,10 @@ OpLog::OpLog(const char *path, int id)
 {
     nvm_root_obj = nvm_init_heap(path, NVHEAP_POOL_SIZE, &need_recovery);
     nvlog_init(nvm_root_obj);
+    ts_trace(TS_ERROR, "allocate size 1 %ld'\n", MTS_OPLOG_SIZE);
     int ret1 = oplog_create(NULL, &oplog1, MTS_OPLOG_SIZE, STATUS_NVLOG_NORMAL, 0);
     int ret2 = oplog_create(NULL, &oplog2, MTS_OPLOG_SIZE, STATUS_NVLOG_NORMAL, 1);
+    ts_trace(TS_ERROR, "ret1 = %d, ret2 = %d'\n", ret1, ret2);
 
     /* Enabling double-buffeing */
     oplog1.ready = true;

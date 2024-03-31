@@ -500,7 +500,7 @@ MTSImpl::MTSImpl(int numNuma)
 		else
 			sprintf(path, NVHEAP_POOL_PATH "1/prism/pwb%d", i);
 		g_perNumaOpLog[i] = MTSImpl::createOpLog(path, i);
-		ts_trace(TS_INFO, "[PRISMImpl] Create PWB %d\n", i);
+		ts_trace(TS_ERROR, "[PRISMImpl] Create PWB %d\n", i);
 	}
 
 	for (int i = 0; i < MTS_AT_NUM; i++)

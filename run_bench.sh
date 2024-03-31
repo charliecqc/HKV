@@ -21,7 +21,7 @@ INSERT_OUTPUT="${CURRENT_DIR}/insert.txt"	    #Results(insert throughput) are re
 
 KEY_TYPE=(zipf)		    #"rand": skewed, "mono": uniformed.
 WORKLOAD_TYPE=(a b c d e)   #Typing which workload_type will be tested.
-CORE_NUM=(64)		    #how many CPU cores?    ##PRISM threads: CPU cores / 5 * 4 ##IO Completion threads: CPU cores * 5
+CORE_NUM=(40)		    #how many CPU cores?    ##PRISM threads: CPU cores / 5 * 4 ##IO Completion threads: CPU cores * 5
 ZIPF=("0.99")		    #Zipfian coefficient
 WKLD_QD=(64)		    #the IO batch size in our asynchronous IO approach ref. Section 'Opportunistic Thread Combining'
 WKLD_E_QD=(100)	    

@@ -90,7 +90,7 @@ ListNode* LinkedList::initialize() {
     smp_wmb();
 
     for(int i=0; i<5;i++){
-	    dists[i].store(0);
+	dists[i].store(0);
     }
 
     return head;

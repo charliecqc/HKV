@@ -3,7 +3,7 @@ project(MTS)
 
 set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_FLAGS "-pthread -Wall -Wextra -march=native")
+set(CMAKE_CXX_FLAGS "-g -O0 -pthread -Wall -Wextra -march=native")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wno-class-memaccess -Wno-attributes -Wno-unused-parameter -Wno-unused-value -Wno-packed-not-aligned -Wno-unused-variable -Wno-address-of-packed-member -mprfchw -Wno-unused-function")
 set(CMAKE_CXX_FLAGS_RELEASE "-g -O3 -Wno-all -march=native -mtune=native -mprfchw -ltcmalloc")
 

@@ -22,7 +22,7 @@
 #define MTS_OPLOG_NUM MTS_THREAD_NUM
 #define NVHEAP_POOL_PATH "/mnt/pmem"
 #define NVHEAP_POOL_SIZE (MTS_OPLOG_G_SIZE / MTS_THREAD_NUM * 4UL)
-#define MTS_OPLOG_G_SIZE (32UL * 1024UL * 1024UL * 1024UL)
+#define MTS_OPLOG_G_SIZE (16UL * 1024UL * 1024UL * 1024UL)
 #define MTS_OPLOG_SIZE (MTS_OPLOG_G_SIZE / MTS_OPLOG_NUM / 2UL)
 /* for double-buffering, divided by 2 */
 #define MTS_OPLOG_HIGH_MARK (MTS_OPLOG_SIZE)
@@ -48,7 +48,7 @@
 
 /* io_uring */
 #define W_QD 4
-#define R_QD 100
+#define R_QD 64
 #define GC_QD 8
 #define IO_URING_WRITE	    1
 #define IO_URING_READ	    1
@@ -57,7 +57,7 @@
 #define IO_URING_WRING_NUM MTS_THREAD_NUM
 #define IO_URING_RRING_NUM MTS_THREAD_NUM
 #define IO_URING_SRING_NUM MTS_THREAD_NUM
-#define IO_COMPLETER_NUM 12
+#define IO_COMPLETER_NUM 8
 
 /* DRAM Cache */
 #define MTS_DRAMCACHE 1

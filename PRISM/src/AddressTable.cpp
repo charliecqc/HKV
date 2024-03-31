@@ -13,8 +13,8 @@ void __attribute__((optimize("O0"))) prefault_p(void *addr, size_t size) {
 AddressTable::AddressTable() {}
 AddressTable::~AddressTable() {}
 
-/*AddressTable::AddressTable(const char *path, unsigned int at_num) {
-    // Creat PMEM FILE and memory mapt it  
+AddressTable::AddressTable(const char *path, unsigned int at_num) {
+    /* Creat PMEM FILE and memory mapt it */   
     void *mem;
     int ret;
 
@@ -22,14 +22,14 @@ AddressTable::~AddressTable() {}
     size_t mapped_len;
     int is_pmem;
 
-    // Create a pmem file and memory map it 
+    /* Create a pmem file and memory map it */
     if ((pmem_addr = pmem_map_file(path, MTS_AT_SIZE, PMEM_FILE_CREATE, 
 		    0666, &mapped_len, &is_pmem)) == NULL) {
 	    ts_trace(TS_ERROR, "pmem_map_file\n");
 	    exit(EXIT_FAILURE);
     }
 
-    // Assign mapped pmem_addr
+    /* Assign mapped pmem_addr */
     at_starting_addr = (at_entry_t *)pmem_addr;
 
     if(at_starting_addr == MAP_FAILED) {
@@ -44,36 +44,7 @@ AddressTable::~AddressTable() {}
     next_empty_at_offset = 0;
 
     ts_trace(TS_INFO, "[AT_INIT] id: %d at_starting_addr: %p\n", at_num, at_starting_addr);
-}*/
-
-	AddressTable::AddressTable(const char *path, unsigned int at_num){
-	
-	//allocate memory in DRAM
-	void *mem;
-	int ret;
-
-	void *dram_addr;
-	size_t mapped_len;
-
-	//allocate memory in DRAM using malloc
-	dram_addr = malloc(MTS_AT_SIZE);
-	if (dram_addr == NULL){
-		ts_trace(TS_ERROR, "Failed to allocate memory in DRAM");
-		exit(EXIT_FAILURE);
-	}
-
-    at_starting_addr = (at_entry_t *)dram_addr;
-
-	// Initialize other variables
-	free_at_offset_list = new std::list<uint64_t>;
-	whole_file_written = false;
-
-	at_id = at_num;
-	next_empty_at_offset = false;
-
-	ts_trace(TS_INFO, "[AT_INIT] id: %d at starting_addr: %p\n", at_num, at_starting_addr);
-
-	}
+}
 
 void AddressTable::put_at_entry(at_entry_t *dst, at_entry_t *src) {
     pmem_memcpy((void *)dst, (void *)src, sizeof(*dst), PMEM_F_MEM_NONTEMPORAL);
