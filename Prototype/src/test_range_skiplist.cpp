@@ -1,9 +1,5 @@
-#include "range_skiplist.h"
-
-
-
+#include "skiplist.h"
 // Node class for skip list
-
 
 int main() {
     // Initialize random seed

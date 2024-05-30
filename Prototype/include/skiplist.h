@@ -61,7 +61,6 @@ public:
     }
 
     ~SkipList() {
-
 		for (int i = MAX_LEVEL - 1; i >= 0; i--) {
 			Node* current = header[i];
 			while (current != nullptr) {
@@ -133,6 +132,15 @@ public:
 				current = current->down;
         }
         return (current->next != nullptr && current->next->key == key);
+    }
+
+    // checkpoint the modification into nvram
+    void checkpoint() {
+
+    }
+    // recover dram index from nvram 
+    void recover() {
+
     }
 
     // Print the skip list
