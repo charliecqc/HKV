@@ -81,7 +81,7 @@ public:
     }
 
     // Insert a key into the skip list
-    void insert(int key) {
+    void insert(int key, [[maybe_unused]] int value) {
         Node* current = header[level - 1];
         Node* update[MAX_LEVEL];
 		memset(update, 0, sizeof(Node *)*MAX_LEVEL);
@@ -122,7 +122,7 @@ public:
     }
 
     // Search for a key in the skip list
-    bool search(int key) {
+    bool lookup(int key) {
         Node* current = header[level - 1];
         for (int i = level - 1; i >= 0; i--) {
             while (current->next != nullptr && current->next->key < key) {
@@ -135,11 +135,17 @@ public:
     }
 
     // checkpoint the modification into nvram
-    void checkpoint() {
+    void checkpoint();
+    // recover dram index from nvram 
+    void recover();
+
+    void update(int key, int value)
+    {
 
     }
-    // recover dram index from nvram 
-    void recover() {
+
+    void remove(int key)
+    {
 
     }
 

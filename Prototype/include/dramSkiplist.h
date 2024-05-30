@@ -5,11 +5,9 @@
 #include <limits>
 #include <cstring>
 #include "skiplist.h"
-
-const int MAX_LEVEL = 16;
-
 // SkipList class
 class DramSkiplist: public SkipList {
+public:
     DramSkiplist();
     ~DramSkiplist();
 };

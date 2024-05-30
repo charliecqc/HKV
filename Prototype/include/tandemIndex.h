@@ -10,6 +10,12 @@ class TandemIndex {
 
         ~TandemIndex() {
         }
-    DramSkiplist *mainIndex;
-    PmemSkiplist *shadowIndex;
+        void insert(int key, int value);
+        void remove(int key);
+        void update(int key, int value);
+        void print();
+        int lookup(int key);
+
+        DramSkiplist *mainIndex;
+        PmemSkiplist *shadowIndex;
 };
