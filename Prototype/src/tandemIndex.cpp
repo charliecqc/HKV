@@ -1,4 +1,5 @@
 #include "tandemIndex.h"
+#if 0
 void TandemIndex::insert(int key, int value)
 {
     mainIndex->insert(key, value);
@@ -23,3 +24,4 @@ void TandemIndex::print()
 {
     mainIndex->print();
 }
+#endif

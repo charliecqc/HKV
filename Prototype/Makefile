@@ -2,7 +2,7 @@
 CXX = g++
 
 # Compiler flags
-CXXFLAGS = -Wall -Iinclude
+CXXFLAGS = -Wall -Iinclude -g
 
 # Directories
 SRC_DIR = src
@@ -10,6 +10,33 @@ BUILD_DIR = build
 INCLUDE_DIR = include
 
 # Source files
+SRCS = $(wildcard $(SRC_DIR)/*.cpp)
+# Debug flags
+DEBUG_FLAGS = -g
+# Object files
+OBJS = $(patsubst $(SRC_DIR)/%.cpp, $(BUILD_DIR)/%.o, $(SRCS))
+# Executable name
+TARGET = project
+# Default target
+all: $(TARGET)
+# Linking
+$(TARGET): $(OBJS)
+	$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) -o $@ $^
+
+# Compiling
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) -c -o $@ $<
+
+# Create build directory if it doesn't exist
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+# Clean target
+clean:
+	rm -rf $(BUILD_DIR) $(TARGET)
+
+# Phony targets
+.PHONY: all clean
 SRCS = $(wildcard $(SRC_DIR)/*.cpp)
 
 # Object files
@@ -23,11 +50,11 @@ all: $(TARGET)
 
 # Linking
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpmemobj
 
 # Compiling
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) -c -o $@ $< -lpmemobj
 
 # Create build directory if it doesn't exist
 $(BUILD_DIR):

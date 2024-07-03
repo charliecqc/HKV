@@ -1,42 +1,16 @@
+
 #include <utility>
 #include <iostream>
 #include <cstdlib>
 #include <ctime>
 #include <limits>
 #include <cstring>
-
+#include "node.h"
+#include "nodepool.h"
+#pragma once
 const int MAX_LEVEL = 16;
-class Node {
-public:
-    int key;
-    Node *next;
-    Node *down;
-    Node(int key, Node* next = nullptr, Node* down = nullptr) {
-        this->key = key;
-        this->next = next;
-        this->down = down;
-    }
-};
-
-class Inode : public Node
-{
-public:
-    std::pair<int, int> range;
-    Inode(int key, Node* next = nullptr, Node* down = nullptr) : Node(key, next, down) {
-        this->range = std::make_pair(std::numeric_limits<int>::min(), std::numeric_limits<int>::max());
-    }
-};
-
-class Vnode : public Node
-{
-public:
-    int value;
-    Vnode(int key, int value, Node* next = nullptr, Node* down = nullptr) : Node(key, next, down) {
-        this->value = value;
-    }
-};
-
 // SkipList class
+#if 0
 class SkipList {
 private:
 	Node* header[MAX_LEVEL];
@@ -46,6 +20,7 @@ public:
     SkipList() {
         level = 1;
         //head is the top layer first node
+        Node *pivot = reinterpret_cast<Inode *>(NodePool::pop());
 		Node *pivot = new Inode(std::numeric_limits<int>::min());
 		for(int i = MAX_LEVEL - 1; i > 0; i--) {
 			header[i] = pivot;
@@ -163,3 +138,4 @@ public:
     }
 
 };
+#endif

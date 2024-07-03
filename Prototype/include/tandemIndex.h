@@ -1,5 +1,7 @@
 #include "dramSkiplist.h"
 #include "pmemSkiplist.h"
+#pragma once
+#if 0
 class TandemIndex {
     public:
         TandemIndex() {
@@ -19,3 +21,4 @@ class TandemIndex {
         DramSkiplist *mainIndex;
         PmemSkiplist *shadowIndex;
 };
+#endif

@@ -1,4 +1,4 @@
-#include "tandemIndex.h"
+#include "../include/tandemIndex.h"
 // Node class for skip list
 
 int main() {

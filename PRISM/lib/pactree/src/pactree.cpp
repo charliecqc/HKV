@@ -232,6 +232,7 @@ pactreeImpl *initPT(int numa)
     PMem::bind(0, sl_path, sl_size, (void **)&sl_root, &isCreated);
     if (isCreated == 0)
     {
+        
         printf("Reading Search layer from an existing pactree.\n");
     }
     const char *log_path = "/mnt/pmem0/log";
@@ -354,7 +355,6 @@ ListNode *pactreeImpl::getJumpNode(Key_t &key)
 ListNode *pactreeImpl::getJumpNodewithLock(Key_t &key, void **node)
 {
     SearchLayer &sl = *g_perNumaSlPtr[0];
-    if (sl.isEmpty())
         return dl.getHead();
     auto *jumpNode = reinterpret_cast<ListNode *>(sl.lookupwithLock(key, node));
     if (jumpNode == nullptr)
