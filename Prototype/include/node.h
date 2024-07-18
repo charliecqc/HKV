@@ -9,17 +9,14 @@
 class Node {
 public:
     int id;
-    int key;
     uint32_t next;
     Node() {
         this->id = -1;
-        this->key = 0;
         this->next = 0;
     }
 
-    Node(int id, int key, uint32_t next = 0) {
+    Node(int id, uint32_t next = 0) {
         this->id = id;
-        this->key = key;
         this->next = next;
     }
 
@@ -32,8 +29,12 @@ public:
 class Inode : public Node
 {
 public:
+    int min_key;
+    int max_key
     uint32_t down;
-    Inode(int id, int key, uint32_t next = 0, uint32_t down = 0) : Node(id, key, next) {
+    Inode(int id, int min_key, int max_key, uint32_t next = 0, uint32_t down = 0) : Node(id, next) {
+        this->min_key = min_key; 
+        this->max_key = max_key;
         this->down = down;
     }
 };
