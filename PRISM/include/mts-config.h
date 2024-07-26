@@ -2,7 +2,7 @@
 #define _MTS_CONFIG_H
 #include "arch.h"
 
-#define MTS_THREAD_NUM 32
+#define MTS_THREAD_NUM 8
 #define KV_SIZE 1024UL
 #define SECTOR_SIZE 512UL 
 

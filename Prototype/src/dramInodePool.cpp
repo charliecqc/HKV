@@ -14,7 +14,7 @@ bool DramInodePool::init() {
     void *indexPool = DramManager::getPoolStartAddress(DRAMINDEXPOOL);
     for(int i = 0; i < numNodes; i++) {
         Inode *inode = (Inode *) new (indexPool) Inode(i, 0, 0);
-        dramInodePool.push_back(vnode);
+        dramInodePool.push_back(inode);
         indexPool += nodeSize;
     }
     return true;    

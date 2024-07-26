@@ -29,6 +29,21 @@ bool ValueList::insert(int key, int value)
     return true;
 }
 
+bool ValueList::insert(Vnode *startNode, Vnode *newNode)
+{
+    Vnode *curNode = startNode;
+    Vnode *nextNode = getNext(curNode);
+    while(nextNode != nullptr && nextNode->key < newNode->key) {
+        curNode = nextNode;
+        nextNode = getNext(curNode);
+    }
+    newNode->next = curNode->next;
+    curNode->next = newNode->getId();
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(newNode), sizeof(Vnode));
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
+    return true;
+}
+
 bool ValueList::update(int key, int value)
 {
     Vnode *curNode = head;

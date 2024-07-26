@@ -41,6 +41,10 @@ public:
         return currentIdx;
     }
 
+    bool resetCurrentIdx(int newIdx) {
+        currentIdx = newIdx;
+    }
+
     Vnode* getCurrentNode() {
         return pmemVnodePool[currentIdx];
     }

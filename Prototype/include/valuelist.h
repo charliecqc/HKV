@@ -5,12 +5,13 @@
 #pragma once
 // Value list class on pmem
 class ValueList {
-private:
+public:
     PmemVnodePool *pmemVnodePool;
     Vnode *head;
 public:
     ValueList();
     bool insert(int key, int value);
+    bool insert(Vnode* startNode, Vnode* vnode);
     bool update(int key, int value);
     bool remove(int key);
     int lookup(int key);

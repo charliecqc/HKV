@@ -4,12 +4,13 @@
 #include <ctime>
 #include <limits>
 #include <cstring>
+#include "common.h"
 
 #pragma once
 class Node {
 public:
     int id;
-    uint32_t next;
+    int next;
     Node() {
         this->id = -1;
         this->next = 0;
@@ -29,10 +30,10 @@ public:
 class Inode : public Node
 {
 public:
-    int min_key;
-    int max_key
-    uint32_t down;
-    Inode(int id, int min_key, int max_key, uint32_t next = 0, uint32_t down = 0) : Node(id, next) {
+    Key_t min_key;
+    Key_t max_key;
+    int down;
+    Inode(int id, Key_t min_key, Key_t max_key, int next = 0, int down = 0) : Node(id, next) {
         this->min_key = min_key; 
         this->max_key = max_key;
         this->down = down;
@@ -43,8 +44,10 @@ class Vnode : public Node
 {
 public:
     int value;
-    Vnode(int id, int key, int value, uint32_t next = 0) : Node(id, key, next) {
+    int key;
+    Vnode(int id, int key, int value, int next = 0) : Node(id, next) {
         this->value = value;
+        this->key = key;
     }
 
     int loookup(int key) {

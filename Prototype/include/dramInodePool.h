@@ -38,29 +38,29 @@ public:
         return currentIdx;
     }
 
-    Vnode* getCurrentNode() {
+    Inode* getCurrentNode() {
         return dramInodePool[currentIdx];
     }
 
-    Vnode *getNextNode() {
+    Inode* getNextNode() {
         if (currentIdx >= numNodes) {
             return nullptr;
         }
         return dramInodePool[currentIdx++];
     }
 
-    Vnode * popNode() {
+    Inode* popNode() {
         if (dramInodePool.empty()) {
             return nullptr;
         }
 
         Inode* inode = dramInodePool.back();
         dramInodePool.pop_back();
-        return vnode;
+        return inode;
     }
 
-    void push(Vnode *vnode) {
-        dramInodePool.push_back(vnode);
+    void push(Inode *inode) {
+        dramInodePool.push_back(inode);
     }
 
     Inode * at(size_t index) {
@@ -70,7 +70,7 @@ public:
         return dramInodePool[index];
     }
 
-    bool extend(PMEMobjpool *pop, size_t extendNumNodes);
+    bool extend(void *indexPool, size_t extendNumNodes);
 
     int getPoolSize() {
         return dramInodePool.size();
