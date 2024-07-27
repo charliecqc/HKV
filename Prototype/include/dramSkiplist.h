@@ -14,7 +14,8 @@ public:
     bool insert(Key_t &key, Val_t &val);
     Inode *lookup(Key_t key);
     Inode *getPivotNode(Key_t key);
+    Inode *getHeader();
     bool getPivotNodesForInsert(Key_t key, Inode* updates[]);
-    bool linkVnodeToInode(Vnode *vnode, Inode *inode);
+    bool linkVnodeToInode(Inode *inode, Vnode *vnode);
     int generateRandomLevel();
 };

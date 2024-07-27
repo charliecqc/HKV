@@ -30,7 +30,24 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 //4. insert the new inodes with key and value node id into the main index 
     if (inode == nullptr) {
         Val_t vnode_id = reinterpret_cast<Val_t>(vnode);
-       ret = mainIndex->insert(key, vnode_id);
+        ret = mainIndex->insert(key, vnode_id);
+    }
+}
+
+Val_t TandemIndex::lookup(Key_t key)
+{
+    Inode *inode = mainIndex->lookup(key);
+    if(inode == nullptr) {
+        return -1;
+    }
+    Vnode *vnode = valueList->pmemVnodePool->at(inode->down);
+    while(vnode != nullptr) {
+        if(vnode->key == key) {
+            return vnode->value;
+        } else if(vnode->key > key) {
+            return -1;
+        }
+        vnode = valueList->pmemVnodePool->at(vnode->next);
     }
 }
 
@@ -45,10 +62,7 @@ void TandemIndex::remove(int key)
     mainIndex->remove(key);
 }
 
-int TandemIndex::lookup(int key)
-{
-    return mainIndex->lookup(key);
-}
+
 
 void TandemIndex::print()
 {

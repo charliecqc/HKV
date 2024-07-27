@@ -8,7 +8,7 @@ ValueList::ValueList() {
     head->next = std::numeric_limits<uint32_t>::max();
 }   
 
-bool ValueList::insert(int key, int value)
+bool ValueList::insert(Key_t key, Val_t value)
 {
     Vnode *curNode = head;
     Vnode *newNode = pmemVnodePool->getNextNode();
@@ -44,7 +44,7 @@ bool ValueList::insert(Vnode *startNode, Vnode *newNode)
     return true;
 }
 
-bool ValueList::update(int key, int value)
+bool ValueList::update(Key_t key, Val_t value)
 {
     Vnode *curNode = head;
     while(true) {
@@ -58,7 +58,7 @@ bool ValueList::update(int key, int value)
     return ret;
 }
 
-bool ValueList::remove(int key)
+bool ValueList::remove(Key_t key)
 {
     Vnode *curNode = head;
     while(true) {
@@ -72,7 +72,7 @@ bool ValueList::remove(int key)
     return ret;
 }   
 
-int ValueList::lookup(int key)
+int ValueList::lookup(Key_t key)
 {
     Vnode *curNode = head;
     Vnode *nextNode = getNext(curNode);
@@ -94,7 +94,7 @@ Vnode *ValueList::getNext(Vnode *curNode)
     return pmemVnodePool->at(curNode->next);
 }
 
-int ValueList::getKeyPos(int key)
+int ValueList::getKeyPos(Key_t key)
 {
     Vnode *curNode = head;
     while(true) {

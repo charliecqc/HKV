@@ -43,21 +43,21 @@ public:
 class Vnode : public Node
 {
 public:
-    int value;
-    int key;
-    Vnode(int id, int key, int value, int next = 0) : Node(id, next) {
+    Val_t value;
+    Key_t key;
+    Vnode(int id, Key_t key, Val_t value, int next = 0) : Node(id, next) {
         this->value = value;
         this->key = key;
     }
 
-    int loookup(int key) {
+    int loookup(Key_t key) {
         if(this->key == key) {
             return this->value;
         }
         return -1;
     }
     
-    bool update(int key, int value) {
+    bool update(Key_t key, Val_t value) {
         if(this->key == key) {
             this->value = value;
             return true;
@@ -65,7 +65,7 @@ public:
         return false;
     }
     
-    bool remove(int key) {
+    bool remove(Key_t key) {
         if(this->key == key) {
             this->key = -1;
             this->value = -1;
@@ -74,14 +74,14 @@ public:
         return false;
     }
 
-    int lookup(int key) {
+    int lookup(Key_t key) {
         if(this->key == key) {
             return value;
         }
         return -1;
     }
 
-    int getKeyPos(int key) {
+    int getKeyPos(Key_t key) {
         if(this->key == key) {
             return this->id;
         }

@@ -8,6 +8,9 @@ class TandemIndex {
             //head is the top layer first node
             mainIndex = new DramSkiplist();
             valueList = new ValueList();
+            Inode *index_header = mainIndex->getHeader();
+            Vnode *value_header = valueList->getHeader();
+            mainIndex->linkVnodeToInode(index_header, value_header);     
             //shadowIndex = new PmemSkiplist();
         }
 
@@ -17,7 +20,7 @@ class TandemIndex {
         //void remove(int key);
         //void update(int key, int value);
         //void print();
-        //int lookup(int key);
+        Val_t lookup(Key_t key);
 
         DramSkiplist *mainIndex;
         ValueList *valueList;

@@ -10,12 +10,16 @@ public:
     Vnode *head;
 public:
     ValueList();
-    bool insert(int key, int value);
+    bool insert(Key_t key, Val_t value);
     bool insert(Vnode* startNode, Vnode* vnode);
-    bool update(int key, int value);
-    bool remove(int key);
-    int lookup(int key);
+    bool update(Key_t key, Val_t value);
+    bool remove(Key_t key);
+    int lookup(Key_t key);
     bool recovery();
     Vnode *getNext(Vnode *curNode);
-    int getKeyPos(int key);
+    Vnode* getHeader()
+    {
+        return head;
+    }
+    int getKeyPos(Key_t key);
 };
