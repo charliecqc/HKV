@@ -3,8 +3,8 @@
 ValueList::ValueList() {
     pmemVnodePool = new PmemVnodePool(sizeof(Vnode), 1000);
     head = pmemVnodePool->getNextNode();
-    head->key = std::numeric_limits<int>::min();
-    head->value = std::numeric_limits<int>::min();
+    head->key = std::numeric_limits<Key_t>::min();
+    head->value = std::numeric_limits<Key_t>::min();
     head->next = std::numeric_limits<uint32_t>::max();
 }   
 
