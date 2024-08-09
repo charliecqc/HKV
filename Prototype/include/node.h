@@ -33,10 +33,12 @@ public:
     Key_t min_key;
     Key_t max_key;
     int down;
-    Inode(int id, Key_t min_key, Key_t max_key, int next = 0, int down = 0) : Node(id, next) {
+    int coveredNodes;
+    Inode(int id, Key_t min_key, Key_t max_key, int next = 0, int down = -1) : Node(id, next) {
         this->min_key = min_key; 
         this->max_key = max_key;
         this->down = down;
+        this->coveredNodes = 0;
     }
 };
 

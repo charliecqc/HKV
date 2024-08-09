@@ -42,6 +42,7 @@ int DramSkiplist::generateRandomLevel()
 //Val is the address of vnode, not value itself
 bool DramSkiplist::insert(Key_t &key, Val_t &val)
 {
+    bool ret = false;
     int newlevel = generateRandomLevel();
     Inode* inodes[newlevel];
     Inode* updates[MAX_LEVEL];
@@ -56,7 +57,11 @@ bool DramSkiplist::insert(Key_t &key, Val_t &val)
         inodes[i]->max_key = key;
         inodes[i]->next = std::numeric_limits<uint32_t>::max();
     }
-    inodes[0]->down = reinterpret_cast<Vnode *>(val)->getId();
+    //inodes[0]->down = reinterpret_cast<Vnode *>(val)->getId();
+    ret = linkVnodeToInode(inodes[0], reinterpret_cast<Vnode *>(val));
+    if(ret == false) {
+        return ret;
+    }
     getPivotNodesForInsert(key, updates);
     if(newlevel > level) {
         for(int i = level; i < newlevel; i++) {
@@ -68,20 +73,49 @@ bool DramSkiplist::insert(Key_t &key, Val_t &val)
         Inode *next = dramInodePool->at(updates[newlevel-1]->next);
         inodes[newlevel-1]->next = updates[newlevel-1]->next;
         updates[newlevel-1]->next = inodes[newlevel-1]->getId();
-        if(updates[newlevel-1]->max_key > key) {
-            inodes[newlevel-1]->min_key = updates[newlevel-1]->max_key;
-            updates[newlevel-1]->max_key = key;
-        }else {
-            inodes[newlevel-1]->min_key = key;
-        }
-        if(next->min_key > key) {
-            inodes[newlevel-1]->max_key = next->min_key;
-            next->min_key = key;    
-        }else {
-            inodes[newlevel-1]->max_key = key;
-        }
+        inodes[newlevel-1]->min_key = key;
+        inodes[newlevel-1]->max_key = next->min_key;
         newlevel--;
     }
+    return true;
+}
+
+//updates  will store the previous node of the new inodes
+bool DramSkiplist::insertWhenRebalance(Key_t &key, Val_t &val, Inode* updates[], int count)
+{
+    bool ret = false;
+    int newlevel = generateRandomLevel();
+    //inodes are the newly inserted nodes
+    Inode* inodes[newlevel];
+    inodes[newlevel - 1] = dramInodePool->getNextNode();
+    inodes[newlevel - 1]->min_key = key;
+    inodes[newlevel - 1]->max_key = key;
+    inodes[newlevel - 1]->next = std::numeric_limits<uint32_t>::max();
+    for(int i = newlevel - 2; i >= 0; i--) {
+        inodes[i] = dramInodePool->getNextNode();
+        inodes[i+1]->down = inodes[i]->getId();
+        inodes[i]->min_key = key;
+        inodes[i]->max_key = key;
+        inodes[i]->next = std::numeric_limits<uint32_t>::max();
+    }
+    ret = linkVnodeToInode(inodes[0], reinterpret_cast<Vnode *>(val)); 
+    getPivotNodesForInsert(key, updates);
+    if(newlevel > level) {
+        for(int i = level; i < newlevel; i++) {
+            updates[i] = header[i];
+        }
+        level = newlevel;
+    }
+    while(newlevel > 0) {
+        inodes[newlevel-1]->next = updates[newlevel-1]->next;
+        updates[newlevel-1]->next = inodes[newlevel-1]->getId();
+        updates[newlevel-1]->max_key = key;
+        inodes[newlevel-1]->min_key = key;
+        inodes[newlevel-1]->max_key = updates[newlevel-1]->max_key;
+        newlevel--;
+    }
+    inodes[0]->coveredNodes = updates[0]->coveredNodes - count;
+    updates[0]->coveredNodes = count;
     return true;
 }
 
@@ -133,10 +167,29 @@ Inode* DramSkiplist::getHeader()
 
 bool DramSkiplist::linkVnodeToInode(Inode *inode, Vnode *vnode)
 {
-    if(inode->down != 0) {
+    if(inode->down == -1) {
         inode->down = vnode->getId();
+        inode->coveredNodes++;
         return true;
     }
     // inode already point to the vnode range
     return false;
+}
+
+bool DramSkiplist::increaseCoveredNodesAndVerifyRebalance(Inode *inode)
+{
+    inode->coveredNodes++;
+    if(inode->coveredNodes > SEARCH_STABLITY_COEFFICIENT) {
+        return true;
+    }
+    return false;
+}
+
+//count is the number of covered nodes that will stay in the old inode
+bool DramSkiplist::rebalanceInode(Inode *inode, Key_t key, Val_t node_id, int count)
+{
+    bool ret = false;
+    Inode* updates[MAX_LEVEL];
+    ret = insertWhenRebalance(key, node_id, updates, count); 
+    return ret;
 }

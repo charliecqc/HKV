@@ -14,6 +14,10 @@ int main() {
     skipList.insert(2,2);
     skipList.insert(9,9);
     skipList.insert(5,5);
+    skipList.insert(10,5);
+    skipList.insert(11,5);
+    skipList.insert(12,5);
+
 
     // Print the skip list
     skipList.print();

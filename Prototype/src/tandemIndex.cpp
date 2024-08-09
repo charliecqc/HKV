@@ -25,13 +25,30 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     if(ret == false) {
         //Todo: rollback vnode
         std::cout << "Failed to insert the value in the value list." << std::endl;
-        return false;
+        return ret;
     }
 //4. insert the new inodes with key and value node id into the main index 
     if (inode == nullptr) {
         Val_t vnode_id = reinterpret_cast<Val_t>(vnode);
         ret = mainIndex->insert(key, vnode_id);
+    }else {
+        if(mainIndex->increaseCoveredNodesAndVerifyRebalance(inode)) {
+            //Todo: rebalance the inode
+            bool lastLevelInode = true;
+            if(lastLevelInode) {
+                Vnode* currentNode = valueList->pmemVnodePool->at(inode->down);
+                int count = 1;
+                while(count <= (inode->coveredNodes) / 2) {
+                    currentNode = valueList->pmemVnodePool->at(currentNode->next);
+                    count ++;
+                }
+                Key_t key = currentNode->key;
+                Val_t vnode_id = reinterpret_cast<Val_t>(currentNode);
+                ret = mainIndex->rebalanceInode(inode, key, vnode_id, count);
+            }
+        }
     }
+    return ret;
 }
 
 Val_t TandemIndex::lookup(Key_t key)
