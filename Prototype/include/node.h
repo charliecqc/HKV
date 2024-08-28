@@ -27,6 +27,33 @@ public:
     }
 };
 
+class header{
+    private:
+        int id;
+        int coveredNodes;
+        int level;
+        int next;
+    public:
+        header() {
+            id = -1;
+            coveredNodes = -1;
+            level = -1;
+            next = -1;
+        }
+};
+
+class entry
+{
+private:
+    Key_t key; // 8bytes
+    Val_t value;   // 8bytes
+public:
+    entry() {
+        key = std::numeric_limits<Key_t>::max();
+        value = std::numeric_limits<Val_t>::max();
+    }
+};
+
 class Inode : public Node
 {
 public:

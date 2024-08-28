@@ -16,8 +16,7 @@
 *.dylib
 *.dll
 
-# Fortran module files
-*.mod
+# Fortran module files *.mod
 *.smod
 
 # Compiled Static libraries
@@ -32,6 +31,7 @@
 *.out
 *.app
 worload
+project
 
 # PRISM
 *.out

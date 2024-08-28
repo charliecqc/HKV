@@ -39,7 +39,7 @@ int DramSkiplist::generateRandomLevel()
     return level;
 } 
 
-//Val is the address of vnode, not value itself
+//Val is the address of vnode, not value itself, this insert is used for the first insert or key is the smallest
 bool DramSkiplist::insert(Key_t &key, Val_t &val)
 {
     bool ret = false;
@@ -57,22 +57,16 @@ bool DramSkiplist::insert(Key_t &key, Val_t &val)
         inodes[i]->max_key = key;
         inodes[i]->next = std::numeric_limits<uint32_t>::max();
     }
-    //inodes[0]->down = reinterpret_cast<Vnode *>(val)->getId();
+
     ret = linkVnodeToInode(inodes[0], reinterpret_cast<Vnode *>(val));
     if(ret == false) {
         return ret;
     }
-    getPivotNodesForInsert(key, updates);
-    if(newlevel > level) {
-        for(int i = level; i < newlevel; i++) {
-            updates[i] = header[i];
-        }
-        level = newlevel;
-    }
+
     while(newlevel > 0) {
-        Inode *next = dramInodePool->at(updates[newlevel-1]->next);
-        inodes[newlevel-1]->next = updates[newlevel-1]->next;
-        updates[newlevel-1]->next = inodes[newlevel-1]->getId();
+        Inode *next = dramInodePool->at(header[newlevel-1]->next);
+        inodes[newlevel-1]->next = header[newlevel-1]->next;
+        header[newlevel-1]->next = inodes[newlevel-1]->getId();
         inodes[newlevel-1]->min_key = key;
         inodes[newlevel-1]->max_key = next->min_key;
         newlevel--;
@@ -107,11 +101,20 @@ bool DramSkiplist::insertWhenRebalance(Key_t &key, Val_t &val, Inode* updates[],
         level = newlevel;
     }
     while(newlevel > 0) {
+        // if the updates[newlevel-1] is the header noode
+        if(updates[newlevel-1]->max_key == std::numeric_limits<Key_t>::min()) {
+            Inode *next = dramInodePool->at(updates[newlevel-1]->next);
+            inodes[newlevel-1]->min_key = key;
+            inodes[newlevel-1]->max_key = next->min_key;
+        }else {
+            //[a, b) -> [a, key) [key, b)]
+            inodes[newlevel-1]->max_key = updates[newlevel-1]->max_key;
+            updates[newlevel-1]->max_key = key;
+            inodes[newlevel-1]->min_key = key;
+            
+        }
         inodes[newlevel-1]->next = updates[newlevel-1]->next;
         updates[newlevel-1]->next = inodes[newlevel-1]->getId();
-        updates[newlevel-1]->max_key = key;
-        inodes[newlevel-1]->min_key = key;
-        inodes[newlevel-1]->max_key = updates[newlevel-1]->max_key;
         newlevel--;
     }
     inodes[0]->coveredNodes = updates[0]->coveredNodes - count;
@@ -150,8 +153,13 @@ Inode* DramSkiplist::lookup(Key_t key)
     int currentHighestLevelIndex = level - 1;
     Inode* current = header[currentHighestLevelIndex];
     for(int i = currentHighestLevelIndex; i >= 0; i--) {
+        Inode* prev = nullptr;
         while(current->next != tail[i]->getId() && key > current->max_key) {
+            prev = current;
             current = dramInodePool->at(current->next);
+        }
+        if(key < current->min_key && prev != nullptr) {
+                current = prev;
         }
         if(i != 0) {
             current = dramInodePool->at(current->down);
