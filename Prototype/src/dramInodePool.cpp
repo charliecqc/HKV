@@ -15,7 +15,7 @@ bool DramInodePool::init() {
     for(int i = 0; i < numNodes; i++) {
         Inode *inode = (Inode *) new (indexPool) Inode(i, 0, 0);
         dramInodePool.push_back(inode);
-        indexPool += nodeSize;
+        indexPool = static_cast<char *>(indexPool) + nodeSize;
     }
     return true;    
 }
@@ -25,11 +25,11 @@ bool DramInodePool::extend(void *indexPool, size_t extendNumNodes) {
         std::cout << "Exceeding the maximum number of nodes" << std::endl;
         exit(-1);
     }
-    void *currentPoolAddr = indexPool + this->numNodes * nodeSize;
+    void *currentPoolAddr = static_cast<char *>(indexPool) + this->numNodes * nodeSize;
     for (size_t i = this->numNodes; i < extendNumNodes; ++i) {
         Inode *inode = (Inode *) new (currentPoolAddr) Inode(i, 0, 0);
         dramInodePool.push_back(inode);
-        currentPoolAddr += nodeSize;
+        currentPoolAddr = static_cast<char *>(currentPoolAddr) + nodeSize;
     }
     return true;
 }

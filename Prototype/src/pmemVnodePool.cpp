@@ -18,9 +18,9 @@ bool PmemVnodePool::init(root_obj *root) {
     }
     void *vnodePool = pmemobj_direct(root->ptr[0]);
     for(int i = 0; i < numNodes; i++) {
-        Vnode *vnode = (Vnode *) new (vnodePool) Vnode(i, 0, 0);
+        Vnode *vnode = (Vnode *) new (vnodePool) Vnode(i);
         pmemVnodePool.push_back(vnode);
-        vnodePool += nodeSize;
+        vnodePool = static_cast<char *>(vnodePool) + nodeSize;
     }
     PmemManager::flushToNVM(0, (char *)vnodePool, nodeSize * numNodes);
     return true;    
@@ -34,11 +34,11 @@ bool PmemVnodePool::extend(PMEMobjpool *pop, size_t extendNumNodes) {
     PMEMoid root = pmemobj_root(pop, sizeof(PMEMoid));
     root_obj *rootObj = (root_obj *)pmemobj_direct(root);
     void *vnodePool = pmemobj_direct(rootObj->ptr[0]);
-    void *currentPoolAddr = vnodePool + this->numNodes * nodeSize;
+    void *currentPoolAddr = static_cast<char *>(vnodePool) + this->numNodes * nodeSize;
     for (size_t i = this->numNodes; i < extendNumNodes; ++i) {
-        Vnode *vnode = (Vnode *) new (currentPoolAddr) Vnode(i, 0, 0);
+        Vnode *vnode = (Vnode *) new (currentPoolAddr) Vnode(i);
         pmemVnodePool.push_back(vnode);
-        currentPoolAddr += nodeSize;
+        currentPoolAddr = static_cast<char *>(currentPoolAddr) + nodeSize;
     }
     return true;
 }

@@ -10,7 +10,7 @@ class TandemIndex {
             valueList = new ValueList();
             Inode *index_header = mainIndex->getHeader();
             Vnode *value_header = valueList->getHeader();
-            mainIndex->linkVnodeToInode(index_header, value_header);     
+            index_header->gps[0].value = value_header->getId();
             //shadowIndex = new PmemSkiplist();
         }
 
@@ -20,7 +20,9 @@ class TandemIndex {
         //void remove(int key);
         //void update(int key, int value);
         //void print();
+        Vnode *getVnodeForNewGP(Inode &inode);
         Val_t lookup(Key_t key);
+        
 
         DramSkiplist *mainIndex;
         ValueList *valueList;

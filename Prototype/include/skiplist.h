@@ -8,7 +8,7 @@
 #include "node.h"
 #include "nodepool.h"
 #pragma once
-const int MAX_LEVEL = 16;
+
 // SkipList class
 #if 0
 class SkipList {

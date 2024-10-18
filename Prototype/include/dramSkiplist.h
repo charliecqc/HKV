@@ -13,14 +13,20 @@ public:
     DramSkiplist();
     ~DramSkiplist();
     bool insert(Key_t &key, Val_t &val);
+    bool insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel);
     bool insertWhenRebalance(Key_t &key, Val_t &val, Inode* updates[], int count);
-    Inode *lookup(Key_t key);
-    Inode *getPivotNode(Key_t key);
+    // return the index in gps of the index node that poionts to the vnode
+    Inode *lookup(Key_t key, int &idx);
     Inode *getHeader();
     bool getPivotNodesForInsert(Key_t key, Inode* updates[]);
-    bool linkVnodeToInode(Inode *inode, Vnode *vnode);
-    bool increaseCoveredNodesAndVerifyRebalance(Inode* inode);
+    bool linkVnodeToInode(Inode &inode, int idx, Vnode &vnode);
+    bool increaseCoveredNodesAndVerifyRebalance(Inode &inode, bool &activeNewGP);
+    bool checkForActivateGP(Inode &inode);
+    bool checkForRebalance(Inode &inode, bool &activeNewGP);
     bool rebalanceInode(Inode *inode, bool lastLevel);
     bool rebalanceInode(Inode *inode, Key_t key, Val_t node_id, int count);
     int generateRandomLevel();
+    void initInodes(Inode* inodes[], int newlevel, Key_t key);
+    bool rebalanceInode(Inode &inode);
+    bool activateGP(Inode &inode);
 };

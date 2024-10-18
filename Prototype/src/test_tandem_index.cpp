@@ -25,6 +25,7 @@ int main() {
     std::cout << "Lookup 7: " << list.lookup(7) << std::endl;
     std::cout << "Lookup 8: " << list.lookup(8) << std::endl;
     std::cout << "Lookup 9: " << list.lookup(9) << std::endl;
+    std::cout << "Lookup 33: " << list.lookup(33) << std::endl;
      // Delete nodes
     //list.remove(10);
     //list.remove(20);
