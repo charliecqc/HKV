@@ -145,12 +145,6 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
     Inode* current = header[currentHighestLevelIndex];
     for(int i = currentHighestLevelIndex; i >= 0; i--) {
         // no real index nodes between header and tail
-        if(current->isHeader() && current->hdr.next == tail[i]->getId()) {
-            if(i != 0) {
-                current = dramInodePool->at(current->gps[0].value);
-                continue;
-            }
-        }
         Inode* prev = nullptr;
         //search among the nodes in the current level
         while(current->hdr.next != tail[i]->getId() && key > current->gps[current->hdr.last_index].key) {
@@ -162,8 +156,13 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
         }
             //search inside the node, by pass header
         if(current->isHeader()) {
-            idx = -1;
-            return nullptr;
+            if(i != 0) {
+                current = dramInodePool->at(current->gps[0].value);
+                continue;
+            } else {
+                idx = -1;
+                return nullptr;
+            }
         }
         Val_t index = 0;
         for(int j = 0; j <= current->hdr.last_index; j++) {
@@ -273,15 +272,16 @@ void DramSkiplist::initInodes(Inode* inodes[], int newlevel, Key_t key)
     }
 }
 
-bool DramSkiplist::rebalanceInode(Inode &inode)
+bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
 {
     bool ret = false;
     Inode* updates[MAX_LEVEL];
     int newlevel = generateRandomLevel();
     Inode *newInodes[newlevel];
-    initInodes(newInodes, newlevel, inode.gps[inode.hdr.last_index].key);
+    Key_t targetKey = targetVnode.getMinKey();
+    initInodes(newInodes, newlevel, targetKey);
     // updates stores the previous node of the new inodes;
-    getPivotNodesForInsert(inode.gps[inode.hdr.last_index].key, updates);
+    getPivotNodesForInsert(targetKey, updates);
     if(newlevel > level) { // for the case when the new level is higher than the current level
         for(int i = level; i < newlevel; i++) {
             updates[i] = header[i];
@@ -291,16 +291,19 @@ bool DramSkiplist::rebalanceInode(Inode &inode)
     while(newlevel > 0) {
         Inode *current_update = updates[newlevel-1];
         Inode *current = newInodes[newlevel-1];
-        if(current_update->gps[current_update->hdr.last_index].key == std::numeric_limits<Key_t>::min()) {
+        if(targetKey > current_update->gps[current_update->hdr.last_index].key) {
             Inode *next = dramInodePool->at(current_update->hdr.next);
-            current->gps[current->hdr.last_index].key = inode.gps[inode.hdr.last_index].key;
-            current->hdr.last_index++;
-            current->gps[current->hdr.last_index].key = next->gps[0].key;
-        }else {
+            current->gps[current->hdr.last_index].key = targetKey;
+            current->gps[current->hdr.last_index].value = targetVnode.getId();
+        }else if(targetKey >= current_update->gps[0].key && targetKey < current_update->gps[current_update->hdr.last_index].key) {
             //[a, b) -> [a, key) [key, b)]
+            //Todo: need move half of the contents from current_update to current
             current->gps[current->hdr.last_index].key = current_update->gps[current_update->hdr.last_index].key;
+            current->gps[current->hdr.last_index].value = current_update->gps[current_update->hdr.last_index].value;
             current_update->gps[current_update->hdr.last_index].key = inode.gps[inode.hdr.last_index].key;
+            current_update->gps[current_update->hdr.last_index].value = inode.gps[inode.hdr.last_index].value;
             current->gps[0].key = inode.gps[inode.hdr.last_index].key;
+            current->gps[0].value = inode.gps[inode.hdr.last_index].value;
         }
         current->hdr.next = current_update->hdr.next;
         current_update->hdr.next = current->getId();

@@ -192,6 +192,19 @@ public:
         return maxKey;
     }
 
+    Key_t getMinKey() {
+        Key_t minKey = std::numeric_limits<Key_t>::max();
+        for(int i = fanout - 1; i >= 0; i--) {
+            if(records[i].key == std::numeric_limits<Key_t>::max()) {
+                continue;
+            }
+            if(records[i].key <= minKey) {
+                minKey = records[i].key;
+            }
+        }
+        return minKey;
+    }
+
 //Todo: Implement insert with finger print and bloom filter
 //find the first empty slot and insert the key and value
     bool insert(Key_t key, Val_t value) {

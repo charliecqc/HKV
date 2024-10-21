@@ -9,6 +9,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     bool ret = false;
     bool needToRebalance = false;
     Inode *inode = mainIndex->lookup(key, idx);
+    Vnode *targetVnode = nullptr; // new vnode to be inserted
     if(inode != nullptr) {
         Vnode *valueNode = valueList->pmemVnodePool->at(inode->gps[idx].value);
         while(valueNode->hdr.next != -1 && key > valueNode->getMaxKey()) {
@@ -21,13 +22,13 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         }
         else {
             // need to allocate a new value node
-            Vnode *vnode = valueList->pmemVnodePool->getNextNode();
-            if(vnode == nullptr) {
+            targetVnode = valueList->pmemVnodePool->getNextNode();
+            if(targetVnode == nullptr) {
                 std::cout << "Failed to get a new node from the pool." << std::endl;
                 return false;
             }
             // insert the key and value into new vnode
-            ret = vnode->insert(key, value);
+            ret = targetVnode->insert(key, value);
             if(ret == false) {
                 std::cout << "Failed to insert the key and value into the vnode." << std::endl;
                 return ret;
@@ -35,7 +36,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             //insert the vnode into the value list
             //startNode: the start of the range that vnode should be inserted
             Vnode *startNode = valueList->pmemVnodePool->at(inode->gps[idx].value);
-            ret = valueList->insert(startNode, vnode);
+            ret = valueList->insert(startNode, targetVnode);
             if(ret == false) {
                 //Todo: rollback vnode
                 std::cout << "Failed to insert the value in the value list." << std::endl;
@@ -46,12 +47,12 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             if(inode->checkForActivateGP()) {
                 if(inode->activateGP()) {
                     //Vnode *vnode = getVnodeForNewGP(*inode);
-                    ret = mainIndex->linkVnodeToInode(*inode, inode->hdr.last_index, *vnode);
+                    ret = mainIndex->linkVnodeToInode(*inode, inode->hdr.last_index, *targetVnode);
                     if(!ret) {
                         std::cout << "Failed to link the vnode to the inode." << std::endl;
                         return ret;
                     }
-                    inode->gps[inode->hdr.last_index].key = vnode->getMaxKey();
+                    inode->gps[inode->hdr.last_index].key = targetVnode->getMaxKey();
                 }else {
                     //TODO: rebalance the inode
                     //inode has no empty gp slots, need to split the inode
@@ -66,25 +67,25 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     }else {
         // case of no inode is found
         //in the case that eitehr key is smaller than the min key of first inode or current value node is full
-        Vnode *vnode = valueList->pmemVnodePool->getNextNode();
-        if(vnode == nullptr) {
+        targetVnode = valueList->pmemVnodePool->getNextNode();
+        if(targetVnode == nullptr) {
             std::cout << "Failed to get a new node from the pool." << std::endl;
             return false;
         }
-        ret = vnode->insert(key, value);
+        ret = targetVnode->insert(key, value);
         if(ret == false) {
             std::cout << "Failed to insert the key and value into the vnode." << std::endl;
             return ret;
         }
         // startNode is the first node of the value list
         Vnode *startNode = valueList->getHeader();
-        ret = valueList->insert(startNode, vnode);
+        ret = valueList->insert(startNode, targetVnode);
         if(ret == false) {
             //Todo: rollback vnode
             std::cout << "Failed to insert the value in the value list." << std::endl;
             return ret;
         }
-        Val_t vnodeVal = reinterpret_cast<Val_t>(vnode);
+        Val_t vnodeVal = reinterpret_cast<Val_t>(targetVnode);
         int newLevel = mainIndex->generateRandomLevel();
         Inode *inodes[newLevel];
         ret = mainIndex->insert(key, vnodeVal, inodes, newLevel);
@@ -95,7 +96,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     }
 //4. rebalance the main index, if necessary
     if(needToRebalance && inode) {
-        ret = mainIndex->rebalanceInode(*inode);    
+        ret = mainIndex->rebalanceInode(*inode, *targetVnode);    
     }
     return ret;
 }

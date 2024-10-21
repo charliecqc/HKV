@@ -3,14 +3,14 @@
 int main() {
     TandemIndex list;
   //  for(Key_t i = 0; i < std::numeric_limits<Key_t>::max(); i++) {
-    for(Key_t i = 1; i < 1000; i++) {
+    for(Key_t i = 1; i < 3000; i++) {
         list.insert(i, i);
         if(list.lookup(i) != i) {
             std::cout << "Failed to insert " << i << std::endl;
             assert(false);
         }
         if(list.lookup(1) != 1) {
-            std::cout << "Failed to check 1 " << i << std::endl;
+            std::cout << "Failed to check 1" << i << std::endl;
             assert(false);
         }
     }

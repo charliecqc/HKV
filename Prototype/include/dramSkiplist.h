@@ -28,5 +28,6 @@ public:
     int generateRandomLevel();
     void initInodes(Inode* inodes[], int newlevel, Key_t key);
     bool rebalanceInode(Inode &inode);
+    bool rebalanceInode(Inode &inode, Vnode &vnode);
     bool activateGP(Inode &inode);
 };
