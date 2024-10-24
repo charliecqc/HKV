@@ -18,7 +18,7 @@ public:
     // return the index in gps of the index node that poionts to the vnode
     Inode *lookup(Key_t key, int &idx);
     Inode *getHeader();
-    bool getPivotNodesForInsert(Key_t key, Inode* updates[]);
+    void getPivotNodesForInsert(Key_t key, Inode* updates[]);
     bool linkVnodeToInode(Inode &inode, int idx, Vnode &vnode);
     bool increaseCoveredNodesAndVerifyRebalance(Inode &inode, bool &activeNewGP);
     bool checkForActivateGP(Inode &inode);

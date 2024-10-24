@@ -116,27 +116,44 @@ bool DramSkiplist::insertWhenRebalance(Key_t &key, Val_t &val, Inode* updates[],
     return ret;
 }
 
-bool DramSkiplist::getPivotNodesForInsert(Key_t key, Inode* updates[])
+void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode* updates[])
 {
     int currentHighestLevelIndex = level - 1;
     Inode *current = header[currentHighestLevelIndex];
     for(int i = currentHighestLevelIndex; i >= 0; i--) {
+        Inode *prev = nullptr;
         while(current->hdr.next != tail[i]->getId() && key > current->gps[current->hdr.last_index].key) {
             current = dramInodePool->at(current->hdr.next);
-        }
-        updates[i] = current;
-        Val_t index = 0;
-        for(int j = 0; j <= current->hdr.last_index; j++) {
-            if(key >= current->gps[j].key && key < current->gps[j+1].key) {
-                index = current->gps[j].value;
+            if(key < current->gps[0].key && prev != nullptr) {
+                current = prev;
                 break;
             }
+        }
+        updates[i] = current;
+        if(current->isHeader()) {
             if(i != 0) {
-                current = dramInodePool->at(current->gps[index].value);
+                current = dramInodePool->at(current->gps[0].value);
+                continue;
             }
         }
+        Val_t index = 0;
+        for(int j = 0; j <= current->hdr.last_index; j++) {
+            if(key >= current->gps[j].key) {
+                if(j + 1 <= current->hdr.last_index) {
+                    if(key < current->gps[j+1].key) {
+                        index = j;
+                        break;
+                    }
+                } else {
+                    index = j;
+                    break;
+                }
+            }
+        }
+        if(i != 0) {
+            current = dramInodePool->at(current->gps[index].value);
+        }
     }
-    return true;
  }
 
 Inode* DramSkiplist::lookup(Key_t key, int &idx)
@@ -150,12 +167,12 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
         while(current->hdr.next != tail[i]->getId() && key > current->gps[current->hdr.last_index].key) {
             prev = current;
             current = dramInodePool->at(current->hdr.next);
-        }
-        if(key < current->gps[0].key && prev != nullptr) {
+            if(key < current->gps[0].key && prev != nullptr) {
                 current = prev;
+                break;
+            }
         }
-            //search inside the node, by pass header
-        if(current->isHeader()) {
+        if(current->isHeader()) { // if the current node is the header node, only happens when the key is the smallest
             if(i != 0) {
                 current = dramInodePool->at(current->gps[0].value);
                 continue;
@@ -164,17 +181,24 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
                 return nullptr;
             }
         }
-        Val_t index = 0;
         for(int j = 0; j <= current->hdr.last_index; j++) {
-            if(key <= current->gps[j].key) {
-                index = current->gps[j].value;
-                break;
-            }
-            if(i != 0) {
-                current = dramInodePool->at(current->gps[index].value);
+            if(key >= current->gps[j].key) {
+                if(j + 1 <= current->hdr.last_index) {
+                    if(key < current->gps[j+1].key) {
+                        idx = j;
+                        break;
+                    }
+                } else {
+                    idx = j;
+                    break;
+                }
             }
         }
+        if(i != 0) {
+            current = dramInodePool->at(current->gps[idx].value);
+        }
     }
+#if 0
     //search inside the node in the last level
     for(int j = 0; j <= current->hdr.last_index; j++) {
         if(key >= current->gps[j].key && key < current->gps[j+1].key) {
@@ -182,8 +206,8 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
             return current;
         }
     }
-    idx = -1;
-    return nullptr;
+#endif
+    return current;
 }
 
 #if 0
@@ -294,7 +318,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
         if(targetKey > current_update->gps[current_update->hdr.last_index].key) {
             Inode *next = dramInodePool->at(current_update->hdr.next);
             current->gps[current->hdr.last_index].key = targetKey;
-            current->gps[current->hdr.last_index].value = targetVnode.getId();
+            
         }else if(targetKey >= current_update->gps[0].key && targetKey < current_update->gps[current_update->hdr.last_index].key) {
             //[a, b) -> [a, key) [key, b)]
             //Todo: need move half of the contents from current_update to current
@@ -307,6 +331,9 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
         }
         current->hdr.next = current_update->hdr.next;
         current_update->hdr.next = current->getId();
+        if(newlevel == 1) {
+            current->gps[current->hdr.last_index].value = targetVnode.getId();
+        }
         newlevel--;
     }
     return ret;
