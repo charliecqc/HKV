@@ -20,7 +20,6 @@ class TandemIndex {
         //void remove(int key);
         //void update(int key, int value);
         //void print();
-        Vnode *getVnodeForNewGP(Inode &inode);
         Val_t lookup(Key_t key);
         
 

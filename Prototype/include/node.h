@@ -261,7 +261,6 @@ public:
     }
 
     Key_t getMidKey() {
-        Key_t midKey = std::numeric_limits<Key_t>::max();
         std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> pq;
         std::unordered_set<Key_t> keySet;
         for(int i = fanout - 1; i >= 0; i--) {

@@ -12,9 +12,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     Vnode *targetVnode = nullptr; // new vnode to be inserted
     if(inode != nullptr) {
         Vnode *valueNode = valueList->pmemVnodePool->at(inode->gps[idx].value);
-        Vnode *preValueNode = nullptr;
         while(valueNode->hdr.next != -1 && key > valueNode->getMaxKey() && valueNode->isFull()) {
-            preValueNode = valueNode;
             valueNode = valueList->pmemVnodePool->at(valueNode->hdr.next);
         }
         ret = valueNode->insert(key, value);
@@ -119,15 +117,17 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         }
         inodes[0]->hdr.coveredNodes++;
         inode = inodes[0];
-        int id = inode->getId();
     #ifdef DBG
+        int id = inode->getId();
         cout << "inserted inode " << id <<endl;
     #endif
     }
 //4. rebalance the main index, if necessary
     if(needToRebalance && inode) {
+#ifdef DBG
         int id = inode->getId();    
         cout << "Need to rebalance the inode " << id << " with key " << targetVnode->getMaxKey() << endl;
+#endif
         ret = mainIndex->rebalanceInode(*inode, *targetVnode);    
     }
     return ret;
@@ -150,21 +150,6 @@ Val_t TandemIndex::lookup(Key_t key)
         return value;
     }
     return -1;
-}
-
-Vnode *TandemIndex::getVnodeForNewGP(Inode &inode)
-{
-    int preIndex = inode.hdr.last_index - 1;
-    int curIndex = inode.hdr.last_index;
-    Vnode *preVnode = valueList->pmemVnodePool->at(inode.gps[preIndex].value);
-    Vnode *curVnode = valueList->pmemVnodePool->at(inode.gps[curIndex].value);
-    int count =  SEARCH_STABLITY_COEFFICIENT / 2;
-    Vnode *nextVnode = preVnode;
-    while(count > 0) {
-        nextVnode = valueList->pmemVnodePool->at(nextVnode->hdr.next);
-        count--;
-    }
-    return nextVnode;
 }
 
 #if 0
