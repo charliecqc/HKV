@@ -32,17 +32,17 @@ bool ValueList::insert(Key_t key, Val_t value)
     return false;
 }
 
-bool ValueList::insert(Vnode *startNode, Vnode *newNode)
+bool ValueList::insert(Vnode *startNode, Vnode *targetNode)
 {
     Vnode *curNode = startNode;
     Vnode *nextNode = getNext(curNode);
-    while(nextNode != nullptr && nextNode->getMaxKey() < newNode->records[0].key) {
+    while(nextNode != nullptr && nextNode->getMaxKey() < targetNode->records[0].key) {
         curNode = nextNode;
         nextNode = getNext(curNode);
     }
-    newNode->hdr.next = curNode->hdr.next;
-    curNode->hdr.next = newNode->getId();
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(newNode), sizeof(Vnode));
+    targetNode->hdr.next = curNode->hdr.next;
+    curNode->hdr.next = targetNode->getId();
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(targetNode), sizeof(Vnode));
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
     return true;
 }

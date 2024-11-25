@@ -4,7 +4,10 @@
 #include <ctime>
 #include <limits>
 #include <cstring>
+#include <vector>
+#include <queue>
 #include <atomic>
+#include <unordered_set>
 #include "common.h"
 
 #pragma once
@@ -44,6 +47,7 @@ class header{
             coveredNodes = 0;
             level = 0;
             next = 0;
+            last_index = -1;
         }
     friend class Inode;
 };
@@ -54,13 +58,11 @@ class vnodeHeader{
         uint32_t next; //4 bytes 
         // used to keep track of the keys are valid or not in the vnode
         uint32_t bitmap; // 4 bytes
-        std::atomic<uint32_t> count; // 4 bytes
 
         vnodeHeader() {
             id = 0;
             next = 0;
             bitmap = 0;
-            count = 0;
         }
     public:
         void setBit(int pos) {
@@ -131,14 +133,22 @@ public:
         return (hdr.id >= MAX_LEVEL && hdr.id <= 2 * MAX_LEVEL - 1)? true : false;
     }
 
-    bool activateGP()
+    bool isFull()
     {
+        return hdr.last_index == fanout/2 - 1;
+    }
+
+    bool activateGP(Key_t targetKey, int &pos)
+    {
+        //check if there is enough space to insert the new GP
         int16_t cur_index = this->hdr.last_index;  
-        cur_index = cur_index + 1;
-        if(cur_index >= fanout/2) {
+        if(cur_index + 1>= fanout/2) {
             return false;
         }else {
-            this->hdr.last_index = cur_index;
+            pos = this->findInsertKeyPos(targetKey);
+            if(pos <= hdr.last_index) 
+                this->shift(pos); // shift the contents
+            this->hdr.last_index = cur_index + 1;
             return true;
         }
     }
@@ -150,6 +160,51 @@ public:
         }
         return false;
     }
+
+    int findInsertKeyPos(Key_t key)
+    {
+        int idx = 0;
+        for(int i = 0; i <= this->hdr.last_index; i++) {
+            if(key >= this->gps[i].key) {
+                if(i + 1 <= this->hdr.last_index) {
+                    if(key < this->gps[i+1].key) {
+                        idx = i + 1;
+                        break;
+                    }
+                } else {
+                    idx = i+1;
+                    break;
+                }
+            }
+        }
+        return idx;
+    }
+
+    bool shift(int oldIdx) { // shift data from oldIdx to newIdx
+        memmove(&gps[oldIdx+1], &gps[oldIdx], sizeof(entry) * (hdr.last_index - oldIdx + 1));
+        return true;
+    }
+
+    Key_t getMaxKey() {
+        return gps[hdr.last_index].key;
+    }
+
+    Key_t getMinKey() {
+        return gps[0].key;
+    }
+
+    Key_t getMidKey() {
+        return gps[hdr.last_index / 2].key;
+    }
+
+    bool split(Inode *targetInode) {
+        memmove(targetInode->gps, &gps[hdr.last_index / 2], sizeof(entry) * (hdr.last_index / 2 + 1));
+        int temp_index = hdr.last_index;
+        hdr.last_index = hdr.last_index / 2 - 1;
+        targetInode->hdr.last_index = temp_index / 2;
+        return true;
+    }
+
 };
 
 class Vnode
@@ -182,7 +237,7 @@ public:
         //Todo:: use figer print to get the max key
         Key_t maxKey = std::numeric_limits<Key_t>::min();
         for(int i = fanout - 1; i >= 0; i--) {
-            if(records[i].key == std::numeric_limits<Key_t>::max()) {
+            if(hdr.isBitSet(i) == false) {
                 continue;
             }
             if(records[i].key >= maxKey) {
@@ -195,7 +250,7 @@ public:
     Key_t getMinKey() {
         Key_t minKey = std::numeric_limits<Key_t>::max();
         for(int i = fanout - 1; i >= 0; i--) {
-            if(records[i].key == std::numeric_limits<Key_t>::max()) {
+            if(hdr.isBitSet(i) == false) {
                 continue;
             }
             if(records[i].key <= minKey) {
@@ -205,16 +260,49 @@ public:
         return minKey;
     }
 
+    Key_t getMidKey() {
+        Key_t midKey = std::numeric_limits<Key_t>::max();
+        std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> pq;
+        std::unordered_set<Key_t> keySet;
+        for(int i = fanout - 1; i >= 0; i--) {
+            if(records[i].key == std::numeric_limits<Key_t>::max()) {
+                continue;
+            }
+            if (keySet.find(records[i].key) != keySet.end()) {
+                continue;
+            }
+            keySet.insert(records[i].key);
+        }
+        int size = keySet.size();
+        for (const Key_t& key : keySet) {
+            pq.push(key);
+            if(pq.size() > size / 2 + 1) {
+                pq.pop();
+            }
+        }
+        return pq.top();
+    }
+
+    bool split(Vnode *targetVnode) {
+        Key_t midKey = getMidKey();
+        for(int i = 0; i < fanout; i++) {
+           if(records[i].key > midKey) {
+                targetVnode->insert(records[i].key, records[i].value);
+                hdr.unsetBit(i);
+           }
+        }
+        return true;
+    }
+
 //Todo: Implement insert with finger print and bloom filter
 //find the first empty slot and insert the key and value
     bool insert(Key_t key, Val_t value) {
-        for(int i = fanout - 1; i >= 0; i--) {
-            if(records[i].key == std::numeric_limits<Key_t>::max()) {
-                records[i].key = key;
-                records[i].value = value;
-                hdr.setBit(i);
-                return true;
-            }
+        int pos = __builtin_ffs(~hdr.bitmap) - 1;
+        if (pos >= 0 && pos < fanout) {
+            records[pos].key = key;
+            records[pos].value = value;
+            hdr.setBit(pos);
+            return true;
         }
         return false;
     }
@@ -235,5 +323,10 @@ public:
     int getId()
     {
         return this->hdr.id;
+    }
+    
+    bool isFull()
+    {
+        return hdr.bitmap == (1 << fanout) - 1;
     }
 };

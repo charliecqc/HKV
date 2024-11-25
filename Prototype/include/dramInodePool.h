@@ -6,6 +6,7 @@
 #include <vector>
 #include "dramManager.h"
 #include "node.h"
+#include "common.h"
 #pragma once
 
 #define LAYOUT_NAME "value_pool"
@@ -46,7 +47,15 @@ public:
         if (currentIdx >= numNodes) {
             return nullptr;
         }
-        return dramInodePool[currentIdx++];
+        Inode *node = dramInodePool[currentIdx];
+        currentIdx++;
+#ifdef DBG
+        int id = node->getId();
+        if (id == 42)
+            cout << "this is node 42" << endl;
+        cout << "allocate inode : " << id << endl;
+#endif
+        return node;
     }
 
     Inode* popNode() {

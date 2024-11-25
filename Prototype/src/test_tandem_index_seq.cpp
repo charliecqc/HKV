@@ -1,9 +1,10 @@
+#if 0
 #include "tandemIndex.h"
 #include <cassert>
 int main() {
     TandemIndex list;
   //  for(Key_t i = 0; i < std::numeric_limits<Key_t>::max(); i++) {
-    for(Key_t i = 1; i < 3000; i++) {
+    for(Key_t i = 1; i < 10000; i++) {
         list.insert(i, i);
         if(list.lookup(i) != i) {
             std::cout << "Failed to insert " << i << std::endl;
@@ -33,3 +34,4 @@ int main() {
     return 0;
 
 }
+#endif

@@ -12,7 +12,9 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     Vnode *targetVnode = nullptr; // new vnode to be inserted
     if(inode != nullptr) {
         Vnode *valueNode = valueList->pmemVnodePool->at(inode->gps[idx].value);
-        while(valueNode->hdr.next != -1 && key > valueNode->getMaxKey()) {
+        Vnode *preValueNode = nullptr;
+        while(valueNode->hdr.next != -1 && key > valueNode->getMaxKey() && valueNode->isFull()) {
+            preValueNode = valueNode;
             valueNode = valueList->pmemVnodePool->at(valueNode->hdr.next);
         }
         ret = valueNode->insert(key, value);
@@ -27,11 +29,33 @@ bool TandemIndex::insert(Key_t key, Val_t value)
                 std::cout << "Failed to get a new node from the pool." << std::endl;
                 return false;
             }
-            // insert the key and value into new vnode
-            ret = targetVnode->insert(key, value);
-            if(ret == false) {
-                std::cout << "Failed to insert the key and value into the vnode." << std::endl;
-                return ret;
+            if(key < valueNode->getMaxKey()) {
+                //key is smaller than the max key of the current value node
+                //need to split the value node
+                ret = valueNode->split(targetVnode);
+                if(ret == false) {
+                    std::cout << "Failed to split the value node." << std::endl;
+           
+                }
+                if(key <= valueNode->getMaxKey()) { // key is smaller than the max key of the previous value node after split
+                    ret = valueNode->insert(key, value);
+                    if(ret == false) {
+                        std::cout << "Failed to insert the key and value into the vnode after split. key: " << key << std::endl;
+                        return ret;
+                    }
+                }else {
+                    ret = targetVnode->insert(key, value);
+                    if(ret == false) {
+                        std::cout << "Failed to insert the key and value into the vnode." << std::endl;
+                        return ret;
+                    }
+                }
+            }else {
+                ret = targetVnode->insert(key, value); // insert the key and value into new vnode
+                if(ret == false) {
+                    std::cout << "Failed to insert the key and value into the vnode. Key: " << key << std::endl;
+                    return ret;
+                }
             }
             //insert the vnode into the value list
             //startNode: the start of the range that vnode should be inserted
@@ -45,14 +69,15 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             //incease the covered nodes of the inode due to newly added vnodes
             inode->hdr.coveredNodes++;
             if(inode->checkForActivateGP()) {
-                if(inode->activateGP()) {
-                    //Vnode *vnode = getVnodeForNewGP(*inode);
-                    ret = mainIndex->linkVnodeToInode(*inode, inode->hdr.last_index, *targetVnode);
+                Key_t targetKey = targetVnode->getMinKey();
+                int pos = -1;
+                if(inode->activateGP(targetKey, pos)) {
+                    ret = mainIndex->linkVnodeToInode(*inode, pos, *targetVnode);
                     if(!ret) {
                         std::cout << "Failed to link the vnode to the inode." << std::endl;
                         return ret;
                     }
-                    inode->gps[inode->hdr.last_index].key = targetVnode->getMaxKey();
+                    inode->gps[pos].key = targetKey;
                 }else {
                     //TODO: rebalance the inode
                     //inode has no empty gp slots, need to split the inode
@@ -74,7 +99,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         }
         ret = targetVnode->insert(key, value);
         if(ret == false) {
-            std::cout << "Failed to insert the key and value into the vnode." << std::endl;
+            std::cout << "Failed to insert the key and value into the vnode when inode is null. Key: " << key << std::endl;
             return ret;
         }
         // startNode is the first node of the value list
@@ -93,9 +118,16 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             std::cout << "Failed to insert the key and value into the main index." << std::endl;
         }
         inodes[0]->hdr.coveredNodes++;
+        inode = inodes[0];
+        int id = inode->getId();
+    #ifdef DBG
+        cout << "inserted inode " << id <<endl;
+    #endif
     }
 //4. rebalance the main index, if necessary
     if(needToRebalance && inode) {
+        int id = inode->getId();    
+        cout << "Need to rebalance the inode " << id << " with key " << targetVnode->getMaxKey() << endl;
         ret = mainIndex->rebalanceInode(*inode, *targetVnode);    
     }
     return ret;
