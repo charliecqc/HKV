@@ -54,14 +54,16 @@ bool DramSkiplist::insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel)
         inodes[i]->gps[0].key = key;
         inodes[i+1]->gps[0].value = inodes[i]->getId();
         inodes[i+1]->hdr.last_index = 0;
+        inodes[i+1]->hdr.coveredNodes++;
         inodes[i]->hdr.level = i;
         inodes[i]->hdr.next = std::numeric_limits<uint32_t>::max();
     }
     ret = linkVnodeToInode(*inodes[0], 0, *reinterpret_cast<Vnode *>(val));
-    inodes[0]->hdr.last_index = 0;
     if(ret == false) {
         return ret;
     }
+    inodes[0]->hdr.last_index = 0;
+    inodes[0]->hdr.coveredNodes++;
     while(newlevel > 0) {
         inodes[newlevel-1]->hdr.next = header[newlevel-1]->hdr.next;
         header[newlevel-1]->hdr.next = inodes[newlevel-1]->getId();
@@ -192,6 +194,7 @@ void DramSkiplist::initInodes(Inode* inodes[], int newlevel, Key_t key)
         inodes[i] = dramInodePool->getNextNode();
         inodes[i]->gps[0].key = key;
         inodes[i+1]->gps[0].value = inodes[i]->getId();
+        inodes[i+1]->hdr.coveredNodes++;
         inodes[i]->hdr.level = i;
         inodes[i]->hdr.next = std::numeric_limits<uint32_t>::max();
     }
@@ -225,6 +228,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                 current_update->gps[current_update->hdr.last_index].key = targetKey;
                 if(i != newlevel - 1) {
                     prev_update->gps[prev_pos].value = current_update->getId();
+                    prev_update->hdr.coveredNodes++;
                 }
                 prev_update = current_update;
                 prev_pos = current_update->hdr.last_index;
@@ -237,6 +241,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                 current_update->hdr.next = current->getId();
                 if(i != newlevel - 1) {
                     prev_update->gps[prev_pos].value = current->getId();
+                    prev_update->hdr.coveredNodes++;
                 }
                 prev_update = current;
                 prev_pos = current->hdr.last_index;
@@ -252,6 +257,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                 current_update->gps[pos].key = targetKey;
                 if(i != newlevel - 1) {
                     prev_update->gps[prev_pos].value = current_update->getId();
+                    prev_update->hdr.coveredNodes++;
                 }
                 prev_update = current_update;
                 prev_pos = pos;
@@ -272,6 +278,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                 target->gps[pos].key = targetKey;
                 if(i != newlevel - 1) {
                     prev_update->gps[prev_pos].value = target->getId();
+                    prev_update->hdr.coveredNodes++;
                 }
                 prev_update = target;
                 prev_pos = pos;

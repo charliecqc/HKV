@@ -115,7 +115,6 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         if(ret == false) {
             std::cout << "Failed to insert the key and value into the main index." << std::endl;
         }
-        inodes[0]->hdr.coveredNodes++;
         inode = inodes[0];
     #ifdef DBG
         int id = inode->getId();

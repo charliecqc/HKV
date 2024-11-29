@@ -51,8 +51,8 @@ public:
         currentIdx++;
 #ifdef DBG
         int id = node->getId();
-        if (id == 42)
-            cout << "this is node 42" << endl;
+        if (id == 35)
+            cout << "this is node 35" << endl;
         cout << "allocate inode : " << id << endl;
 #endif
         return node;
