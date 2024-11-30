@@ -242,7 +242,10 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                 if(i != newlevel - 1) {
                     prev_update->gps[prev_pos].value = current->getId();
                     prev_update->hdr.coveredNodes++;
+                }else {
+                    updates[i+1]->hdr.coveredNodes++;
                 }
+
                 prev_update = current;
                 prev_pos = current->hdr.last_index;
             }
@@ -279,6 +282,8 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                 if(i != newlevel - 1) {
                     prev_update->gps[prev_pos].value = target->getId();
                     prev_update->hdr.coveredNodes++;
+                }else {
+                    updates[i+1]->hdr.coveredNodes++;
                 }
                 prev_update = target;
                 prev_pos = pos;

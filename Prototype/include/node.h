@@ -202,6 +202,8 @@ public:
         int temp_index = hdr.last_index;
         hdr.last_index = hdr.last_index / 2 - 1;
         targetInode->hdr.last_index = temp_index / 2;
+        hdr.coveredNodes = hdr.last_index + 1;
+        targetInode->hdr.coveredNodes = targetInode->hdr.last_index + 1;
         return true;
     }
 
