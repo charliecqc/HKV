@@ -207,6 +207,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     Inode* updates[MAX_LEVEL];
     int newlevel = generateRandomLevel();
     Key_t targetKey = targetVnode.getMinKey();
+    //updates stores the precious nodes of the inodes that targetKey should be inserted 
     getPivotNodesForInsert(targetKey, updates);
 
     if (newlevel > level) {
@@ -223,8 +224,8 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
         Inode *current_update = updates[i];
         Inode *current = nullptr;
 
-        if (targetKey > current_update->gps[current_update->hdr.last_index].key) {
-            if (!current_update->isFull()) {
+        if (targetKey > current_update->gps[current_update->hdr.last_index].key) { // if the target key is largert than the mex key in the current node
+            if (!current_update->isFull()) { // append the key to the last available position since its sorted
                 current_update->hdr.last_index++;
                 current_update->gps[current_update->hdr.last_index].key = targetKey;
                 if (i != newlevel - 1) {
@@ -233,7 +234,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                 }
                 prev_update = current_update;
                 prev_pos = current_update->hdr.last_index;
-            } else {
+            } else { // the current node is full, need to split it into two nodes, the target key will be in the new inode
                 current = dramInodePool->getNextNode();
                 current->hdr.last_index++;
                 current->gps[current->hdr.last_index].key = targetKey;
@@ -248,8 +249,8 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                 prev_update = current;
                 prev_pos = current->hdr.last_index;
             }
-        } else if (targetKey >= current_update->gps[0].key && targetKey < current_update->gps[current_update->hdr.last_index].key) {
-            if (!current_update->isFull()) {
+        } else if (targetKey >= current_update->gps[0].key && targetKey < current_update->gps[current_update->hdr.last_index].key) { //key is in the middle of the current node
+            if (!current_update->isFull()) { // if the current is not full, find the insert position and insert the key
                 int pos = current_update->findInsertKeyPos(targetKey);
                 current_update->shift(pos);
                 current_update->hdr.last_index++;
@@ -263,8 +264,8 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
             } else {
                 current = dramInodePool->getNextNode();
                 current->hdr.last_index++;
-                current_update->split(current);
-                Inode *target = (targetKey < current->getMinKey()) ? current_update : current;
+                current_update->split(current); // split will move the last half of the current node to the new node
+                Inode *target = (targetKey < current->getMinKey()) ? current_update : current; // target node is the node that the key should be inserted
                 int pos = target->findInsertKeyPos(targetKey);
                 target->shift(pos);
                 target->hdr.last_index++;
