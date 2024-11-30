@@ -206,84 +206,74 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     bool ret = false;
     Inode* updates[MAX_LEVEL];
     int newlevel = generateRandomLevel();
-    //Inode *newInodes[newlevel];
     Key_t targetKey = targetVnode.getMinKey();
-    //initInodes(newInodes, newlevel, targetKey);
-    // updates stores the previous node of the new inodes;
     getPivotNodesForInsert(targetKey, updates);
-    if(newlevel > level) { // for the case when the new level is higher than the current level
-        for(int i = level; i < newlevel; i++) {
+
+    if (newlevel > level) {
+        for (int i = level; i < newlevel; i++) {
             updates[i] = header[i];
         }
         level = newlevel;
     }
+
     Inode *prev_update = nullptr;
-    int prev_pos = 0; 
-    for(int i = newlevel - 1; i >= 0; i--) {
+    int prev_pos = 0;
+
+    for (int i = newlevel - 1; i >= 0; i--) {
         Inode *current_update = updates[i];
         Inode *current = nullptr;
-        if(targetKey > current_update->gps[current_update->hdr.last_index].key) { //if the target key is larger than the max key in the current node
-            if(!current_update->isFull()) { // append it to the last available position since the previous gps are already sorted
+
+        if (targetKey > current_update->gps[current_update->hdr.last_index].key) {
+            if (!current_update->isFull()) {
                 current_update->hdr.last_index++;
                 current_update->gps[current_update->hdr.last_index].key = targetKey;
-                if(i != newlevel - 1) {
+                if (i != newlevel - 1) {
                     prev_update->gps[prev_pos].value = current_update->getId();
                     prev_update->hdr.coveredNodes++;
                 }
                 prev_update = current_update;
                 prev_pos = current_update->hdr.last_index;
-            }else { //the current node is full, need to split it into two nodes, the target key will be in the new inode.
-                Inode *next = dramInodePool->at(current_update->hdr.next);
-                current = dramInodePool->getNextNode(); 
-                current->hdr.last_index++; // last_index = 0
-                current->gps[current->hdr.last_index].key = targetKey; // for now only add the target key to the new node, later will do the range re-split.
+            } else {
+                current = dramInodePool->getNextNode();
+                current->hdr.last_index++;
+                current->gps[current->hdr.last_index].key = targetKey;
                 current->hdr.next = current_update->hdr.next;
                 current_update->hdr.next = current->getId();
-                if(i != newlevel - 1) {
+                if (i != newlevel - 1) {
                     prev_update->gps[prev_pos].value = current->getId();
                     prev_update->hdr.coveredNodes++;
-                }else {
-                    updates[i+1]->hdr.coveredNodes++;
+                } else {
+                    updates[i + 1]->hdr.coveredNodes++;
                 }
-
                 prev_update = current;
                 prev_pos = current->hdr.last_index;
             }
-            
-        }else if(targetKey >= current_update->gps[0].key && targetKey < current_update->gps[current_update->hdr.last_index].key) {
-            //[a, b) -> [a, key) [key, b)]
-            //Todo: need move half of the contents from current_update to current
-            if(!current_update->isFull()) {// if the current node is not full, find the insert postion, shift the gps and insert the target key
+        } else if (targetKey >= current_update->gps[0].key && targetKey < current_update->gps[current_update->hdr.last_index].key) {
+            if (!current_update->isFull()) {
                 int pos = current_update->findInsertKeyPos(targetKey);
                 current_update->shift(pos);
                 current_update->hdr.last_index++;
                 current_update->gps[pos].key = targetKey;
-                if(i != newlevel - 1) {
+                if (i != newlevel - 1) {
                     prev_update->gps[prev_pos].value = current_update->getId();
                     prev_update->hdr.coveredNodes++;
                 }
                 prev_update = current_update;
                 prev_pos = pos;
             } else {
-                //the current node is full, need to split it into two nodes, the target key will be in one of them.
                 current = dramInodePool->getNextNode();
                 current->hdr.last_index++;
-                current_update->split(current); // spilt will move the last half of the current node to the new node
-                Inode *target = nullptr; // target is the node that the target key will be inserted
-                if(targetKey < current->getMinKey()) { 
-                    target = current_update;
-                }else {
-                    target = current;
-                }
+                current_update->split(current);
+                Inode *target = (targetKey < current->getMinKey()) ? current_update : current;
                 int pos = target->findInsertKeyPos(targetKey);
                 target->shift(pos);
                 target->hdr.last_index++;
                 target->gps[pos].key = targetKey;
-                if(i != newlevel - 1) {
+                if (i != newlevel - 1) {
                     prev_update->gps[prev_pos].value = target->getId();
                     prev_update->hdr.coveredNodes++;
-                }else {
-                    updates[i+1]->hdr.coveredNodes++;
+                } else {
+                    updates[i + 1]->hdr.coveredNodes++;
                 }
                 prev_update = target;
                 prev_pos = pos;
