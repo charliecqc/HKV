@@ -1,6 +1,37 @@
+#include <queue>
+#include <vector>
 #include "tandemIndex.h"
 #include "valuelist.h"
+#include "spinLock.h"
+#include "workerThread.h"
 #include "common.h"
+
+std::queue<std::vector<wq_entry_t*>*> g_workQueue[WORKERQUEUE_NUM];
+//std::queue <wq_entry_t *> g_workQueue;
+//std::vector<int> g_workQueue;
+bool wqReady[WORKERQUEUE_NUM] = {false};
+volatile bool wtInitialized = false;
+std::atomic<bool> g_endTandem;
+SpinLock g_spinLock;
+
+TandemIndex::TandemIndex() {
+    g_endTandem = false;   
+    mainIndex = new DramSkiplist();
+    //shadowIndex = new PmemSkiplist();
+    valueList = new ValueList();
+    createWorkerThread();
+    Inode *index_header = mainIndex->getHeader();
+    Vnode *value_header = valueList->getHeader();
+    index_header->gps[0].value = value_header->getId();
+}
+
+TandemIndex::~TandemIndex() {
+   g_endTandem = true; 
+   if(workerThread->joinable()) {
+       workerThread->join();
+       delete workerThread;
+   }
+}
 
 bool TandemIndex::insert(Key_t key, Val_t value)
 {
@@ -149,6 +180,23 @@ Val_t TandemIndex::lookup(Key_t key)
         return value;
     }
     return -1;
+}
+
+void TandemIndex::createWorkerThread()
+{
+    g_spinLock.lock();
+    workerThread = new std::thread(&TandemIndex::workerThreadExec, this);
+    wtInitialized = true;
+    g_spinLock.unlock();
+}
+
+void TandemIndex::workerThreadExec()
+{
+    while(!wtInitialized)
+    {}
+    while(!g_endTandem) {
+        cout << "workerThreadExec" << endl;
+    }
 }
 
 #if 0
