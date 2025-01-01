@@ -2,7 +2,7 @@
 CXX = g++
 
 # Compiler flags
-CXXFLAGS = -Wall -Iinclude -g
+CXXFLAGS = -Wall -Iinclude -g --std=c++17 -fsanitize=thread
 
 # Directories
 SRC_DIR = src

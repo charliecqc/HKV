@@ -5,8 +5,11 @@
 #include <limits>
 #include <cstring>
 #include <vector>
+#include <thread>
 #include <queue>
 #include <atomic>
+#include <shared_mutex>
+#include <mutex>
 #include <unordered_set>
 #include "common.h"
 
@@ -41,6 +44,7 @@ class header{
         int32_t level; //4 bytes
         int next; //4 bytes 
         int16_t last_index; //2 bytes
+        std::shared_mutex mtx;
     public:
         header() {
             id = 0;
@@ -58,7 +62,7 @@ class vnodeHeader{
         uint32_t next; //4 bytes 
         // used to keep track of the keys are valid or not in the vnode
         uint32_t bitmap; // 4 bytes
-
+        std::shared_mutex mtx;
         vnodeHeader() {
             id = 0;
             next = 0;
@@ -98,6 +102,7 @@ public:
     header hdr;
     entry gps[fanout/2];
     entry sgps[fanout/2];
+    
 
     Inode(uint32_t level)
     {
@@ -226,6 +231,7 @@ public:
     }
 
     bool lookup(Key_t key, Val_t &value) {
+        std::shared_lock<std::shared_mutex> lock(hdr.mtx);
         for(int i = fanout - 1 ; i >= 0; i--) {
             if(records[i].key == key && hdr.isBitSet(i)) {
                 value = records[i].value;
@@ -265,14 +271,16 @@ public:
     Key_t getMidKey() {
         std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> pq;
         std::unordered_set<Key_t> keySet;
-        for(int i = fanout - 1; i >= 0; i--) {
-            if(records[i].key == std::numeric_limits<Key_t>::max()) {
-                continue;
+        {
+            for(int i = fanout - 1; i >= 0; i--) {
+                if(records[i].key == std::numeric_limits<Key_t>::max()) {
+                    continue;
+                }
+                if (keySet.find(records[i].key) != keySet.end()) {
+                    continue;
+                }
+                keySet.insert(records[i].key);
             }
-            if (keySet.find(records[i].key) != keySet.end()) {
-                continue;
-            }
-            keySet.insert(records[i].key);
         }
         int size = keySet.size();
         for (const Key_t& key : keySet) {
@@ -285,27 +293,44 @@ public:
     }
 
     bool split(Vnode *targetVnode) {
+        std::unique_lock<std::shared_mutex> lock(hdr.mtx);
         Key_t midKey = getMidKey();
+        Key_t key = std::numeric_limits<Key_t>::max();
+        Val_t value = std::numeric_limits<Val_t>::max();
         for(int i = 0; i < fanout; i++) {
-           if(records[i].key > midKey) {
-                targetVnode->insert(records[i].key, records[i].value);
-                hdr.unsetBit(i);
-           }
+            {
+                key = records[i].key;
+                value = records[i].value;
+            }
+            if(key > midKey) {
+                targetVnode->insert(key, value);
+            }
+            hdr.unsetBit(i);
         }
+        targetVnode->hdr.next = hdr.next;
+        hdr.next = targetVnode->getId();
+#ifdef DBG
+        std::cout << "split done this: " << this->getId() << " this->max: " <<getMaxKey() << " new: " << targetVnode->getId() << " max: " << targetVnode->getMaxKey()<< std::endl;
+#endif
         return true;
     }
 
 //Todo: Implement insert with finger print and bloom filter
 //find the first empty slot and insert the key and value
     bool insert(Key_t key, Val_t value) {
-        int pos = __builtin_ffs(~hdr.bitmap) - 1;
-        if (pos >= 0 && pos < fanout) {
-            records[pos].key = key;
-            records[pos].value = value;
-            hdr.setBit(pos);
-            return true;
+        {
+            int pos = __builtin_ffs(~hdr.bitmap) - 1;
+            if (pos >= 0 && pos < fanout) {
+                records[pos].key = key;
+                records[pos].value = value;
+                hdr.setBit(pos);
+#ifdef DBG
+                std::cout << "vnode id: " << hdr.id << " insert key: " << key << " value: " << value << " at pos: " << pos << std::endl;
+#endif
+                return true;
+            }
+            return false;
         }
-        return false;
     }
 
    //Todo: Implement update and remove 
@@ -329,5 +354,20 @@ public:
     bool isFull()
     {
         return hdr.bitmap == (1 << fanout) - 1;
+    }
+
+    void dump()
+    {
+        std::unique_lock<std::shared_mutex> lock(hdr.mtx);
+        std::cout << "Vnode id: " << hdr.id << " next: " << hdr.next << "bitmap (binary): ";
+        for (int i = fanout - 1; i >= 0; i--) {
+            std::cout << ((hdr.bitmap >> i) & 1);
+        }
+        std::cout << std::endl;
+        for(int i = 0; i < fanout; i++) {
+            if(hdr.isBitSet(i)) {
+                std::cout << "Key: " << records[i].key << " Value: " << records[i].value << std::endl;
+            }
+        }
     }
 };

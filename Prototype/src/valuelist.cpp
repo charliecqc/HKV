@@ -32,17 +32,40 @@ bool ValueList::insert(Key_t key, Val_t value)
     return false;
 }
 
-bool ValueList::insert(Vnode *startNode, Vnode *targetNode)
+bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 {
-    Vnode *curNode = startNode;
-    Vnode *nextNode = getNext(curNode);
-    while(nextNode != nullptr && nextNode->getMaxKey() < targetNode->records[0].key) {
-        curNode = nextNode;
-        nextNode = getNext(curNode);
+    std::unique_lock<std::shared_mutex> lock(curNode->hdr.mtx);
+    nextNode->hdr.next = curNode->hdr.next;
+    curNode->hdr.next = nextNode->getId();
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
+    return true;
+}
+
+bool ValueList::split(Vnode *curNode, Vnode *nextNode)
+{
+    Key_t midKey = curNode->getMidKey();
+    Key_t maxKey = curNode->getMaxKey();
+    if(midKey != maxKey) {
+        for(int i = 0; i < fanout; i++) {
+            Key_t key = curNode->records[i].key;
+            Val_t value = curNode->records[i].value;
+            if(key > midKey) {
+                nextNode->insert(key, value);
+                curNode->hdr.unsetBit(i);
+            }
+        }
+    }else {
+        for(int i = 0; i < fanout / 2; i++) {
+            Key_t key = curNode->records[i].key;
+            Val_t value = curNode->records[i].value;
+            nextNode->insert(key, value);
+            curNode->hdr.unsetBit(i);
+        }
     }
-    targetNode->hdr.next = curNode->hdr.next;
-    curNode->hdr.next = targetNode->getId();
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(targetNode), sizeof(Vnode));
+    nextNode->hdr.next = curNode->hdr.next;
+    curNode->hdr.next = nextNode->getId();
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
     return true;
 }
@@ -100,6 +123,7 @@ bool ValueList::recovery()
 
 Vnode *ValueList::getNext(Vnode *curNode)
 {
+    shared_lock<std::shared_mutex> lock(curNode->hdr.mtx);
     return pmemVnodePool->at(curNode->hdr.next);
 }
 

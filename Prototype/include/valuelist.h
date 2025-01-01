@@ -12,6 +12,8 @@ public:
     ValueList();
     bool insert(Key_t key, Val_t value);
     bool insert(Vnode* startNode, Vnode* vnode);
+    bool append(Vnode* curVnode, Vnode* nextVnode);
+    bool split(Vnode* curVnode, Vnode* nextVnode);
     bool update(Key_t key, Val_t value);
     bool remove(Key_t key);
     bool lookup(Key_t key, Val_t &value);

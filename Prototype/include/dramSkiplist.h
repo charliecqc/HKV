@@ -9,11 +9,13 @@ private:
     Inode* tail[MAX_LEVEL];
     DramInodePool *dramInodePool;
     int level; //level is the current max level of the skiplist
+    std::shared_mutex level_lock;
 public:
     DramSkiplist();
     ~DramSkiplist();
     bool insert(Key_t &key, Val_t &val);
     bool insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel);
+    bool update(Key_t &oldKey, Key_t &newKey, Val_t &val);
     // return the index in gps of the index node that poionts to the vnode
     Inode *lookup(Key_t key, int &idx);
     Inode *getHeader();

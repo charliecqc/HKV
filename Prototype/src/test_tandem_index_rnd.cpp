@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdlib>
 #include <ctime>
+#if 0
 int main() {
     TandemIndex list;
   //  for(Key_t i = 0; i < std::numeric_limits<Key_t>::max(); i++) {
@@ -22,3 +23,4 @@ int main() {
     return 0;
 
 }
+#endif

@@ -4,6 +4,7 @@
 #include <libpmem.h>
 #include <libpmemobj.h>
 #include <vector>
+#include <atomic>
 #include "dramManager.h"
 #include "node.h"
 #include "common.h"
@@ -19,11 +20,11 @@ private:
     std::vector<Inode*> dramInodePool;
     int nodeSize;
     int numNodes;
-    int currentIdx;
+    std::atomic<int> currentIdx;
 public:
     DramInodePool(size_t nodeSize, size_t numNodes) : nodeSize(nodeSize), numNodes(numNodes){
         init();
-        currentIdx = 0;
+        currentIdx.store(0);
     }
 
     bool init();
@@ -36,19 +37,19 @@ public:
     }
 
     size_t getCurrentIdx() {
-        return currentIdx;
+        return currentIdx.load();
     }
 
     Inode* getCurrentNode() {
-        return dramInodePool[currentIdx];
+        return dramInodePool[currentIdx.load()];
     }
 
     Inode* getNextNode() {
-        if (currentIdx >= numNodes) {
+        int idx = currentIdx.fetch_add(1);
+        if (idx >= numNodes) {
             return nullptr;
         }
-        Inode *node = dramInodePool[currentIdx];
-        currentIdx++;
+        Inode *node = dramInodePool[idx];
 #ifdef DBG
         int id = node->getId();
         if (id == 35)

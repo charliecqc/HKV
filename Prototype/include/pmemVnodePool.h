@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <libpmem.h>
 #include <libpmemobj.h>
+#include <atomic>
 #include <vector>
 #include "pmemManager.h"
 #include "node.h"
@@ -20,12 +21,12 @@ private:
     std::vector<Vnode*> pmemVnodePool;
     int nodeSize;
     int numNodes;
-    int currentIdx;
+    std::atomic<int> currentIdx;
 public:
     PmemVnodePool(size_t nodeSize, size_t numNodes) : nodeSize(nodeSize), numNodes(numNodes){
         root_obj *root = nullptr;
         init(root);
-        currentIdx = 0;
+        currentIdx.store(0);
     }
 
     bool init(root_obj *root);
@@ -38,22 +39,24 @@ public:
     }
 
     size_t getCurrentIdx() {
-        return currentIdx;
+        return currentIdx.load();
     }
 
     bool resetCurrentIdx(int newIdx) {
-        currentIdx = newIdx;
+        currentIdx.store(newIdx);
+        return true;
     }
 
     Vnode* getCurrentNode() {
-        return pmemVnodePool[currentIdx];
+        return pmemVnodePool[currentIdx.load()];
     }
 
     Vnode *getNextNode() {
-        if (currentIdx >= numNodes) {
+        int idx = currentIdx.fetch_add(1);
+        if (idx >= numNodes) {
             return nullptr;
         }
-        return pmemVnodePool[currentIdx++];
+        return pmemVnodePool[idx];
     }
 
     Vnode * popNode() {
