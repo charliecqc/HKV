@@ -24,6 +24,7 @@ public:
     bool checkForActivateGP(Inode &inode);
     bool checkForRebalance(Inode &inode, bool &activeNewGP);
     bool rebalanceInode(Inode *inode, bool lastLevel);
+    void rebalanceInodeImp(Inode *target, Inode *&prev_target, int &prev_pos, Key_t targetKey, bool is_current_top);    
     int generateRandomLevel();
     void initInodes(Inode* inodes[], int newlevel, Key_t key);
     bool rebalanceInode(Inode &inode);

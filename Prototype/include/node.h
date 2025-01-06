@@ -209,9 +209,11 @@ public:
         targetInode->hdr.last_index = temp_index / 2;
         hdr.coveredNodes = hdr.last_index + 1;
         targetInode->hdr.coveredNodes = targetInode->hdr.last_index + 1;
+        int next = hdr.next;
+        targetInode->hdr.next = next;
+        hdr.next = targetInode->getId();
         return true;
     }
-
 };
 
 class Vnode

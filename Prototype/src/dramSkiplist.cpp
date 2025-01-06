@@ -1,4 +1,5 @@
 #include "dramSkiplist.h"
+#include <cassert>
 #include <mutex>
 #define numNodesInPool 10000
 
@@ -136,6 +137,7 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
             Val_t index = 0;
             std::unique_lock<std::shared_mutex> lock3(target->hdr.mtx);
             for(int j = 0; j <= target->hdr.last_index; j++) {
+                assert(target->gps[j].value != -1);
                 if(oldKey >= target->gps[j].key) {
                     if(j + 1 <= target->hdr.last_index) {
                         if(oldKey < target->gps[j+1].key) {
@@ -208,6 +210,7 @@ void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode* updates[])
             Val_t index = 0;
             std::shared_lock<std::shared_mutex> lock3(current->hdr.mtx);
             for(int j = 0; j <= current->hdr.last_index; j++) {
+                assert(current->gps[j].value != -1);
                 if(key >= current->gps[j].key) {
                     if(j + 1 <= current->hdr.last_index) {
                         if(key < current->gps[j+1].key) {
@@ -240,16 +243,19 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
         Inode* prev = nullptr;
         //search among the nodes in the current level
         while(true) {
+            assert(current != nullptr);
             std::shared_lock<std::shared_mutex> lock(current->hdr.mtx);
             if(current->hdr.next != tail[i]->getId() && key > current->gps[current->hdr.last_index].key) {
                 prev = current;
                 Inode *temp = dramInodePool->at(current->hdr.next);
                 lock.unlock();
                 current = temp;
+                assert(current != nullptr);
                 std::shared_lock<std::shared_mutex> lock2(current->hdr.mtx);
                 if(key < current->gps[0].key && prev != nullptr) {
                     lock2.unlock();
                     current = prev;
+                    assert(current != nullptr);
                     break;
                 }
             } else {
@@ -262,8 +268,10 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
             if(current->isHeader()) { // if the current node is the header node, only happens when the key is the smallest
                 if(i != 0) {
                     Inode *temp = dramInodePool->at(current->gps[0].value);
+                    assert(temp != nullptr);
                     lock1.unlock();
                     current = temp;
+                    assert(current != nullptr);
                     continue;
                 } else {
                     idx = -1;
@@ -288,8 +296,10 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
             }
             if(i != 0) {
                 Inode *temp = dramInodePool->at(current->gps[idx].value);
+                assert(temp != nullptr);
                 lock3.unlock();
                 current = temp;
+                assert(current != nullptr);
             }
         }
     }
@@ -335,6 +345,64 @@ void DramSkiplist::initInodes(Inode* inodes[], int newlevel, Key_t key)
     }
 }
 
+bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
+{
+    bool ret = false;
+    Inode* updates[MAX_LEVEL];
+    Key_t targetKey = targetVnode.getMinKey();
+    int newlevel = generateRandomLevel();
+    getPivotNodesForInsert(targetKey, updates);
+    {
+        std::unique_lock<std::shared_mutex> lock(level_lock);
+        if(newlevel > level) {
+            for(int i = level; i < newlevel; i++) {
+                updates[i] = header[i];
+            }
+            level = newlevel;
+        }
+    }
+
+    Inode *prev_update = nullptr; // the update node in the previous round
+    int prev_pos = 0; // the position in the previous update node
+    for(int i = newlevel - 1; i >= 0; i--) {
+        Inode *current_update = updates[i];
+        Inode *next = nullptr;
+        {
+            std::unique_lock<std::shared_mutex> lock(current_update->hdr.mtx);
+            if(!current_update->isFull()) {
+                bool is_current_top = (i == newlevel - 1) ? true : false;
+                rebalanceInodeImp(current_update, prev_update, prev_pos, targetKey, is_current_top);
+            }else {
+                next = dramInodePool->getNextNode();
+                {
+                    std::unique_lock<std::shared_mutex> lock_next(next->hdr.mtx);
+                    current_update->split(next);
+                    Inode *target = (targetKey < next->getMinKey()) ? current_update : next;
+                    bool is_current_top = (i == newlevel - 1) ? true : false;
+                    rebalanceInodeImp(target, prev_update, prev_pos, targetKey, is_current_top);
+                }
+            }
+        }
+    }
+    std::unique_lock<std::shared_mutex> lock_updates(prev_update->hdr.mtx);
+    prev_update->gps[prev_pos].value = targetVnode.getId();
+}
+
+void DramSkiplist::rebalanceInodeImp(Inode *target, Inode *&prev_target, int &prev_pos, Key_t targetKey, bool is_current_top)
+{
+     int pos = target->findInsertKeyPos(targetKey);
+    target->shift(pos);
+    target->hdr.last_index++;
+    target->gps[pos].key = targetKey;
+    if(!is_current_top) {
+        prev_target->gps[prev_pos].value = target->getId();
+        prev_target->hdr.coveredNodes++;
+    }
+    prev_target = target;
+    prev_pos = pos;
+}
+
+#if 0
 // rebalance will be called when activateGP failed, in this case targetKey need to be reinsert
 bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
 {
@@ -375,6 +443,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                         std::unique_lock<std::shared_mutex> lock_prev(prev_update->hdr.mtx);
                         prev_update->gps[prev_pos].value = current_update->getId();
                         prev_update->hdr.coveredNodes++;
+                        assert(prev_update->gps[j].value != -1);
                     }
                     prev_update = current_update;
                     prev_pos = current_update->hdr.last_index;
@@ -445,3 +514,4 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     }
     return ret;
 }
+#endif

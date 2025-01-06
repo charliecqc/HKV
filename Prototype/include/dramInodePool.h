@@ -75,6 +75,7 @@ public:
 
     Inode * at(size_t index) {
         if (index >= dramInodePool.size()) {
+            std::cout << "invalid index " << index <<" beyond dramInodePool capacity" << std::endl;
             return nullptr;
         }
         return dramInodePool[index];
