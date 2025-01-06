@@ -8,6 +8,8 @@ class ValueList {
 public:
     PmemVnodePool *pmemVnodePool;
     Vnode *head;
+    //sampling 
+    size_t _total_request = 0;     // inc every write to value node
 public:
     ValueList();
     bool insert(Key_t key, Val_t value);
@@ -22,4 +24,9 @@ public:
         return head;
     }
     int getKeyPos(Key_t key);
+
+    //sampling
+    size_t getTotalRequests() { return _total_request; }
+    void incTotalRequests() { _total_request++; }
+    void resetTotalRequests() { _total_request = 0; }
 };

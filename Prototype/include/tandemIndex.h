@@ -1,9 +1,14 @@
+#ifndef TANDEM_INDEX_H
+#define TANDEM_INDEX_H
+
 #include "dramSkiplist.h"
 #include "pmemSkiplist.h"
 #include "valuelist.h"
 #include "common.h"
 #include "spinLock.h"
+#include "sampler.h"
 #include <thread>
+
 #pragma once
 
 
@@ -29,4 +34,9 @@ class TandemIndex {
         DramSkiplist *mainIndex;
         ValueList *valueList;
         //PmemSkiplist *shadowIndex;
+
+        //sampling - moved to value list
+        Sampler* sampler;
 };
+
+#endif // TANDEM_INDEX_H

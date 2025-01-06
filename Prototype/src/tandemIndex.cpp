@@ -5,6 +5,7 @@
 #include "spinLock.h"
 #include "workerThread.h"
 #include "common.h"
+#include "sampler.h"
 
 std::queue<std::vector<wq_entry_t*>*> g_workQueue[WORKERQUEUE_NUM];
 //std::queue <wq_entry_t *> g_workQueue;
@@ -13,8 +14,9 @@ bool wqReady[WORKERQUEUE_NUM] = {false};
 volatile bool wtInitialized = false;
 std::atomic<bool> g_endTandem;
 SpinLock g_spinLock;
+//Sampler sampler(2, 10); 
 
-TandemIndex::TandemIndex() {
+TandemIndex::TandemIndex(){
     g_endTandem = false;   
     mainIndex = new DramSkiplist();
     //shadowIndex = new PmemSkiplist();
@@ -23,6 +25,9 @@ TandemIndex::TandemIndex() {
     Inode *index_header = mainIndex->getHeader();
     Vnode *value_header = valueList->getHeader();
     index_header->gps[0].value = value_header->getId();
+    //sampling
+    //Sampler sampler(2, 10);  moved up
+    sampler = new Sampler(100, 10);
 }
 
 TandemIndex::~TandemIndex() {
@@ -48,6 +53,16 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         }
         ret = valueNode->insert(key, value);
         if(ret) {
+            //TODO: refine this portion
+            //std::cout << "value node insert 1" << std::endl; 
+            valueList->_total_request++;
+            valueNode->hdr.incTotalAccess(valueList->_total_request);
+            sampler->performSampling(*valueList);
+            //log if hot
+            if (valueNode->hdr._isHot) {
+            sampler->logHot(valueNode->hdr.id, value);
+            }
+            
             // insert vaule to value node successfully (there was a empty slot)
             return ret;
         }
@@ -71,19 +86,35 @@ bool TandemIndex::insert(Key_t key, Val_t value)
                     if(ret == false) {
                         std::cout << "Failed to insert the key and value into the vnode after split. key: " << key << std::endl;
                         return ret;
+                    } else {
+                        //std::cout << "value node insert 2" << std::endl; 
+                        valueList->_total_request++;
+                        valueNode->hdr.incTotalAccess(valueList->_total_request);
+                        sampler->performSampling(*valueList);
                     }
-                }else {
+                } else {
                     ret = targetVnode->insert(key, value);
+
                     if(ret == false) {
                         std::cout << "Failed to insert the key and value into the vnode." << std::endl;
                         return ret;
-                    }
+                    } else {
+                        //std::cout << "value node insert 3" << std::endl; 
+                        valueList->_total_request++;
+                        valueNode->hdr.incTotalAccess(valueList->_total_request);
+                        sampler->performSampling(*valueList);
+                    } 
                 }
             }else {
                 ret = targetVnode->insert(key, value); // insert the key and value into new vnode
                 if(ret == false) {
                     std::cout << "Failed to insert the key and value into the vnode. Key: " << key << std::endl;
                     return ret;
+                } else {
+                    //std::cout << "value node insert 4" << std::endl; 
+                    valueList->_total_request++;
+                    valueNode->hdr.incTotalAccess(valueList->_total_request);
+                    sampler->performSampling(*valueList);
                 }
             }
             //insert the vnode into the value list
@@ -195,7 +226,9 @@ void TandemIndex::workerThreadExec()
     while(!wtInitialized)
     {}
     while(!g_endTandem) {
+#ifdef DBG
         cout << "workerThreadExec" << endl;
+#endif
     }
 }
 

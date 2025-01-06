@@ -4,6 +4,7 @@ ValueList::ValueList() {
     pmemVnodePool = new PmemVnodePool(sizeof(Vnode), 10000000);
     head = pmemVnodePool->getNextNode();
     head->hdr.next = std::numeric_limits<uint32_t>::max();
+    _total_request = 0;
 }   
 
 bool ValueList::insert(Key_t key, Val_t value)

@@ -13,6 +13,7 @@
 #pragma once
 
 const int fanout = 32;
+#define HOTSPOT_R 5
 
 class Node {
 public:
@@ -58,11 +59,16 @@ class vnodeHeader{
         uint32_t next; //4 bytes 
         // used to keep track of the keys are valid or not in the vnode
         uint32_t bitmap; // 4 bytes
+        //Sampling
+        bool _isHot; // 1 bit 
+        uint32_t _total_access; // 4 bytes 
 
         vnodeHeader() {
             id = 0;
             next = 0;
             bitmap = 0;
+            _isHot = false;
+            _total_access = 0;
         }
     public:
         void setBit(int pos) {
@@ -76,6 +82,49 @@ class vnodeHeader{
         bool isBitSet(int pos) {
             return (bitmap & (1 << pos)) != 0;
         }
+
+        //sampling
+    void setHot()
+    {
+        //std::cout << "set hot" << std::endl; 
+        _isHot = true;
+    }
+    void setCold()
+    {
+        _isHot = false;
+    }
+    int getTotalAccess()
+    {
+        return _total_access;
+    }
+    void incTotalAccess(size_t _total_request)
+    {   
+        //std::cout << "total request: " << _total_request <<std::endl; 
+        if (_isHot) {
+            // TODO: log_value(node_id, value);
+            //std::cout << "node is hot" << std::endl; 
+            return;
+        } else if (_total_request % HOTSPOT_R == 0 && !_isHot ) {
+            _total_access++;
+            //std::cout << "incremented total acccess" << std::endl; 
+            //TODO: not here - setHot(); means start logging
+        }
+        
+    }
+    void resetTotalAccess()
+    {
+        _total_access = 0;
+    }
+    void resetSample()
+    {
+        std::cout << "reset sample" << std::endl; 
+        std::cout << "_total access: " << _total_access << std::endl; 
+        std::cout << "hot? " << _isHot << std::endl; 
+        _isHot = false;
+        _total_access = 0;
+        // TODO: implement decay
+    }
+
     friend class Vnode;
 };
 
@@ -293,6 +342,7 @@ public:
            }
         }
         return true;
+
     }
 
 //Todo: Implement insert with finger print and bloom filter
@@ -330,4 +380,6 @@ public:
     {
         return hdr.bitmap == (1 << fanout) - 1;
     }
+
+    
 };
