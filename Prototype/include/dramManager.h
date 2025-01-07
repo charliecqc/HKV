@@ -26,6 +26,6 @@ class DramManager {
             return true;
         }
 
-        static void *alloc(int poolId, size_t size) {
+        static void alloc(int poolId, size_t size) {
         }
 };

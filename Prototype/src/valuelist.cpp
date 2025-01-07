@@ -47,7 +47,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     Key_t midKey = curNode->getMidKey();
     Key_t maxKey = curNode->getMaxKey();
     if(midKey != maxKey) {
-        for(int i = 0; i < fanout; i++) {
+        for(uint32_t i = 0; i < fanout; i++) {
             Key_t key = curNode->records[i].key;
             Val_t value = curNode->records[i].value;
             if(key > midKey) {
@@ -56,7 +56,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
             }
         }
     }else {
-        for(int i = 0; i < fanout / 2; i++) {
+        for(uint32_t i = 0; i < fanout / 2; i++) {
             Key_t key = curNode->records[i].key;
             Val_t value = curNode->records[i].value;
             nextNode->insert(key, value);

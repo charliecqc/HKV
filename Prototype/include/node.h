@@ -15,7 +15,7 @@
 
 #pragma once
 
-const int fanout = 32;
+const int32_t fanout = 32;
 
 class Node {
 public:
@@ -59,7 +59,7 @@ class header{
 class vnodeHeader{
     public:
         uint32_t id; //4 bytes
-        uint32_t next; //4 bytes 
+        int next; //4 bytes 
         // used to keep track of the keys are valid or not in the vnode
         uint32_t bitmap; // 4 bytes
         std::shared_mutex mtx;
@@ -115,7 +115,7 @@ public:
         hdr.next = next;
         hdr.level = level;
         hdr.coveredNodes = 0;
-        for(int i = 0; i < fanout/2; i++) {
+        for(int32_t i = 0; i < fanout/2; i++) {
             gps[i].key = std::numeric_limits<Key_t>::max();
             gps[i].value = std::numeric_limits<Val_t>::max();
             sgps[i].key = std::numeric_limits<Key_t>::max();
@@ -147,7 +147,7 @@ public:
     {
         //check if there is enough space to insert the new GP
         int16_t cur_index = this->hdr.last_index;  
-        if(cur_index + 1>= fanout/2) {
+        if(static_cast<int32_t>(cur_index + 1)>= fanout/2) {
             return false;
         }else {
             pos = this->findInsertKeyPos(targetKey);
@@ -178,6 +178,25 @@ public:
                     }
                 } else {
                     idx = i+1;
+                    break;
+                }
+            }
+        }
+        return idx;
+    }
+
+    int findKeyPos(Key_t key)
+    {
+        int idx = 0;
+        for(int i = 0; i <= this->hdr.last_index; i++) {
+            if(key >= this->gps[i].key) {
+                if(i + 1 <= this->hdr.last_index) {
+                    if(key < this->gps[i+1].key) {
+                        idx = i;
+                        break;
+                    }
+                } else {
+                    idx = i;
                     break;
                 }
             }
@@ -226,7 +245,7 @@ public:
         hdr.id = id;
         hdr.next = next;
         hdr.bitmap = 0;
-        for(int i = 0; i < fanout; i++) {
+        for(int32_t i = 0; i < fanout; i++) {
             records[i].key = std::numeric_limits<Key_t>::max();
             records[i].value = std::numeric_limits<Val_t>::max();
         }
@@ -234,7 +253,7 @@ public:
 
     bool lookup(Key_t key, Val_t &value) {
         std::shared_lock<std::shared_mutex> lock(hdr.mtx);
-        for(int i = fanout - 1 ; i >= 0; i--) {
+        for(int32_t i = fanout - 1 ; i >= 0; i--) {
             if(records[i].key == key && hdr.isBitSet(i)) {
                 value = records[i].value;
                 return true;
@@ -284,7 +303,7 @@ public:
                 keySet.insert(records[i].key);
             }
         }
-        int size = keySet.size();
+        unsigned long size = keySet.size();
         for (const Key_t& key : keySet) {
             pq.push(key);
             if(pq.size() > size / 2 + 1) {
@@ -299,7 +318,7 @@ public:
         Key_t midKey = getMidKey();
         Key_t key = std::numeric_limits<Key_t>::max();
         Val_t value = std::numeric_limits<Val_t>::max();
-        for(int i = 0; i < fanout; i++) {
+        for(int32_t i = 0; i < fanout; i++) {
             {
                 key = records[i].key;
                 value = records[i].value;
@@ -321,7 +340,7 @@ public:
 //find the first empty slot and insert the key and value
     bool insert(Key_t key, Val_t value) {
         {
-            int pos = __builtin_ffs(~hdr.bitmap) - 1;
+            int32_t pos = __builtin_ffs(~hdr.bitmap) - 1;
             if (pos >= 0 && pos < fanout) {
                 records[pos].key = key;
                 records[pos].value = value;
@@ -355,7 +374,7 @@ public:
     
     bool isFull()
     {
-        return hdr.bitmap == (1 << fanout) - 1;
+        return hdr.bitmap == static_cast<uint32_t>((1 << fanout) - 1);
     }
 
     void dump()
@@ -366,7 +385,7 @@ public:
             std::cout << ((hdr.bitmap >> i) & 1);
         }
         std::cout << std::endl;
-        for(int i = 0; i < fanout; i++) {
+        for(int32_t i = 0; i < fanout; i++) {
             if(hdr.isBitSet(i)) {
                 std::cout << "Key: " << records[i].key << " Value: " << records[i].value << std::endl;
             }
