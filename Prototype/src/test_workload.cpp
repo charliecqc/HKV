@@ -32,7 +32,7 @@ void exec(int num_thread) {
 }
 
 int main() {
-    int num_thread = 1;
+    int num_thread = 8;
     exec(num_thread);
     // Lookup nodes
 

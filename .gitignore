@@ -48,3 +48,5 @@ git_clean.sh
 artifact_evaluation/result/*
 .vscode/*
 build/*
+
+.codegpt

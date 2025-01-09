@@ -322,6 +322,7 @@ void DramSkiplist::initInodes(Inode* inodes[], int newlevel, Key_t key)
     }
 }
 
+
 bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
 {
     bool ret = false;
@@ -350,8 +351,8 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
         Inode *next = nullptr;
         {
             std::unique_lock<std::shared_mutex> lock(current_update->hdr.mtx);
+            bool is_current_top = (i == newlevel - 1) ? true : false;
             if(!current_update->isFull()) {
-                bool is_current_top = (i == newlevel - 1) ? true : false;
                 rebalanceInodeImp(current_update, prev_update, prev_pos, targetKey, is_current_top, lock);
             }else {
                 next = dramInodePool->getNextNode();
@@ -359,7 +360,6 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                     std::unique_lock<std::shared_mutex> lock_next(next->hdr.mtx);
                     current_update->split(next);
                     Inode *target = (targetKey < next->getMinKey()) ? current_update : next;
-                    bool is_current_top = (i == newlevel - 1) ? true : false;
                     rebalanceInodeImp(target, prev_update, prev_pos, targetKey, is_current_top, lock);
                 }
             }
@@ -373,16 +373,30 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
 void DramSkiplist::rebalanceInodeImp(Inode *target, Inode *&prev_target, int &prev_pos, Key_t targetKey, bool is_current_top, std::unique_lock<std::shared_mutex> &lock)
 {
     int pos = target->findInsertKeyPos(targetKey);
+    if(!is_current_top) {
+        std::unique_lock<std::shared_mutex> lock_prev(prev_target->hdr.mtx);
+        prev_target->shift(prev_pos);
+        prev_target->hdr.last_index++;
+        prev_target->gps[prev_pos].key = targetKey;
+        prev_target->gps[prev_pos].value = target->getId();
+        prev_target->hdr.coveredNodes++;
+    }
+    prev_target = target;
+    prev_pos = pos;
+}
+
+#if 0
+void DramSkiplist::rebalanceInodeImp(Inode *target, Inode *&prev_target, int &prev_pos, Key_t targetKey, bool is_current_top, std::unique_lock<std::shared_mutex> &lock)
+{
+    int pos = target->findInsertKeyPos(targetKey);
     target->shift(pos);
     target->hdr.last_index++;
     target->gps[pos].key = targetKey;
     if(!is_current_top) {
         prev_target->gps[prev_pos].value = target->getId();
         prev_target->hdr.coveredNodes++;
-        if(lock.owns_lock()) {
-            lock.unlock();
-        }
     }
     prev_target = target;
     prev_pos = pos;
 }
+#endif
