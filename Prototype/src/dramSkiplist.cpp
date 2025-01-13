@@ -48,29 +48,24 @@ bool DramSkiplist::insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel)
     bool ret = false;
     int updatedlevel = newlevel;
     inodes[newlevel - 1] = dramInodePool->getNextNode();
-    std::unique_lock<std::shared_mutex> lock(inodes[newlevel - 1]->hdr.mtx);
+    assert(inodes[newlevel - 1] != nullptr);
+    //std::unique_lock<std::shared_mutex> lock(inodes[newlevel - 1]->hdr.mtx);
     inodes[newlevel - 1]->hdr.level = newlevel - 1;
     inodes[newlevel - 1]->hdr.next = std::numeric_limits<uint32_t>::max();
     inodes[newlevel - 1]->gps[0].key = key;
-    lock.unlock();
+    //lock.unlock();
     for(int i = newlevel - 2; i >= 0; i--) {
         inodes[i] = dramInodePool->getNextNode();
-        {
-            std::unique_lock<std::shared_mutex> ilock(inodes[i]->hdr.mtx);
-            inodes[i]->gps[0].key = key;
-            inodes[i]->hdr.level = i;
-            inodes[i]->hdr.next = std::numeric_limits<uint32_t>::max();
-        }
-        {
-            std::unique_lock<std::shared_mutex> ilock1(inodes[i+1]->hdr.mtx);
-            inodes[i+1]->gps[0].value = inodes[i]->getId();
-            inodes[i+1]->hdr.last_index = 0;
-            inodes[i+1]->hdr.coveredNodes++;
-        }
-        
+        assert(inodes[i] != nullptr);
+        inodes[i]->gps[0].key = key;
+        inodes[i]->hdr.level = i;
+        inodes[i]->hdr.next = std::numeric_limits<uint32_t>::max();
+        inodes[i+1]->gps[0].value = inodes[i]->getId();
+        inodes[i+1]->hdr.last_index = 0;
+        inodes[i+1]->hdr.coveredNodes++;
     }
     {
-        std::unique_lock<std::shared_mutex> lock2(inodes[0]->hdr.mtx);
+       // std::unique_lock<std::shared_mutex> lock2(inodes[0]->hdr.mtx);
         ret = linkVnodeToInode(*inodes[0], 0, *reinterpret_cast<Vnode *>(val));
         if(ret == false) {
             return ret;
@@ -81,7 +76,7 @@ bool DramSkiplist::insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel)
     while(newlevel > 0) {
         {
             std::unique_lock<std::shared_mutex> lock4(header[newlevel-1]->hdr.mtx);
-            std::unique_lock<std::shared_mutex> lock3(inodes[newlevel-1]->hdr.mtx);
+            //std::unique_lock<std::shared_mutex> lock3(inodes[newlevel-1]->hdr.mtx);
             inodes[newlevel-1]->hdr.next = header[newlevel-1]->hdr.next;
             header[newlevel-1]->hdr.next = inodes[newlevel-1]->getId();
         }
@@ -166,6 +161,7 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
     return true;
 }
 
+#if 0
 void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode* updates[])
 {
     int currentHighestLevelIndex = -1;
@@ -230,7 +226,53 @@ void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode* updates[])
             }
         }
     }
- }
+}
+#endif
+
+void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
+{
+    int currentHighestLevelIndex = -1;
+    {
+        std::shared_lock<std::shared_mutex> lock(level_lock);
+        currentHighestLevelIndex = level - 1;
+    }
+    Inode *current = header[currentHighestLevelIndex]; 
+    for(int i = currentHighestLevelIndex; i >= 0; i--) {
+        Inode *update_target = nullptr;
+        while(true) { // search horizontally to find the node in this level
+            assert(current != nullptr);
+            {
+                std::shared_lock<std::shared_mutex> lock_current(current->hdr.mtx);
+                Inode *next = dramInodePool->at(current->hdr.next);
+                std::shared_lock<std::shared_mutex> lock_next(next->hdr.mtx);
+                if(next->getId() != tail[i]->getId() && key >= next->getMinKey()) {
+                    current = next;
+                } else {
+                    update_target = current->isHeader()? next : current;
+                    break;
+                }
+            }
+        }
+        updates[i] = update_target;
+        {
+            std::shared_lock<std::shared_mutex> lock_current(current->hdr.mtx);
+            if(current->isHeader()) {
+                if(i != 0) { // if not the bottom level
+                    Inode *temp = dramInodePool->at(current->gps[0].value);
+                    assert(temp != nullptr);
+                    current = temp;
+                } 
+            }else {
+                if(i != 0) {
+                    int pos = current->findKeyPos(key);
+                    Inode *temp = dramInodePool->at(current->gps[pos].value);
+                    assert(temp != nullptr);
+                    current = temp;
+                }
+            }
+        }
+    }
+}
 
 Inode* DramSkiplist::lookup(Key_t key, int &idx)
 {
@@ -282,6 +324,8 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
     }
     return current;
 }
+
+
 
 Inode* DramSkiplist::getHeader()
 {
@@ -377,7 +421,6 @@ void DramSkiplist::rebalanceInodeImp(Inode *target, Inode *&prev_target, int &pr
         std::unique_lock<std::shared_mutex> lock_prev(prev_target->hdr.mtx);
         prev_target->shift(prev_pos);
         prev_target->hdr.last_index++;
-        prev_target->gps[prev_pos].key = targetKey;
         prev_target->gps[prev_pos].value = target->getId();
         prev_target->hdr.coveredNodes++;
     }

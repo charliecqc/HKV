@@ -47,6 +47,7 @@ public:
     Inode* getNextNode() {
         int idx = currentIdx.fetch_add(1);
         if (idx >= numNodes) {
+            cout << "Exceeding the maximum number of nodes" << endl;
             return nullptr;
         }
         Inode *node = dramInodePool[idx];

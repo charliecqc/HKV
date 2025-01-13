@@ -202,6 +202,7 @@ Val_t TandemIndex::lookup(Key_t key)
 {
     int idx = -1;
     Vnode *vnode = nullptr;
+    Val_t value;
     Inode *inode = mainIndex->lookup(key, idx);
     if(inode == nullptr) {
         return -1;
@@ -216,27 +217,24 @@ Val_t TandemIndex::lookup(Key_t key)
         cout << "look up $_vnode id: " << vnode->hdr.id << " max key: " << vnode->getMaxKey() << endl;
 #endif
         if(vnode->hdr.next != -1 && key > vnode->getMaxKey()) {
-            Vnode *temp = valueList->pmemVnodePool->at(vnode->hdr.next);
+            Vnode *next = valueList->pmemVnodePool->at(vnode->hdr.next);
             lock.unlock();
-            vnode = temp;
+            vnode = next;
         }else {
-            lock.unlock();
-            break;
+            if(vnode->lookup(key, value)) {
+                return value;
+            } else {
+#ifdef DBG
+                vnode->dump();
+                Vnode *next = valueList->pmemVnodePool->at(vnode->hdr.next);
+                std::cout << "this is next vnode" << std::endl;
+                next->dump();
+#endif
+                cout << "Failed to find the key in the value list." << endl;
+                return -1;
+            }
         }
     }
-    Val_t value;
-    bool ret = vnode->lookup(key, value);
-    if(ret) {
-        return value;
-    }else{
-#ifdef DBG
-        vnode->dump();
-        Vnode *next = valueList->pmemVnodePool->at(vnode->hdr.next);
-        std::cout << "this is next vnode" << std::endl;
-        next->dump();
-#endif
-    }
-    return -1;
 }
 
 void TandemIndex::createWorkerThread()

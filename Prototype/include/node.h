@@ -169,6 +169,8 @@ public:
     int findInsertKeyPos(Key_t key)
     {
         int idx = 0;
+        if(key < this->getMinKey())
+            return idx;
         for(int i = 0; i <= this->hdr.last_index; i++) {
             if(key >= this->gps[i].key) {
                 if(i + 1 <= this->hdr.last_index) {
@@ -252,7 +254,6 @@ public:
     }
 
     bool lookup(Key_t key, Val_t &value) {
-        std::shared_lock<std::shared_mutex> lock(hdr.mtx);
         for(int32_t i = fanout - 1 ; i >= 0; i--) {
             if(records[i].key == key && hdr.isBitSet(i)) {
                 value = records[i].value;
