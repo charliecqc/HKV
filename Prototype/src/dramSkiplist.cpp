@@ -1,7 +1,7 @@
 #include "dramSkiplist.h"
 #include <cassert>
 #include <mutex>
-#define numNodesInPool 10000
+#define numNodesInPool 10000000
 
 DramSkiplist::DramSkiplist()
 {
@@ -98,6 +98,41 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
     }
     Inode *target = header[currentHighestLevelIndex];
     for(int i = currentHighestLevelIndex; i >= 0; i--) {
+        while(true) {
+            std::shared_lock<std::shared_mutex> lock(target->hdr.mtx);
+            Inode *next = dramInodePool->at(target->hdr.next);
+            std::shared_lock<std::shared_mutex> lock_next(next->hdr.mtx);
+            if(next->getId() != tail[i]->getId() && oldKey >= next->getMinKey()) {
+                target = next;
+            } else {
+                break;
+            }
+        }
+        {
+            Val_t index = 0;
+            std::unique_lock<std::shared_mutex> lock3(target->hdr.mtx);
+            int idx = target->findKeyPos(oldKey);
+            if(target->gps[idx].key == oldKey) {
+                target->gps[idx].key = newKey;
+            }   
+            if(i != 0) {
+                target = dramInodePool->at(target->gps[idx].value);
+            }
+        }
+    }
+    return true;
+}
+
+#if 0
+bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
+{
+    int currentHighestLevelIndex = -1;
+    {
+        std::shared_lock<std::shared_mutex> lock(level_lock); //to protect level
+        currentHighestLevelIndex = level - 1;
+    }
+    Inode *target = header[currentHighestLevelIndex];
+    for(int i = currentHighestLevelIndex; i >= 0; i--) {
         Inode *prev = nullptr;
         while(true) {
             std::shared_lock<std::shared_mutex> lock(target->hdr.mtx);
@@ -160,7 +195,7 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
     }
     return true;
 }
-
+#endif
 #if 0
 void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode* updates[])
 {

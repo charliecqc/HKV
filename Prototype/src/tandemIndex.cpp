@@ -45,100 +45,82 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         shared_lock<std::shared_mutex> inode_lock(inode->hdr.mtx);
         Vnode *valueNode = valueList->pmemVnodePool->at(inode->gps[idx].value);
         inode_lock.unlock();
-        {
-            while(1) {
-                std::shared_lock<std::shared_mutex> lock_value(valueNode->hdr.mtx);
-                if(key > valueNode->getMaxKey() && valueNode->hdr.next != -1) {
-                    Vnode *temp = valueList->pmemVnodePool->at(valueNode->hdr.next);
-                    lock_value.unlock();
-                    valueNode = temp;
-                }else 
-                    break;
-
-            }
-#if 0
-            std::shared_lock<std::shared_mutex> lock_value(valueNode->hdr.mtx);
-            while(valueNode->hdr.next != -1 && key > valueNode->getMaxKey() && valueNode->isFull()) {
-                Vnode *temp = valueList->pmemVnodePool->at(valueNode->hdr.next);
-                lock_value.unlock();
-                valueNode = temp;
-            }
-#endif
-        }
-        {
-            std::unique_lock<std::shared_mutex> lock_value(valueNode->hdr.mtx);
-            ret = valueNode->insert(key, value);
-        }
-        if(ret) {
-            // insert vaule to value node successfully (there was a empty slot)
-            return ret;
-        }
-        else {
-            // need to allocate a new value node
-            targetVnode = valueList->pmemVnodePool->getNextNode();
-            if(targetVnode == nullptr) {
-                std::cout << "Failed to get a new node from the pool." << std::endl;
-                return false;
-            }
-            //target node is full, need to split the value node
-            {
-                std::unique_lock<std::shared_mutex> lock_value(valueNode->hdr.mtx);
-                ret = valueList->split(valueNode, targetVnode);
-                if(ret == false) {
-                    std::cout << "Failed to split the value node." << std::endl;
-                }
-                if(key <= valueNode->getMaxKey()) { // key is smaller than the max key of the previous value node after split
-                    ret = valueNode->insert(key, value);
-                    if(ret == false) {
-                        std::cout << "Failed to insert the key and value into the vnode after split. key: " << key << std::endl;
-                        return ret;
-                    }
-                } else {
-                    lock_value.unlock();
-                    {
-                        std::unique_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
-                        ret = targetVnode->insert(key, value);
-                        if(ret == false) {
-                            std::cout << "Failed to insert the key and value into the vnode." << std::endl;
-                            return ret;
-                        }
-                    }
-                }
-            }
-            //incease the covered nodes of the inode due to newly added vnodes
-            {
-                // scope of inode_wlock
-                std::unique_lock<std::shared_mutex> inode_wlock(inode->hdr.mtx);
-                inode->hdr.coveredNodes++;
-                if(inode->checkForActivateGP()) {
-                    Key_t targetKey;
-                    {
-                        std::shared_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
-                        targetKey = targetVnode->getMinKey();
-                    }
-                    int pos = -1;
-                    if(inode->activateGP(targetKey, pos)) {
-                        ret = mainIndex->linkVnodeToInode(*inode, pos, *targetVnode);
-                        if(!ret) {
-                            std::cout << "Failed to link the vnode to the inode." << std::endl;
-                            return ret;
-                        }
-                        inode->gps[pos].key = targetKey;
-                    }else {
-                        //TODO: rebalance the inode
-                        //inode has no empty gp slots, need to split the inode
-                        needToRebalance = true;
-                    }
-                }
-                else {
-                    //no needs to activate GP, just return 
+        while(true) {
+            std::shared_lock<std::shared_mutex> lock_value_s(valueNode->hdr.mtx);
+            if(key > valueNode->getMaxKey() && valueNode->hdr.next != -1) {
+                valueNode = valueList->pmemVnodePool->at(valueNode->hdr.next);
+            }else {
+                lock_value_s.unlock();
+                std::unique_lock<std::shared_mutex> lock_value_e(valueNode->hdr.mtx);
+                if(valueNode->insert(key, value)) {
                     return true;
                 }
+                break; // value node is full
+            }
+        }
+        // need to allocate a new value node
+        targetVnode = valueList->pmemVnodePool->getNextNode();
+        if(targetVnode == nullptr) {
+            std::cout << "Failed to get a new node from the pool." << std::endl;
+            return false;
+        }
+        //need to split the value node because its full
+        {
+            std::unique_lock<std::shared_mutex> lock_value(valueNode->hdr.mtx);
+            ret = valueList->split(valueNode, targetVnode);
+            if(ret == false) {
+                std::cout << "Failed to split the value node." << std::endl;
+            }
+            if(key <= valueNode->getMaxKey()) { // key is smaller than the max key of the previous value node after split
+                ret = valueNode->insert(key, value);
+                if(ret == false) {
+                    std::cout << "Failed to insert the key and value into the vnode after split. key: " << key << std::endl;
+                    return ret;
+                }
+            } else {
+                lock_value.unlock();
+                {
+                    std::unique_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
+                    ret = targetVnode->insert(key, value);
+                    if(ret == false) {
+                        std::cout << "Failed to insert the key and value into the vnode." << std::endl;
+                        return ret;
+                    }
+                }
+            }
+        }
+        //incease the covered nodes of the inode due to newly added vnodes
+        {
+            // scope of inode_wlock
+            std::unique_lock<std::shared_mutex> inode_wlock(inode->hdr.mtx);
+            inode->hdr.coveredNodes++;
+            if(inode->checkForActivateGP()) {
+                Key_t targetKey;
+                {
+                    std::shared_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
+                    targetKey = targetVnode->getMinKey();
+                }
+                int pos = -1;
+                if(inode->activateGP(targetKey, pos)) {
+                    ret = mainIndex->linkVnodeToInode(*inode, pos, *targetVnode);
+                    if(!ret) {
+                        std::cout << "Failed to link the vnode to the inode." << std::endl;
+                        return ret;
+                    }
+                    inode->gps[pos].key = targetKey;
+                }else {
+                        //TODO: rebalance the inode
+                        //inode has no empty gp slots, need to split the inode
+                    needToRebalance = true;
+                }
+            }else {
+                    //no needs to activate GP, just return 
+                return true;
             }
         }
     }else {
         // case of no inode is found
-        //in the case that eitehr key is smaller than the min key of first inode or current value node is full
+        //in the case that either the key is smaller than the min key of first inode or current value node is full
         Vnode *headVnode = valueList->getHeader();
         {
             std::shared_lock<std::shared_mutex> lock(headVnode->hdr.mtx);

@@ -55,7 +55,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
                 curNode->hdr.unsetBit(i);
             }
         }
-    }else {
+    }else {// all keys are the same
         for(uint32_t i = 0; i < fanout / 2; i++) {
             Key_t key = curNode->records[i].key;
             Val_t value = curNode->records[i].value;
