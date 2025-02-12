@@ -2,6 +2,7 @@
 #include <string>
 #include <iostream>
 #include <unistd.h>
+#pragma once
 using namespace std;
 
 typedef struct root_obj {
@@ -17,7 +18,7 @@ class PmemManager {
             return pmemPool[poolId];
         }
 
-        static bool createPool(int poolId, string path, size_t poolSize, void **rootp) {
+        static bool createOrOpenPool(int poolId, string path, size_t poolSize, void **rootp, bool &isCreate) {
             PMEMobjpool *pop = nullptr;
             if(access(path.c_str(), F_OK) != 0) {
                 std::cout << "File does not exists: " << path << std::endl;
@@ -26,6 +27,8 @@ class PmemManager {
                     std::cout << "Failed to create pool: " << path << ", error code: " << errno << std::endl;
                     return false;
                 }
+                isCreate = true;
+                std::cout << "Created pool: " << path << std::endl;                
             } else {
                 std::cout << "File exist: " << path << std::endl;
                 pop = pmemobj_open(path.c_str(), "pmemvaluepool");
@@ -35,8 +38,8 @@ class PmemManager {
                     std::cout << "Failed to open pool: " << path << std::endl;
                     return false;
                 }
+                isCreate = false;
             }
-            std::cout << "Created pool: " << path << std::endl;                
             pmemPool[poolId] = reinterpret_cast<void *>(pop);
             PMEMoid root = pmemobj_root(pop, sizeof(root_obj));
             *rootp = (root_obj*)pmemobj_direct(root);
@@ -63,4 +66,15 @@ class PmemManager {
             PMEMobjpool *pop = (PMEMobjpool *)pmemPool[poolId];
             pmemobj_persist(pop, data, size);
         }
+
+        static inline void memcpyToNVM(int poolId, char *dest, char *src, size_t size) {
+            PMEMobjpool *pop = (PMEMobjpool *)pmemPool[poolId];
+            pmemobj_memcpy_persist(pop, dest, src, size);
+        }
+
+        static inline void memcpyToDRAM(int poolId, char *dest, char *src, size_t size) {
+            PMEMobjpool *pop = (PMEMobjpool *)pmemPool[poolId];
+            memcpy(dest, src, size);
+        }
+
 };

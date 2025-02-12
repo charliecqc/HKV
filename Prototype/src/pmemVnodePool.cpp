@@ -2,28 +2,41 @@
 #define VALUEPOOL 0
 using namespace std;
 
-bool PmemVnodePool::init(root_obj *root) {
+int PmemVnodePool::init(root_obj *root) {
     size_t vp_size = 10UL * 1024UL * 1024UL * 1024UL; 
-    bool ret = PmemManager::createPool(VALUEPOOL, fileName.c_str(), vp_size, (void **)&root);
+    bool isCreate;
+    bool ret = PmemManager::createOrOpenPool(VALUEPOOL, fileName.c_str(), vp_size, (void **)&root, isCreate);
     if (!ret) {
-        return false;
-    }
+        std::cout << "Failed to create or open pool: " << fileName << std::endl;
+        return -1;
+    } 
 
     // To allocate the vnode pool. 1. allocate memory. 2. cast into vodes 3. pot them into vector.
     PMEMobjpool *pop = (PMEMobjpool *)PmemManager::getPoolStartAddress(VALUEPOOL);
-    int ret_val = pmemobj_alloc(pop, &root->ptr[0], nodeSize * MAX_NODES, 0, NULL, NULL);
-    if (ret_val) {
-        std::cout << "Failed to allocate memory for root->ptr[0]" << std::endl;
-        return false;
+    if(isCreate) {
+        int ret_val = pmemobj_alloc(pop, &root->ptr[0], nodeSize * MAX_NODES, 0, NULL, NULL);
+        if (ret_val) {
+            std::cout << "Failed to allocate memory for root->ptr[0]" << std::endl;
+            return -1;
+        }
+        void *vnodePool = pmemobj_direct(root->ptr[0]);
+        for(int i = 0; i < numNodes; i++) {
+            Vnode *vnode = (Vnode *) new (vnodePool) Vnode(i);
+            pmemVnodePool.push_back(vnode);
+            vnodePool = static_cast<char *>(vnodePool) + nodeSize;
+        }
+        PmemManager::flushToNVM(0, (char *)vnodePool, nodeSize * numNodes);
+        return 0;
+    }else {
+        void *vnodePool = pmemobj_direct(root->ptr[0]);
+        for(int i = 0; i < numNodes; i++) {
+            Vnode *vnode = (Vnode *)vnodePool;
+            pmemVnodePool.push_back(vnode);
+            vnodePool = static_cast<char *>(vnodePool) + nodeSize;
+        }
+        Vnode *vnode = pmemVnodePool[numNodes - 1];
+        return vnode->hdr.next;
     }
-    void *vnodePool = pmemobj_direct(root->ptr[0]);
-    for(int i = 0; i < numNodes; i++) {
-        Vnode *vnode = (Vnode *) new (vnodePool) Vnode(i);
-        pmemVnodePool.push_back(vnode);
-        vnodePool = static_cast<char *>(vnodePool) + nodeSize;
-    }
-    PmemManager::flushToNVM(0, (char *)vnodePool, nodeSize * numNodes);
-    return true;    
 }
 
 bool PmemVnodePool::extend(PMEMobjpool *pop, size_t extendNumNodes) {

@@ -1,4 +1,8 @@
 #include "common.h"
+#include "checkpoint.h"
+#include "pmemInodePool.h"
+#include <queue>
+#include <boost/lockfree/spsc_queue.hpp>
 #pragma once
 
 enum Operation {
@@ -24,5 +28,18 @@ public:
     WorkerThread();
     ~WorkerThread();
     void workerOperation();
+};
+
+class CheckpointThread {
+private:
+    //std::queue<std::vector<ckp_entry *>*> *checkpointQueue;
+    CheckpointQueue *cptq;
+    PmemInodePool *pmemInodePool;
+    int id;
+public:
+    CheckpointThread(int tid, CheckpointQueue *cq, PmemInodePool *pmemInodePool);
+    ~CheckpointThread();
+    void checkpointOperation();
+    bool isCheckpointQueueEmpty();
 };
 

@@ -1,7 +1,7 @@
 #include "valuelist.h"
 
 ValueList::ValueList() {
-    pmemVnodePool = new PmemVnodePool(sizeof(Vnode), 10000000);
+    pmemVnodePool = new PmemVnodePool(sizeof(Vnode), MAX_VALUE_NODES);
     head = pmemVnodePool->getNextNode();
     head->hdr.next = std::numeric_limits<uint32_t>::max();
 }   

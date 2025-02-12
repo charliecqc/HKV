@@ -10,7 +10,6 @@
 #include "common.h"
 #pragma once
 
-#define LAYOUT_NAME "value_pool"
 #define NODE_POOL_SIZE ((30LL*1024*1024*1024))
 
 using namespace std;
@@ -38,6 +37,10 @@ public:
 
     size_t getCurrentIdx() {
         return currentIdx.load();
+    }
+
+    void setCurrentIdx(size_t idx) {
+        currentIdx.store(idx);
     }
 
     Inode* getCurrentNode() {

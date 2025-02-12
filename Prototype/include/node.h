@@ -15,7 +15,7 @@
 
 #pragma once
 
-const int32_t fanout = 32;
+const int32_t fanout = 28;
 
 class Node {
 public:
@@ -39,12 +39,12 @@ public:
 
 class header{
     public:
-        int id; //4 bytes
-        int32_t coveredNodes; // 4 bytes
-        int32_t level; //4 bytes
-        int next; //4 bytes 
+        int16_t id; //2 bytes
+        int8_t coveredNodes; // 1 byte
+        int8_t level; //1 byte
+        int16_t next; //2 bytes 
         int16_t last_index; //2 bytes
-        std::shared_mutex mtx;
+        std::shared_mutex mtx; //8 bytes
     public:
         header() {
             id = 0;

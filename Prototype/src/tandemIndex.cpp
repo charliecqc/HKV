@@ -4,22 +4,36 @@
 #include "valuelist.h"
 #include "spinLock.h"
 #include "workerThread.h"
+#include "checkpoint.h"
 #include "common.h"
 
-std::queue<std::vector<wq_entry *>*> g_workQueue[WORKERQUEUE_NUM];
+//std::queue<std::vector<wq_entry *>*> g_workQueue[WORKERQUEUE_NUM];
 //std::queue <wq_entry_t *> g_workQueue;
 //std::vector<int> g_workQueue;
+//std::queue<std::vector<ckp_entry *>*> g_checkpointQueue;
+//boost::lockfree::spsc_queue<CheckpointVector*, boost::lockfree::capacity<1000000>> g_checkpointQueue;
+//boost::lockfree::spsc_queue<ckp_entry *, boost::lockfree::capacity<1000000>> g_checkpointQueue;
+std::queue<ckp_entry *> g_checkpointQueue;
 bool wqReady[WORKERQUEUE_NUM] = {false};
 volatile bool wtInitialized = false;
 std::atomic<bool> g_endTandem;
 SpinLock g_spinLock;
 
 TandemIndex::TandemIndex() {
-    g_endTandem = false;   
-    mainIndex = new DramSkiplist();
-    //shadowIndex = new PmemSkiplist();
+    g_endTandem = false;
+    //dramInodePool = new DramInodePool(sizeof(Inode), MAX_NODES);
     valueList = new ValueList();
+    pmemRecoveryArray = new PmemInodePool(sizeof(Inode), MAX_NODES);
+    recoveryManager = new RecoveryManager(pmemRecoveryArray); 
+    int level = recoveryManager->recoveryOperation();
+    dramInodePool = recoveryManager->getDramInodePool();
+    std::cout << " dramInodePool: " << dramInodePool << std::endl;
+    cptq = new CheckpointQueue();
+    mainIndex = new DramSkiplist(cptq, dramInodePool);
+    mainIndex->setLevel(level);
+    //shadowIndex = new PmemSkiplist();
     //createWorkerThread();
+    createCheckpointThread();
     Inode *index_header = mainIndex->getHeader();
     Vnode *value_header = valueList->getHeader();
     index_header->gps[0].value = value_header->getId();
@@ -27,10 +41,22 @@ TandemIndex::TandemIndex() {
 
 TandemIndex::~TandemIndex() {
    g_endTandem = true; 
-   if(workerThread->joinable()) {
-       workerThread->join();
-       delete workerThread;
+   if(checkpointThread->joinable()) {
+       checkpointThread->join();
+       delete checkpointThread;
    }
+   Inode *superNode = pmemRecoveryArray->at(MAX_NODES - 1);
+    if(superNode != nullptr) {
+         superNode->hdr.last_index = dramInodePool->getCurrentIdx();
+         superNode->hdr.level = mainIndex->getLevel();
+         PmemManager::flushToNVM(1, reinterpret_cast<char *>(superNode), sizeof(Inode));
+    } 
+
+    Vnode *metaVnode = valueList->pmemVnodePool->at(MAX_VALUE_NODES - 1);
+    if(metaVnode != nullptr) {
+        metaVnode->hdr.next = valueList->pmemVnodePool->getCurrentIdx();
+        PmemManager::flushToNVM(0, reinterpret_cast<char *>(metaVnode), sizeof(Vnode));
+    }
 }
 
 bool TandemIndex::insert(Key_t key, Val_t value)
@@ -108,6 +134,8 @@ bool TandemIndex::insert(Key_t key, Val_t value)
                         return ret;
                     }
                     inode->gps[pos].key = targetKey;
+                    ckp_entry *entry = new ckp_entry(inode);
+                    cptq->push(entry);
                 }else {
                         //TODO: rebalance the inode
                         //inode has no empty gp slots, need to split the inode
@@ -164,6 +192,10 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             std::cout << "Failed to insert the key and value into the main index." << std::endl;
         }
         inode = inodes[0];
+        for(int i = 1; i < newLevel; i++) {
+            ckp_entry *entry = new ckp_entry(inodes[i]);
+            cptq->push(entry);
+        }
     #ifdef DBG
         int id = inode->getId();
         cout << "inserted inode " << id <<endl;
@@ -219,27 +251,36 @@ Val_t TandemIndex::lookup(Key_t key)
     }
 }
 
-void TandemIndex::createWorkerThread()
+void TandemIndex::createCheckpointThread()
 {
     g_spinLock.lock();
-    workerThread = new std::thread(&TandemIndex::workerThreadExec, this);
+    checkpointThread = new std::thread(&TandemIndex::checkpointThreadExec, this, 0);
     wtInitialized = true;
     g_spinLock.unlock();
 }
 
-void TandemIndex::workerThreadExec()
+void TandemIndex::checkpointThreadExec(int id)
 {
+    CheckpointThread ckpt(id, cptq, this->pmemRecoveryArray);
     while(true)
     {
         g_spinLock.lock();
         if(!wtInitialized) {
             g_spinLock.unlock();
+            
             usleep(500);
             continue;
+        }else {
+            g_spinLock.unlock();
+            break;
         }
         g_spinLock.unlock();
     }
     while(!g_endTandem) {
+        usleep(200);
+        while(!ckpt.isCheckpointQueueEmpty()) {
+            ckpt.checkpointOperation();
+        }
     }
 }
 

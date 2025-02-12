@@ -9,31 +9,31 @@
 #include "node.h"
 #pragma once
 
-#define VALUE_POOL_LAYOUT_NAME "value_pool"
+#define INDEX_POOL_LAYOUT_NAME "index_pool"
 #define MAX_NODES 5000
 #define NODE_POOL_SIZE ((30LL*1024*1024*1024))
 
 using namespace std;
 
-class PmemVnodePool {
+class PmemInodePool {
 private:
-    string fileName = "/mnt/pmem0/pmemVnodePool";
-    std::vector<Vnode*> pmemVnodePool;
+    string fileName = "/mnt/pmem0/pmemInodePool";
+    std::vector<Inode*> pmemInodePool;
     int nodeSize;
     int numNodes;
     std::atomic<int> currentIdx;
 public:
-    PmemVnodePool(size_t nodeSize, size_t numNodes) : nodeSize(nodeSize), numNodes(numNodes){
+    PmemInodePool(size_t nodeSize, size_t numNodes) : nodeSize(nodeSize), numNodes(numNodes){
         root_obj *root = nullptr;
-        int current_idx = init(root);
-        currentIdx.store(current_idx);
+        init(root);
+        currentIdx.store(0);
     }
 
-    int init(root_obj *root);
+    bool init(root_obj *root);
 
-    ~PmemVnodePool() {
+    ~PmemInodePool() {
         // Deallocate memory blocks
-        for (Vnode* node : pmemVnodePool) {
+        for (Inode* node : pmemInodePool) {
             delete[] node;
         }
     }
@@ -47,37 +47,37 @@ public:
         return true;
     }
 
-    Vnode* getCurrentNode() {
-        return pmemVnodePool[currentIdx.load()];
+    Inode* getCurrentNode() {
+        return pmemInodePool[currentIdx.load()];
     }
 
-    Vnode *getNextNode() {
+    Inode *getNextNode() {
         int idx = currentIdx.fetch_add(1);
         if (idx >= numNodes) {
             return nullptr;
         }
-        return pmemVnodePool[idx];
+        return pmemInodePool[idx];
     }
 
-    Vnode * popNode() {
-        if (pmemVnodePool.empty()) {
+    Inode * popNode() {
+        if (pmemInodePool.empty()) {
             return nullptr;
         }
 
-        Vnode* vnode = pmemVnodePool.back();
-        pmemVnodePool.pop_back();
-        return vnode;
+        Inode* inode = pmemInodePool.back();
+        pmemInodePool.pop_back();
+        return inode;
     }
 
-    void push(Vnode *vnode) {
-        pmemVnodePool.push_back(vnode);
+    void push(Inode *inode) {
+        pmemInodePool.push_back(inode);
     }
 
-    Vnode * at(size_t index) {
-        if (index >= pmemVnodePool.size()) {
+    Inode * at(size_t index) {
+        if (index >= pmemInodePool.size()) {
             return nullptr;
         }
-        return pmemVnodePool[index];
+        return pmemInodePool[index];
     }
 
     bool extend(PMEMobjpool *pop, size_t extendNumNodes);

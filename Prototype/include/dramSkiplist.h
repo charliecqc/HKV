@@ -1,4 +1,5 @@
 #include "skiplist.h"
+#include "checkpoint.h"
 #include "dramInodePool.h"
 #include "pmemVnodePool.h"
 #include "common.h"
@@ -8,10 +9,11 @@ private:
     Inode* header[MAX_LEVEL];
     Inode* tail[MAX_LEVEL];
     DramInodePool *dramInodePool;
+    CheckpointQueue *ckpq;
     int level; //level is the current max level of the skiplist
     std::shared_mutex level_lock;
 public:
-    DramSkiplist();
+    DramSkiplist(CheckpointQueue *q, DramInodePool *dramInodePool);
     ~DramSkiplist();
     bool insert(Key_t &key, Val_t &val);
     bool insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel);
@@ -30,4 +32,6 @@ public:
     bool rebalanceInode(Inode &inode);
     bool rebalanceInode(Inode &inode, Vnode &vnode);
     bool activateGP(Inode &inode);
+    void setLevel(int level);
+    int getLevel();
 };

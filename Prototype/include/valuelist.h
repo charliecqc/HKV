@@ -1,6 +1,7 @@
 #include <iostream>
 #include "node.h"
 #include "pmemVnodePool.h"
+#define MAX_VALUE_NODES 10000000
 
 #pragma once
 // Value list class on pmem
