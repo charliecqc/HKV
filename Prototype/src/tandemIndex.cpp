@@ -27,12 +27,9 @@ TandemIndex::TandemIndex() {
     recoveryManager = new RecoveryManager(pmemRecoveryArray); 
     int level = recoveryManager->recoveryOperation();
     dramInodePool = recoveryManager->getDramInodePool();
-    std::cout << " dramInodePool: " << dramInodePool << std::endl;
     cptq = new CheckpointQueue();
     mainIndex = new DramSkiplist(cptq, dramInodePool);
     mainIndex->setLevel(level);
-    //shadowIndex = new PmemSkiplist();
-    //createWorkerThread();
     createCheckpointThread();
     Inode *index_header = mainIndex->getHeader();
     Vnode *value_header = valueList->getHeader();
@@ -72,12 +69,10 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         Vnode *valueNode = valueList->pmemVnodePool->at(inode->gps[idx].value);
         inode_lock.unlock();
         while(true) {
-            std::shared_lock<std::shared_mutex> lock_value_s(valueNode->hdr.mtx);
+            std::unique_lock<std::shared_mutex> lock_value(valueNode->hdr.mtx);
             if(key > valueNode->getMaxKey() && valueNode->hdr.next != -1) {
                 valueNode = valueList->pmemVnodePool->at(valueNode->hdr.next);
             }else {
-                lock_value_s.unlock();
-                std::unique_lock<std::shared_mutex> lock_value_e(valueNode->hdr.mtx);
                 if(valueNode->insert(key, value)) {
                     return true;
                 }
@@ -91,6 +86,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             return false;
         }
         //need to split the value node because its full
+        //TODO: can be optimized by releasing the prev lock after next node has been inserted 
         {
             std::unique_lock<std::shared_mutex> lock_value(valueNode->hdr.mtx);
             ret = valueList->split(valueNode, targetVnode);
@@ -104,7 +100,6 @@ bool TandemIndex::insert(Key_t key, Val_t value)
                     return ret;
                 }
             } else {
-                lock_value.unlock();
                 {
                     std::unique_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
                     ret = targetVnode->insert(key, value);
@@ -137,8 +132,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
                     ckp_entry *entry = new ckp_entry(inode);
                     cptq->push(entry);
                 }else {
-                        //TODO: rebalance the inode
-                        //inode has no empty gp slots, need to split the inode
+                    //rebalance the main index, if necessary
                     needToRebalance = true;
                 }
             }else {
@@ -201,14 +195,10 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         cout << "inserted inode " << id <<endl;
     #endif
     }
-//4. rebalance the main index, if necessary
-    if(needToRebalance && inode) {
-#ifdef DBG
-        int id = inode->getId();    
-        cout << "Need to rebalance the inode " << id << " with key " << targetVnode->getMaxKey() << endl;
-#endif
-        ret = mainIndex->rebalanceInode(*inode, *targetVnode);    
-    }
+     if(needToRebalance && inode){
+        std::unique_lock<std::shared_mutex> rebalance_lock(mainIndex->rebalance_lock);
+        ret = mainIndex->rebalanceInode(*inode, *targetVnode);
+     }
     return ret;
 }
 
@@ -238,12 +228,19 @@ Val_t TandemIndex::lookup(Key_t key)
             if(vnode->lookup(key, value)) {
                 return value;
             } else {
-#ifdef DBG
+//#ifdef DBG
+                lock.unlock();
+                std::unique_lock<std::shared_mutex> lock_vnode(vnode->hdr.mtx);
                 vnode->dump();
-                Vnode *next = valueList->pmemVnodePool->at(vnode->hdr.next);
-                std::cout << "this is next vnode" << std::endl;
-                next->dump();
-#endif
+                if(vnode->hdr.next != -1) {
+                    Vnode *next = valueList->pmemVnodePool->at(vnode->hdr.next);
+                    std::cout << "this is next vnode: " << std::endl;
+                    std::shared_lock<std::shared_mutex> lock_next(next->hdr.mtx);
+                    next->dump();
+                }else {
+                    std::cout << " this is the last vnode" << std::endl;
+                }
+//#endif
                 cout << "Failed to find the key in the value list." << endl;
                 return -1;
             }

@@ -8,35 +8,42 @@ DramSkiplist::DramSkiplist(CheckpointQueue *q, DramInodePool* pool)
 {
     ckpq = q;
     dramInodePool = pool;
-    header[MAX_LEVEL - 1] = dramInodePool->getNextNode();
-    header[MAX_LEVEL - 1]->gps[0].key = std::numeric_limits<Key_t>::min();
-    header[MAX_LEVEL - 1]->gps[fanout/2].key = std::numeric_limits<Key_t>::min();
-    header[MAX_LEVEL - 1]->hdr.last_index = 0;
-    for(int i = MAX_LEVEL - 2; i >= 0; i--) {
-        header[i] = dramInodePool->getNextNode();
-        header[i+1]->gps[0].value = header[i]->getId();
-        header[i]->gps[0].key = std::numeric_limits<Key_t>::min();
-        header[i]->hdr.next = std::numeric_limits<uint32_t>::max();
-        header[i]->hdr.last_index = 0;
-    }
+    if(dramInodePool->getCurrentIdx() == 0) {
+        header[MAX_LEVEL - 1] = dramInodePool->getNextNode();
+        header[MAX_LEVEL - 1]->gps[0].key = std::numeric_limits<Key_t>::min();
+        header[MAX_LEVEL - 1]->gps[fanout/2].key = std::numeric_limits<Key_t>::min();
+        header[MAX_LEVEL - 1]->hdr.last_index = 0;
+        for(int i = MAX_LEVEL - 2; i >= 0; i--) {
+            header[i] = dramInodePool->getNextNode();
+            header[i+1]->gps[0].value = header[i]->getId();
+            header[i]->gps[0].key = std::numeric_limits<Key_t>::min();
+            header[i]->hdr.next = std::numeric_limits<uint32_t>::max();
+            header[i]->hdr.last_index = 0;
+        }
 
-    tail[MAX_LEVEL - 1] = dramInodePool->getNextNode();
-    for(int i = MAX_LEVEL - 2; i >= 0; i--) {
-        tail[i] = dramInodePool->getNextNode();
-        tail[i+1]->gps[0].value = tail[i]->getId();
-        tail[i]->gps[0].key = std::numeric_limits<Key_t>::max();
-        tail[i]->gps[fanout/2].key = std::numeric_limits<Key_t>::max();
-        tail[i]->hdr.next = std::numeric_limits<uint32_t>::max();
-    }
+        tail[MAX_LEVEL - 1] = dramInodePool->getNextNode();
+        for(int i = MAX_LEVEL - 2; i >= 0; i--) {
+            tail[i] = dramInodePool->getNextNode();
+            tail[i+1]->gps[0].value = tail[i]->getId();
+            tail[i]->gps[0].key = std::numeric_limits<Key_t>::max();
+            tail[i]->gps[fanout/2].key = std::numeric_limits<Key_t>::max();
+            tail[i]->hdr.next = std::numeric_limits<uint32_t>::max();
+        }
 
-    for(int i = 0; i < MAX_LEVEL; i++) {
-        header[i]->hdr.next = tail[i]->getId();
-        ckp_entry *header_entry = new ckp_entry(header[i]);
-        ckpq->push(header_entry);
-        ckp_entry *tail_entry = new ckp_entry(tail[i]);
-        ckpq->push(tail_entry);
+        for(int i = 0; i < MAX_LEVEL; i++) {
+            header[i]->hdr.next = tail[i]->getId();
+            ckp_entry *header_entry = new ckp_entry(header[i]);
+            ckpq->push(header_entry);
+            ckp_entry *tail_entry = new ckp_entry(tail[i]);
+            ckpq->push(tail_entry);
+        }
+        level = 1;
+    }else {
+        for(int i = MAX_LEVEL - 1; i >= 0; i--) {
+            header[i] = dramInodePool->at(i);
+            tail[i] = dramInodePool->at(i+MAX_LEVEL);
+        }
     }
-    level = 1;
 }
 
 int DramSkiplist::generateRandomLevel()
@@ -82,7 +89,7 @@ bool DramSkiplist::insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel)
     while(newlevel > 0) {
         {
             std::unique_lock<std::shared_mutex> lock4(header[newlevel-1]->hdr.mtx);
-            //std::unique_lock<std::shared_mutex> lock3(inodes[newlevel-1]->hdr.mtx);
+            std::unique_lock<std::shared_mutex> lock3(inodes[newlevel-1]->hdr.mtx);
             inodes[newlevel-1]->hdr.next = header[newlevel-1]->hdr.next;
             header[newlevel-1]->hdr.next = inodes[newlevel-1]->getId();
         }

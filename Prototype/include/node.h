@@ -380,16 +380,18 @@ public:
 
     void dump()
     {
-        std::unique_lock<std::shared_mutex> lock(hdr.mtx);
-        std::cout << "Vnode id: " << hdr.id << " next: " << hdr.next << "bitmap (binary): ";
+        std::cout << "Vnode id: " << hdr.id << " next: " << hdr.next << " bitmap (binary): ";
         for (int i = fanout - 1; i >= 0; i--) {
             std::cout << ((hdr.bitmap >> i) & 1);
         }
         std::cout << std::endl;
         for(int32_t i = 0; i < fanout; i++) {
+#if 0
             if(hdr.isBitSet(i)) {
                 std::cout << "Key: " << records[i].key << " Value: " << records[i].value << std::endl;
             }
+#endif
         }
+        std::cout << " min: " << getMinKey() << " max: " << getMaxKey() << std::endl;
     }
 };

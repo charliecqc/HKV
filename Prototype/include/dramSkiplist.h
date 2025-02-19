@@ -13,6 +13,7 @@ private:
     int level; //level is the current max level of the skiplist
     std::shared_mutex level_lock;
 public:
+    std::shared_mutex rebalance_lock;
     DramSkiplist(CheckpointQueue *q, DramInodePool *dramInodePool);
     ~DramSkiplist();
     bool insert(Key_t &key, Val_t &val);

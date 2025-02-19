@@ -2,35 +2,18 @@
 
 ValueList::ValueList() {
     pmemVnodePool = new PmemVnodePool(sizeof(Vnode), MAX_VALUE_NODES);
+#if 0
     head = pmemVnodePool->getNextNode();
     head->hdr.next = std::numeric_limits<uint32_t>::max();
-}   
-
-bool ValueList::insert(Key_t key, Val_t value)
-{
-#if 0
-    Vnode *curNode = head;
-    Vnode *newNode = pmemVnodePool->getNextNode();
-    if(newNode == nullptr) {
-        return false;
-    }
-    ret = newNode->insert(key, value);
-    if(ret == false) {
-        return false;
-    }
-    Vnode *nextNode = getNext(curNode);
-    while(nextNode != nullptr && nextNode->key < key) {
-        curNode = nextNode;
-        nextNode = getNext(curNode);
-    }
-    newNode->next = curNode->next;
-    curNode->next = newNode->getId();
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(newNode), sizeof(Vnode));
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
-    return true;
 #endif
-    return false;
-}
+    if(pmemVnodePool->getCurrentIdx() != 0) {
+        head = pmemVnodePool->at(0);
+    }else {
+        head = pmemVnodePool->getNextNode();
+        head->hdr.next = std::numeric_limits<uint32_t>::max();
+    }
+
+}   
 
 bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 {

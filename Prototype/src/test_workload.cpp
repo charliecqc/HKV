@@ -9,12 +9,12 @@ void exec(int num_thread) {
     double start_time = 0;
     double end_time = 0;
     double elapsed_time = 0;
-    int num_insert = 100;
+    int num_insert = 10000;
     auto func = [&idx, num_insert](int thread_id) {
         int start_idx = thread_id * num_insert;
         int end_idx = start_idx + num_insert;
         for(int i = start_idx; i < end_idx; i++) {
-            Val_t random_value = std::rand() % 100 + 1;
+            Val_t random_value = std::rand() % 1000 + 1;
             idx.insert(random_value, random_value);
             auto ret = idx.lookup(random_value);
             if(ret != random_value) {
@@ -32,7 +32,7 @@ void exec(int num_thread) {
 }
 
 int main() {
-    int num_thread = 1;
+    int num_thread = 2;
     exec(num_thread);
     // Lookup nodes
 

@@ -14,8 +14,9 @@ int RecoveryManager::recoveryOperation() {
         auto dramPool = dramInodePool->at(0);
         PmemManager::memcpyToDRAM(1, reinterpret_cast<char *>(dramPool), reinterpret_cast<char *>(pmemPool), sizeof(Inode) * (last_index + 1));
         dramInodePool->setCurrentIdx(last_index);
+        return superNode->hdr.level;
     }
-    return superNode->hdr.level;
+    return 1;
 }
 
 DramInodePool *RecoveryManager::getDramInodePool() {

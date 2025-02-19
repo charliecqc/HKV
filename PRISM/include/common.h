@@ -7,6 +7,7 @@
 typedef uint64_t Key_t;
 typedef uint64_t Val_t;
 
+
 class OpForm {
     public:
 	enum Operation {INSERT, REMOVE, INVALID, LOOKUP, SCAN};
