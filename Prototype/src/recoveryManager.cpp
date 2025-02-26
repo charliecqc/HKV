@@ -12,7 +12,7 @@ int RecoveryManager::recoveryOperation() {
         last_index = superNode->hdr.last_index;
         auto pmemPool = pmemRecoveryArray->at(0);
         auto dramPool = dramInodePool->at(0);
-        PmemManager::memcpyToDRAM(1, reinterpret_cast<char *>(dramPool), reinterpret_cast<char *>(pmemPool), sizeof(Inode) * (last_index + 1));
+        PmemManager::memcpyToDRAM(1, reinterpret_cast<char *>(dramPool), reinterpret_cast<char *>(pmemPool), sizeof(Inode) * (last_index ));
         dramInodePool->setCurrentIdx(last_index);
         return superNode->hdr.level;
     }

@@ -2,8 +2,9 @@
 #include "tandemIndex.h"
 
 
-CheckpointThread::CheckpointThread(int tid, CheckpointQueue *cq, PmemInodePool *pmemInodePool) {
+CheckpointThread::CheckpointThread(int tid, CheckpointQueue *cq, PmemInodePool *pmemInodePool, DramSkiplist *index) {
     this->id = tid;
+    this->index = index;
     this->cptq = cq;
     this->pmemInodePool = pmemInodePool;
 }
@@ -26,7 +27,7 @@ void CheckpointThread::checkpointOperation() {
     if(entry != nullptr) {
         Inode *inode = static_cast<Inode *>(entry->content);
         if(inode != nullptr) {
-            std::shared_lock<std::shared_mutex> lock(inode->hdr.mtx);
+            std::shared_lock<std::shared_mutex> lock(index->inode_locks[inode->getId()]);
             int id = inode->getId();
             Inode *pmemInode = pmemInodePool->at(id);
             PmemManager::memcpyToNVM(1, reinterpret_cast<char *>(pmemInode), reinterpret_cast<char *>(inode), sizeof(Inode));

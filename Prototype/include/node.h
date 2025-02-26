@@ -44,7 +44,7 @@ class header{
         int8_t level; //1 byte
         int16_t next; //2 bytes 
         int16_t last_index; //2 bytes
-        std::shared_mutex mtx; //8 bytes
+        //std::shared_mutex mtx; //8 bytes
     public:
         header() {
             id = 0;
@@ -230,9 +230,9 @@ public:
         targetInode->hdr.last_index = temp_index / 2;
         hdr.coveredNodes = hdr.last_index + 1;
         targetInode->hdr.coveredNodes = targetInode->hdr.last_index + 1;
-        int next = hdr.next;
-        targetInode->hdr.next = next;
-        hdr.next = targetInode->getId();
+        //int next = hdr.next;
+        //targetInode->hdr.next = next;
+        //hdr.next = targetInode->getId();
         return true;
     }
 };

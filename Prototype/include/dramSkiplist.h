@@ -13,6 +13,7 @@ private:
     int level; //level is the current max level of the skiplist
     std::shared_mutex level_lock;
 public:
+    std::shared_mutex inode_locks[MAX_NODES];
     std::shared_mutex rebalance_lock;
     DramSkiplist(CheckpointQueue *q, DramInodePool *dramInodePool);
     ~DramSkiplist();
@@ -27,7 +28,7 @@ public:
     bool checkForActivateGP(Inode &inode);
     bool checkForRebalance(Inode &inode, bool &activeNewGP);
     bool rebalanceInode(Inode *inode, bool lastLevel);
-    void rebalanceInodeImp(Inode *target, Inode *&prev_target, int &prev_pos, Key_t targetKey, bool is_current_top, std::unique_lock<std::shared_mutex> &lock);    
+    void rebalanceInodeImp(Inode *target, Inode *&prev_target, int &prev_pos, Key_t targetKey, bool is_current_top);    
     int generateRandomLevel();
     void initInodes(Inode* inodes[], int newlevel, Key_t key);
     bool rebalanceInode(Inode &inode);

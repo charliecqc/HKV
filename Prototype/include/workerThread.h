@@ -1,6 +1,7 @@
 #include "common.h"
 #include "checkpoint.h"
 #include "pmemInodePool.h"
+#include "dramSkiplist.h"
 #include <queue>
 #include <boost/lockfree/spsc_queue.hpp>
 #pragma once
@@ -35,9 +36,10 @@ private:
     //std::queue<std::vector<ckp_entry *>*> *checkpointQueue;
     CheckpointQueue *cptq;
     PmemInodePool *pmemInodePool;
+    DramSkiplist *index;
     int id;
 public:
-    CheckpointThread(int tid, CheckpointQueue *cq, PmemInodePool *pmemInodePool);
+    CheckpointThread(int tid, CheckpointQueue *cq, PmemInodePool *pmemInodePool, DramSkiplist *index);
     ~CheckpointThread();
     void checkpointOperation();
     bool isCheckpointQueueEmpty();

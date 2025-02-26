@@ -65,7 +65,8 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     Inode *inode = mainIndex->lookup(key, idx);
     Vnode *targetVnode = nullptr; // new vnode to be inserted
     if(inode != nullptr) {
-        shared_lock<std::shared_mutex> inode_lock(inode->hdr.mtx);
+        //shared_lock<std::shared_mutex> inode_lock(inode->hdr.mtx);
+        std::shared_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[inode->getId()]);
         Vnode *valueNode = valueList->pmemVnodePool->at(inode->gps[idx].value);
         inode_lock.unlock();
         while(true) {
@@ -113,7 +114,8 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         //incease the covered nodes of the inode due to newly added vnodes
         {
             // scope of inode_wlock
-            std::unique_lock<std::shared_mutex> inode_wlock(inode->hdr.mtx);
+            //std::unique_lock<std::shared_mutex> inode_wlock(inode->hdr.mtx);
+            std::unique_lock<std::shared_mutex> inode_wlock(mainIndex->inode_locks[inode->getId()]);
             inode->hdr.coveredNodes++;
             if(inode->checkForActivateGP()) {
                 Key_t targetKey;
@@ -212,7 +214,8 @@ Val_t TandemIndex::lookup(Key_t key)
         return -1;
     }
     {
-        std::shared_lock<std::shared_mutex> lock(inode->hdr.mtx);
+        //std::shared_lock<std::shared_mutex> lock(inode->hdr.mtx);
+        std::shared_lock<std::shared_mutex> lock(mainIndex->inode_locks[inode->getId()]);
         vnode = valueList->pmemVnodePool->at(inode->gps[idx].value);
     }
     while(true) {
@@ -258,7 +261,7 @@ void TandemIndex::createCheckpointThread()
 
 void TandemIndex::checkpointThreadExec(int id)
 {
-    CheckpointThread ckpt(id, cptq, this->pmemRecoveryArray);
+    CheckpointThread ckpt(id, cptq, this->pmemRecoveryArray, this->mainIndex);
     while(true)
     {
         g_spinLock.lock();
