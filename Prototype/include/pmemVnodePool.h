@@ -54,6 +54,7 @@ public:
     Vnode *getNextNode() {
         int idx = currentIdx.fetch_add(1);
         if (idx >= numNodes) {
+            cout << "No more nodes in the pool." << endl;
             return nullptr;
         }
         return pmemVnodePool[idx];

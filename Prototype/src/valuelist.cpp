@@ -1,4 +1,5 @@
 #include "valuelist.h"
+#include <cassert>
 
 ValueList::ValueList() {
     pmemVnodePool = new PmemVnodePool(sizeof(Vnode), MAX_VALUE_NODES);
@@ -27,6 +28,7 @@ bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 
 bool ValueList::split(Vnode *curNode, Vnode *nextNode)
 {
+    assert(nextNode->isEmpty());
     Key_t midKey = curNode->getMidKey();
     Key_t maxKey = curNode->getMaxKey();
     if(midKey != maxKey) {
@@ -48,6 +50,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     }
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
+    assert(curNode->getMaxKey() <= nextNode->getMinKey());
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
     return true;

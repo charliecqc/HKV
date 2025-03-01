@@ -295,6 +295,9 @@ public:
         std::unordered_set<Key_t> keySet;
         {
             for(int i = fanout - 1; i >= 0; i--) {
+                if(hdr.isBitSet(i) == false) {
+                    continue;
+                }
                 if(records[i].key == std::numeric_limits<Key_t>::max()) {
                     continue;
                 }
@@ -376,6 +379,11 @@ public:
     bool isFull()
     {
         return hdr.bitmap == static_cast<uint32_t>((1 << fanout) - 1);
+    }
+
+    bool isEmpty()
+    {
+        return hdr.bitmap == 0;
     }
 
     void dump()

@@ -224,6 +224,7 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
         {
             //std::shared_lock<std::shared_mutex> lock_current(current->hdr.mtx);
             std::shared_lock<std::shared_mutex> lock_current(inode_locks[current->getId()]);
+            assert(current->hdr.last_index >= 0);
             if(current->isHeader()) {
                 if(i != 0) {
                     Inode *temp = dramInodePool->at(current->gps[0].value);
