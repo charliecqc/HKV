@@ -2,6 +2,7 @@
 #include "checkpoint.h"
 #include <cassert>
 #include <mutex>
+#include <optional>
 #define numNodesInPool 10000000
 
 DramSkiplist::DramSkiplist(CheckpointQueue *q, DramInodePool* pool)
@@ -312,7 +313,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
             level = newlevel;
         }
     }
-
+#if 0
     Inode *prev_update = nullptr; // the update node in the previous round
     int prev_pos = 0; // the position in the previous update node
     for(int i = newlevel - 1; i >= 0; i--) {
@@ -340,6 +341,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                         target = next; // we dont insert into header
                     }else {
                         current_prev->split(next);
+                        assert(current_prev->hdr.last_index != -1 && next->hdr.last_index != -1);
                         target = (targetKey < next->getMinKey()) ? current_prev : next;
                     }
                     rebalanceInodeImp(target, prev_update, prev_pos, targetKey, is_current_top);
@@ -360,22 +362,88 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     prev_update->hdr.coveredNodes++;
     ckp_entry *entry = new ckp_entry(prev_update);
     ckpq->push(entry);
+#endif
+    std::optional<std::unique_lock<std::shared_mutex> > lock_updates[newlevel];
+    std::optional<std::unique_lock<std::shared_mutex> > lock_updates_next[newlevel];
+    int pos = -1;
+    Inode *prev_update = nullptr; // the update node in the previous round
+    Inode *current_update = updates[newlevel - 1];
+    lock_updates[newlevel - 1].emplace(inode_locks[current_update->getId()]);
+    if(current_update->isFull() || current_update->isHeader()) {
+        Inode *next = dramInodePool->getNextNode();
+        lock_updates_next[newlevel - 1].emplace(inode_locks[next->getId()]);
+        next->hdr.next = current_update->hdr.next;
+        current_update->hdr.next = next->getId();
+        if(current_update->isHeader()) {
+            current_update = next;
+        }else { 
+            current_update->split(next);
+            assert(current_update->hdr.last_index != -1 && next->hdr.last_index != -1);
+            current_update = (targetKey < next->getMinKey()) ? current_update : next;
+        }
+    }
+    pos = current_update->findInsertKeyPos(targetKey);
+    prev_update = current_update;
+
+    for(int i = newlevel - 2; i >= 0; i--) {
+        lock_updates[i].emplace(inode_locks[updates[i]->getId()]);
+        current_update = updates[i]; // cureent previous node of the node to be inserted
+        Inode *next = nullptr;
+        {
+            if(current_update->isFull() || current_update->isHeader()) {
+                next = dramInodePool->getNextNode();
+                lock_updates_next[i].emplace(inode_locks[next->getId()]);
+                next->hdr.next = current_update->hdr.next;
+                current_update->hdr.next = next->getId();
+                if(current_update->isHeader()) {
+                    current_update = next;
+                }else { 
+                    current_update->split(next);
+                    assert(current_update->hdr.last_index != -1 && next->hdr.last_index != -1);
+                    current_update = (targetKey < next->getMinKey()) ? current_update : next;
+                }
+            }
+        }
+        prev_update->insertAtPos(targetKey, current_update->getId(), pos);
+        if(lock_updates[i+1]) {
+            lock_updates[i+1]->unlock();
+            lock_updates[i+1].reset();
+        }
+        if(lock_updates_next[i+1]) {
+            lock_updates_next[i+1]->unlock();
+            lock_updates_next[i+1].reset();
+        }
+        pos = current_update->findInsertKeyPos(targetKey);
+        prev_update = current_update;
+    }
+    assert(lock_updates[0]);
+    prev_update->insertAtPos(targetKey, targetVnode.getId(), pos);
+    if(lock_updates[0]) {
+        lock_updates[0]->unlock();
+        lock_updates[0].reset();
+    }
+    if(lock_updates_next[0]) {
+        lock_updates_next[0]->unlock();
+        lock_updates_next[0].reset();
+    }
+    ckp_entry *entry = new ckp_entry(prev_update);
+    ckpq->push(entry);
     return ret;
 }
 
-void DramSkiplist::rebalanceInodeImp(Inode *target, Inode *&prev_target, int &prev_pos, Key_t targetKey, bool is_current_top)
+void DramSkiplist::rebalanceInodeImp(Inode *cur_target, Inode *&prev_target, int &prev_pos, Key_t targetKey, bool is_current_top)
 {
-    int pos = target->findInsertKeyPos(targetKey);
+    int pos = cur_target->findInsertKeyPos(targetKey);
     if(!is_current_top) {
         //std::unique_lock<std::shared_mutex> lock_prev(prev_target->hdr.mtx);
         std::unique_lock<std::shared_mutex> lock_prev(inode_locks[prev_target->getId()]);
         prev_target->shift(prev_pos);
         prev_target->hdr.last_index++;
         prev_target->gps[prev_pos].key = targetKey;
-        prev_target->gps[prev_pos].value = target->getId();
+        prev_target->gps[prev_pos].value = cur_target->getId();
         prev_target->hdr.coveredNodes++;
     }
-    prev_target = target;
+    prev_target = cur_target;
     prev_pos = pos;
 }
 

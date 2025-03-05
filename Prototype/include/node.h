@@ -235,6 +235,15 @@ public:
         //hdr.next = targetInode->getId();
         return true;
     }
+
+    bool insertAtPos(Key_t key, Val_t value, int pos) {
+        shift(pos);
+        hdr.last_index++;
+        gps[pos].key = key;
+        gps[pos].value = value;
+        hdr.coveredNodes++;
+        return true;
+    }
 };
 
 class Vnode
