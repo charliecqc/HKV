@@ -362,7 +362,45 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     prev_update->hdr.coveredNodes++;
     ckp_entry *entry = new ckp_entry(prev_update);
     ckpq->push(entry);
-#endif
+   #endif 
+    std::optional<std::unique_lock<std::shared_mutex> > lock_updates[newlevel];
+    std::optional<std::unique_lock<std::shared_mutex> > lock_updates_next[newlevel];
+    int pos = -1;
+    Inode *prev_update = nullptr; // the update node in the previous round
+    for(int i = newlevel - 1; i >= 0; i--) {
+        lock_updates[i].emplace(inode_locks[updates[i]->getId()]);
+        Inode *current_update = updates[i]; // cureent previous node of the node to be inserted
+        Inode *next = nullptr;
+        {
+            if(current_update->isFull() || current_update->isHeader()) {
+                next = dramInodePool->getNextNode();
+                lock_updates_next[i].emplace(inode_locks[next->getId()]);
+                next->hdr.next = current_update->hdr.next;
+                current_update->hdr.next = next->getId();
+                if(current_update->isHeader()) {
+                    current_update = next;
+                }else { 
+                    current_update->split(next);
+                    assert(current_update->hdr.last_index != -1 && next->hdr.last_index != -1);
+                    current_update = (targetKey < next->getMinKey()) ? current_update : next;
+                }
+            }
+        }
+        if(i != newlevel - 1) {
+            prev_update->insertAtPos(targetKey, current_update->getId(), pos);
+        }
+        if(i!= newlevel - 1 && lock_updates[i+1]) {
+            lock_updates[i+1]->unlock();
+            lock_updates[i+1].reset();
+        }
+        if(i!= newlevel - 1 && lock_updates_next[i+1]) {
+            lock_updates_next[i+1]->unlock();
+            lock_updates_next[i+1].reset();
+        }
+        pos = current_update->findInsertKeyPos(targetKey);
+        prev_update = current_update;
+    }
+   #if 0
     std::optional<std::unique_lock<std::shared_mutex> > lock_updates[newlevel];
     std::optional<std::unique_lock<std::shared_mutex> > lock_updates_next[newlevel];
     int pos = -1;
@@ -416,6 +454,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
         pos = current_update->findInsertKeyPos(targetKey);
         prev_update = current_update;
     }
+    #endif
     assert(lock_updates[0]);
     prev_update->insertAtPos(targetKey, targetVnode.getId(), pos);
     if(lock_updates[0]) {
