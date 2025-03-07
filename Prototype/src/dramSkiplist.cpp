@@ -161,22 +161,23 @@ void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
         while(true) { // search horizontally to find the node in this level
             assert(current != nullptr);
             {
-                //std::shared_lock<std::shared_mutex> lock_current(current->hdr.mtx);
                 std::shared_lock<std::shared_mutex> lock_current(inode_locks[current->getId()]);
                 Inode *next = dramInodePool->at(current->hdr.next);
-                //std::shared_lock<std::shared_mutex> lock_next(next->hdr.mtx);
                 std::shared_lock<std::shared_mutex> lock_next(inode_locks[next->getId()]);
-                if(next->getId() != tail[i]->getId() && key >= next->getMinKey()) {
+                if(!next->isTail() && key >= next->getMinKey()) {
                     current = next;
                 } else {
-                    update_target = current->isHeader()? next : current;
+                    update_target = current;
+                    if(update_target->isTail()) {
+                        std::cout << "tail" << std::endl;
+                    }
                     break;
                 }
             }
         }
+        
         updates[i] = update_target;
         {
-            //std::shared_lock<std::shared_mutex> lock_current(current->hdr.mtx);
             std::shared_lock<std::shared_mutex> lock_current(inode_locks[current->getId()]);
             if(current->isHeader()) {
                 if(i != 0) { // if not the bottom level
@@ -384,10 +385,16 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                     assert(current_update->hdr.last_index != -1 && next->hdr.last_index != -1);
                     current_update = (targetKey < next->getMinKey()) ? current_update : next;
                 }
+                ckp_entry *entry = new ckp_entry(current_update);
+                ckpq->push(entry);
+                ckp_entry *entry2 = new ckp_entry(next);
+                ckpq->push(entry2);
             }
         }
         if(i != newlevel - 1) {
             prev_update->insertAtPos(targetKey, current_update->getId(), pos);
+            ckp_entry *entry = new ckp_entry(prev_update);
+            ckpq->push(entry);
         }
         if(i!= newlevel - 1 && lock_updates[i+1]) {
             lock_updates[i+1]->unlock();
@@ -464,7 +471,8 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     if(lock_updates_next[0]) {
         lock_updates_next[0]->unlock();
         lock_updates_next[0].reset();
-    }
+    } 
+
     ckp_entry *entry = new ckp_entry(prev_update);
     ckpq->push(entry);
     return ret;
