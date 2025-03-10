@@ -56,6 +56,74 @@ int DramSkiplist::generateRandomLevel()
     return level;
 } 
 
+bool DramSkiplist::insert(Vnode *targetVnode) 
+{
+    bool ret = false;
+    Key_t targetKey = std::numeric_limits<Key_t>::max();
+    Inode* updates[MAX_LEVEL];
+    {
+        std::shared_lock<std::shared_mutex> lock(reinterpret_cast<Vnode *>(targetVnode)->hdr.mtx);
+        targetKey = reinterpret_cast<Vnode *>(targetVnode)->getMinKey();
+    }
+    int newlevel = generateRandomLevel();
+    {
+        std::unique_lock<std::shared_mutex> lock(level_lock);
+        if(newlevel > level) {
+            
+            level = newlevel;
+        }
+    }
+    for(int i = 0; i < newlevel; i++) {
+        updates[i] = header[i];
+    }
+    std::optional<std::unique_lock<std::shared_mutex> > lock_updates[MAX_LEVEL];
+    std::optional<std::unique_lock<std::shared_mutex> > lock_updates_next[MAX_LEVEL];
+    int pos = -1;
+    Inode *prev_update = nullptr; // the update node in the previous round
+    Inode *next = nullptr;
+    Inode *current_update = nullptr;
+
+    for(int i = 0; i < newlevel; i++) {
+        lock_updates[i].emplace(inode_locks[updates[i]->getId()]);
+        current_update = updates[i]; // current previous node of the node to be inserted
+        next = dramInodePool->getNextNode();
+        lock_updates_next[i].emplace(inode_locks[next->getId()]);
+        next->hdr.next = current_update->hdr.next;
+        current_update->hdr.next = next->getId();
+        ckp_entry *entry = new ckp_entry(current_update);
+        ckpq->push(entry);
+        current_update = next;
+        ckp_entry *entry2 = new ckp_entry(next);
+        ckpq->push(entry2);
+        if (i == 0) {
+            current_update->insertAtPos(targetKey, targetVnode->getId(), 0);
+        } else {
+            current_update->insertAtPos(targetKey, prev_update->getId(), 0);
+        }
+        prev_update = current_update;
+        ckp_entry *entry3 = new ckp_entry(prev_update);
+        ckpq->push(entry3);
+        if(i != 0 && lock_updates[i-1]) {
+            lock_updates[i-1]->unlock();
+            lock_updates[i-1].reset();
+        }
+        if(i != 0 && lock_updates_next[i-1]) {
+            lock_updates_next[i-1]->unlock();
+            lock_updates_next[i-1].reset();
+        }
+    }
+    if(lock_updates[newlevel-1]) {
+        lock_updates[newlevel-1]->unlock();
+        lock_updates[newlevel-1].reset();
+    }
+    if(lock_updates_next[newlevel-1]) {
+        lock_updates_next[newlevel-1]->unlock();
+        lock_updates_next[newlevel-1].reset();
+    }
+    return true;
+}
+
+#if 0
 bool DramSkiplist::insert(Vnode *targetVnode)
 {
     bool ret = false;
@@ -117,6 +185,8 @@ bool DramSkiplist::insert(Vnode *targetVnode)
     ckpq->push(entry);
     return true;
 }
+#endif
+
 
 #if 0
 //Val is the address of vnode, not value itself, this insert is used for the first insert or key is the smallest
@@ -335,7 +405,7 @@ void DramSkiplist::initInodes(Inode* inodes[], int newlevel, Key_t key)
     }
 }
 
-
+#if 0
 bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
 {
     bool ret = false;
@@ -413,6 +483,83 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     ckp_entry *entry = new ckp_entry(prev_update);
     ckpq->push(entry);
     return ret;
+}
+#endif
+
+bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode) 
+{
+    bool ret = false;
+    Key_t targetKey = std::numeric_limits<Key_t>::max();
+    Inode* updates[MAX_LEVEL];
+    {
+        std::shared_lock<std::shared_mutex> lock(targetVnode.hdr.mtx);
+        targetKey = targetVnode.getMinKey();
+    }
+    int newlevel = generateRandomLevel();
+    getPivotNodesForInsert(targetKey, updates);
+    {
+        std::unique_lock<std::shared_mutex> lock(level_lock);
+        if(newlevel > level) {
+            for(int i = level; i < newlevel; i++) {
+                updates[i] = header[i];
+            }
+            level = newlevel;
+        }
+    }
+    std::optional<std::unique_lock<std::shared_mutex> > lock_updates[MAX_LEVEL];
+    std::optional<std::unique_lock<std::shared_mutex> > lock_updates_next[MAX_LEVEL];
+    int pos = -1;
+    Inode *prev_update = nullptr; // the update node in the previous round
+    Inode *next = nullptr;
+    Inode *current_update = nullptr;
+
+    for(int i = 0; i < newlevel; i++) {
+        lock_updates[i].emplace(inode_locks[updates[i]->getId()]);
+        current_update = updates[i]; // current previous node of the node to be inserted
+        if(current_update->isFull() || current_update->isHeader()) {
+            next = dramInodePool->getNextNode();
+            lock_updates_next[i].emplace(inode_locks[next->getId()]);
+            next->hdr.next = current_update->hdr.next;
+            current_update->hdr.next = next->getId();
+            ckp_entry *entry = new ckp_entry(current_update);
+            ckpq->push(entry);
+            ckp_entry *entry2 = new ckp_entry(next);
+            ckpq->push(entry2);
+            if(current_update->isHeader()) {
+                current_update = next;
+            } else { 
+                current_update->split(next);
+                assert(current_update->hdr.last_index != -1 && next->hdr.last_index != -1);
+                current_update = (targetKey < next->getMinKey()) ? current_update : next;
+            }
+        }
+        pos = current_update->findInsertKeyPos(targetKey);
+        if (i == 0) {
+            current_update->insertAtPos(targetKey, targetVnode.getId(), pos);
+        } else {
+            current_update->insertAtPos(targetKey, prev_update->getId(), pos);
+        }
+        ckp_entry *entry = new ckp_entry(current_update);
+        ckpq->push(entry);
+        prev_update = current_update;
+        if(i != 0 && lock_updates[i-1]) {
+            lock_updates[i-1]->unlock();
+            lock_updates[i-1].reset();
+        }
+        if(i != 0 && lock_updates_next[i-1]) {
+            lock_updates_next[i-1]->unlock();
+            lock_updates_next[i-1].reset();
+        }
+    }
+    if(lock_updates[newlevel-1]) {
+        lock_updates[newlevel-1]->unlock();
+        lock_updates[newlevel-1].reset();
+    }
+    if(lock_updates_next[newlevel-1]) {
+        lock_updates_next[newlevel-1]->unlock();
+        lock_updates_next[newlevel-1].reset();
+    }
+    return true;
 }
 
 void DramSkiplist::setLevel(int level)
