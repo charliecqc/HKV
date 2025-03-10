@@ -19,6 +19,7 @@ public:
     ~DramSkiplist();
     bool insert(Key_t &key, Val_t &val);
     bool insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel);
+    bool insert(Vnode *targetVnode);
     bool update(Key_t &oldKey, Key_t &newKey, Val_t &val);
     // return the index in gps of the index node that poionts to the vnode
     Inode *lookup(Key_t key, int &idx);
@@ -28,7 +29,6 @@ public:
     bool checkForActivateGP(Inode &inode);
     bool checkForRebalance(Inode &inode, bool &activeNewGP);
     bool rebalanceInode(Inode *inode, bool lastLevel);
-    void rebalanceInodeImp(Inode *target, Inode *&prev_target, int &prev_pos, Key_t targetKey, bool is_current_top);    
     int generateRandomLevel();
     void initInodes(Inode* inodes[], int newlevel, Key_t key);
     bool rebalanceInode(Inode &inode);

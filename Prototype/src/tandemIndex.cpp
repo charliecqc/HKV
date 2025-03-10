@@ -163,18 +163,22 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             return ret;
         }
         //vnode is successfully inserted into the value list, unlock the head node
+#if 0
         Val_t vnodeVal = reinterpret_cast<Val_t>(targetVnode);
         int newLevel = mainIndex->generateRandomLevel();
         Inode *inodes[newLevel];
-        ret = mainIndex->insert(key, vnodeVal, inodes, newLevel);
+#endif
+        ret = mainIndex->insert(targetVnode);
         if(ret == false) {
             std::cout << "Failed to insert the key and value into the main index." << std::endl;
         }
+#if 0
         inode = inodes[0];
         for(int i = 1; i < newLevel; i++) {
             ckp_entry *entry = new ckp_entry(inodes[i]);
             cptq->push(entry);
         }
+#endif
     #ifdef DBG
         int id = inode->getId();
         cout << "inserted inode " << id <<endl;
