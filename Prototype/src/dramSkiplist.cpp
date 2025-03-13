@@ -327,10 +327,10 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
             lock_updates_next[i].emplace(inode_locks[next->getId()]);
             next->hdr.next = current_update->hdr.next;
             current_update->hdr.next = next->getId();
-            ckp_entry *entry = new ckp_entry(current_update);
-            ckpq->push(entry);
             ckp_entry *entry2 = new ckp_entry(next);
             ckpq->push(entry2);
+            ckp_entry *entry = new ckp_entry(current_update);
+            ckpq->push(entry);
             if(current_update->isHeader()) {
                 current_update = next;
             } else { 
