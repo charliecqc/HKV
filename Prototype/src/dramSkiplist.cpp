@@ -5,9 +5,9 @@
 #include <optional>
 #define numNodesInPool 10000000
 
-DramSkiplist::DramSkiplist(CheckpointQueue *q, DramInodePool* pool)
+DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool)
 {
-    ckpq = q;
+    ckpt_log = ckp_log;
     dramInodePool = pool;
     if(dramInodePool->getCurrentIdx() == 0) {
         header[MAX_LEVEL - 1] = dramInodePool->getNextNode();
@@ -30,13 +30,15 @@ DramSkiplist::DramSkiplist(CheckpointQueue *q, DramInodePool* pool)
             tail[i]->gps[fanout/2].key = std::numeric_limits<Key_t>::max();
             tail[i]->hdr.next = std::numeric_limits<uint32_t>::max();
         }
-
         for(int i = 0; i < MAX_LEVEL; i++) {
             header[i]->hdr.next = tail[i]->getId();
-            ckp_entry *header_entry = new ckp_entry(header[i]);
-            ckpq->push(header_entry);
-            ckp_entry *tail_entry = new ckp_entry(tail[i]);
-            ckpq->push(tail_entry);
+            ckpt_log->enq(*tail[i]);
+            ckpt_log->enq(*header[i]);
+            //ckp_entry *header_entry = new ckp_entry(header[i]);
+            //checkVec[i].push(header_entry);
+            //ckp_entry *tail_entry = new ckp_entry(tail[i]);
+            //checkVec[i].push(tail_entry);
+            //ckpq->push(&checkVec[i]);
         }
         level = 1;
     }else {
@@ -58,7 +60,6 @@ int DramSkiplist::generateRandomLevel()
 
 bool DramSkiplist::insert(Vnode *targetVnode) 
 {
-    bool ret = false;
     Key_t targetKey = std::numeric_limits<Key_t>::max();
     Inode* updates[MAX_LEVEL];
     {
@@ -78,31 +79,40 @@ bool DramSkiplist::insert(Vnode *targetVnode)
     }
     std::optional<std::unique_lock<std::shared_mutex> > lock_updates[MAX_LEVEL];
     std::optional<std::unique_lock<std::shared_mutex> > lock_updates_next[MAX_LEVEL];
-    int pos = -1;
     Inode *prev_update = nullptr; // the update node in the previous round
     Inode *next = nullptr;
     Inode *current_update = nullptr;
-
+    //CheckpointVector checkVec[newlevel-1];
     for(int i = 0; i < newlevel; i++) {
         lock_updates[i].emplace(inode_locks[updates[i]->getId()]);
         current_update = updates[i]; // current previous node of the node to be inserted
         next = dramInodePool->getNextNode();
         lock_updates_next[i].emplace(inode_locks[next->getId()]);
+
         next->hdr.next = current_update->hdr.next;
         current_update->hdr.next = next->getId();
-        ckp_entry *entry = new ckp_entry(current_update);
-        ckpq->push(entry);
+#if 0
+        ckp_entry *entry_tail = new ckp_entry(next);
+        checkVec[i].push(entry_tail);
+        ckp_entry *entry_head = new ckp_entry(current_update);
+        checkVec[i].push(entry_head);
+#endif
+        ckpt_log->enq(*next);
+        ckpt_log->enq(*current_update);
         current_update = next;
-        ckp_entry *entry2 = new ckp_entry(next);
-        ckpq->push(entry2);
         if (i == 0) {
             current_update->insertAtPos(targetKey, targetVnode->getId(), 0);
         } else {
             current_update->insertAtPos(targetKey, prev_update->getId(), 0);
         }
         prev_update = current_update;
-        ckp_entry *entry3 = new ckp_entry(prev_update);
-        ckpq->push(entry3);
+
+#if 0
+        ckp_entry *entry_cur = new ckp_entry(prev_update);
+        checkVec[i].push(entry_cur);
+#endif
+        ckpt_log->enq(*prev_update);
+
         if(i != 0 && lock_updates[i-1]) {
             lock_updates[i-1]->unlock();
             lock_updates[i-1].reset();
@@ -111,6 +121,7 @@ bool DramSkiplist::insert(Vnode *targetVnode)
             lock_updates_next[i-1]->unlock();
             lock_updates_next[i-1].reset();
         }
+//        ckpq->push(&checkVec[i]);
     }
     if(lock_updates[newlevel-1]) {
         lock_updates[newlevel-1]->unlock();
@@ -131,31 +142,32 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
         currentHighestLevelIndex = level - 1;
     }
     Inode *target = header[currentHighestLevelIndex];
+    //CheckpointVector checkVec[currentHighestLevelIndex + 1];
     for(int i = currentHighestLevelIndex; i >= 0; i--) {
         while(true) {
-            //std::shared_lock<std::shared_mutex> lock(target->hdr.mtx);
             std::shared_lock<std::shared_mutex> lock(inode_locks[target->getId()]);
             Inode *next = dramInodePool->at(target->hdr.next);
             std::shared_lock<std::shared_mutex> lock_next(inode_locks[next->getId()]);
-            if(next->getId() != tail[i]->getId() && oldKey >= next->getMinKey()) {
+            if(!next->isTail() && oldKey >= next->getMinKey()) {
                 target = next;
             } else {
                 break;
             }
         }
         {
-            Val_t index = 0;
             std::unique_lock<std::shared_mutex> lock3(inode_locks[target->getId()]);
             int idx = target->findKeyPos(oldKey);
             if(target->gps[idx].key == oldKey) {
                 target->gps[idx].key = newKey;
-                ckp_entry *entry = new ckp_entry(target);
-                ckpq->push(entry);
+                ckpt_log->enq(*target);
+               // ckp_entry *entry = new ckp_entry(target);
+                //checkVec[i].push(entry);
             }   
             if(i != 0) {
                 target = dramInodePool->at(target->gps[idx].value);
             }
         }
+        //ckpq->push(&checkVec[i]);
     }
     return true;
 }
@@ -294,7 +306,6 @@ void DramSkiplist::initInodes(Inode* inodes[], int newlevel, Key_t key)
 
 bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode) 
 {
-    bool ret = false;
     Key_t targetKey = std::numeric_limits<Key_t>::max();
     Inode* updates[MAX_LEVEL];
     {
@@ -318,6 +329,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     Inode *prev_update = nullptr; // the update node in the previous round
     Inode *next = nullptr;
     Inode *current_update = nullptr;
+    //CheckpointVector checkVec[newlevel];
 
     for(int i = 0; i < newlevel; i++) {
         lock_updates[i].emplace(inode_locks[updates[i]->getId()]);
@@ -327,10 +339,14 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
             lock_updates_next[i].emplace(inode_locks[next->getId()]);
             next->hdr.next = current_update->hdr.next;
             current_update->hdr.next = next->getId();
+            ckpt_log->enq(*next);
+            ckpt_log->enq(*current_update); 
+#if 0
             ckp_entry *entry2 = new ckp_entry(next);
-            ckpq->push(entry2);
+            checkVec[i].push(entry2);
             ckp_entry *entry = new ckp_entry(current_update);
-            ckpq->push(entry);
+            checkVec[i].push(entry);
+#endif
             if(current_update->isHeader()) {
                 current_update = next;
             } else { 
@@ -345,8 +361,11 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
         } else {
             current_update->insertAtPos(targetKey, prev_update->getId(), pos);
         }
+#if 0
         ckp_entry *entry = new ckp_entry(current_update);
-        ckpq->push(entry);
+        checkVec[i].push(entry);
+#endif
+        ckpt_log->enq(*current_update);
         prev_update = current_update;
         if(i != 0 && lock_updates[i-1]) {
             lock_updates[i-1]->unlock();
@@ -356,6 +375,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
             lock_updates_next[i-1]->unlock();
             lock_updates_next[i-1].reset();
         }
+    //    ckpq->push(&checkVec[i]);
     }
     if(lock_updates[newlevel-1]) {
         lock_updates[newlevel-1]->unlock();

@@ -13,7 +13,7 @@
 //extern std::queue<std::vector<ckp_entry *>*> g_checkpointQueue;
 //extern boost::lockfree::spsc_queue<CheckpointVector *, boost::lockfree::capacity<1000000>> g_checkpointQueue;
 //extern boost::lockfree::spsc_queue<ckp_entry *, boost::lockfree::capacity<1000000>> g_checkpointQueue;
-extern std::queue<ckp_entry *> g_checkpointQueue;
+extern std::queue<CheckpointVector *> g_checkpointQueue;
 
 class TandemIndex {
     public:
@@ -28,10 +28,13 @@ class TandemIndex {
 
         //std::thread *workerThread;
         std::thread *checkpointThread;
+        std::thread *logMergeThread;
 
         //void createWorkerThread(); 
         void createCheckpointThread();
+        void createLogMergeThread();
         void checkpointThreadExec(int id);
+        void logMergeThreadExec(int id);
         //void workerThreadExec();
 
         DramSkiplist *mainIndex;
@@ -39,6 +42,6 @@ class TandemIndex {
         PmemInodePool *pmemRecoveryArray;
         //PmemSkiplist *shadowIndex;
         ValueList *valueList;
-        CheckpointQueue *cptq;
+        CkptLog *ckptLog;
         RecoveryManager *recoveryManager;
 };

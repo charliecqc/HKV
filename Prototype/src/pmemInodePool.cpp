@@ -13,6 +13,7 @@ bool PmemInodePool::init(root_obj *root) {
 
     // To allocate the vnode pool. 1. allocate memory. 2. cast into vodes 3. pot them into vector.
     PMEMobjpool *pop = (PMEMobjpool *)PmemManager::getPoolStartAddress(INDEXPOOL);
+    nodeSize = sizeof(Inode);
     if(isCreate) {
         int ret_val = pmemobj_alloc(pop, &root->ptr[0], nodeSize * MAX_NODES, 0, NULL, NULL);
         if (ret_val) {
@@ -21,7 +22,7 @@ bool PmemInodePool::init(root_obj *root) {
         }
         void *inodePool = pmemobj_direct(root->ptr[0]);
         for(int i = 0; i < numNodes; i++) {
-            Inode *inode = (Inode *) new (inodePool) Inode(i);
+            Inode *inode = (Inode *) new (inodePool) Inode(i,0,0);
             pmemInodePool.push_back(inode);
             inodePool = static_cast<char *>(inodePool) + nodeSize;
         }

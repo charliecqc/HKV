@@ -13,11 +13,14 @@
 //std::queue<std::vector<ckp_entry *>*> g_checkpointQueue;
 //boost::lockfree::spsc_queue<CheckpointVector*, boost::lockfree::capacity<1000000>> g_checkpointQueue;
 //boost::lockfree::spsc_queue<ckp_entry *, boost::lockfree::capacity<1000000>> g_checkpointQueue;
-std::queue<ckp_entry *> g_checkpointQueue;
+std::queue<CheckpointVector *> g_checkpointQueue;
 bool wqReady[WORKERQUEUE_NUM] = {false};
 volatile bool wtInitialized = false;
+volatile bool mgInitialized = false;
 std::atomic<bool> g_endTandem;
 SpinLock g_spinLock;
+
+#define LOG_SIZE 1UL*1024UL*1024UL*1024UL
 
 TandemIndex::TandemIndex() {
     g_endTandem = false;
@@ -27,10 +30,13 @@ TandemIndex::TandemIndex() {
     recoveryManager = new RecoveryManager(pmemRecoveryArray); 
     int level = recoveryManager->recoveryOperation();
     dramInodePool = recoveryManager->getDramInodePool();
-    cptq = new CheckpointQueue();
-    mainIndex = new DramSkiplist(cptq, dramInodePool);
+    ckptLog = new CkptLog(LOG_SIZE);
+    PmemManager::flushToNVM(3, reinterpret_cast<char *>(ckptLog), sizeof(ckptLog));
+    //ckpq = new CheckpointQueue();
+    //assert(ckpq->isEmpty());
+    mainIndex = new DramSkiplist(ckptLog, dramInodePool);
     mainIndex->setLevel(level);
-    createCheckpointThread();
+    createLogMergeThread();
     Inode *index_header = mainIndex->getHeader();
     Vnode *value_header = valueList->getHeader();
     index_header->gps[0].value = value_header->getId();
@@ -38,10 +44,11 @@ TandemIndex::TandemIndex() {
 
 TandemIndex::~TandemIndex() {
    g_endTandem = true; 
-   if(checkpointThread->joinable()) {
-       checkpointThread->join();
-       delete checkpointThread;
+   if (logMergeThread->joinable()) {
+       logMergeThread->join();
+       delete logMergeThread;
    }
+   
    Inode *superNode = pmemRecoveryArray->at(MAX_NODES - 1);
     if(superNode != nullptr) {
          superNode->hdr.last_index = dramInodePool->getCurrentIdx();
@@ -97,6 +104,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         }
         //incease the covered nodes of the inode due to newly added vnodes
         {
+            CheckpointVector ckvec;
             std::unique_lock<std::shared_mutex> inode_wlock(mainIndex->inode_locks[inode->getId()]);
             inode->hdr.coveredNodes++;
             if(inode->checkForActivateGP()) {
@@ -114,8 +122,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
                         return ret;
                     }
                     inode->gps[pos].key = targetKey;
-                    ckp_entry *entry = new ckp_entry(inode);
-                    cptq->push(entry);
+                    ckptLog->enq(*inode);
                 }else {
                     //rebalance the main index, if necessary
                     needToRebalance = true;
@@ -163,22 +170,10 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             return ret;
         }
         //vnode is successfully inserted into the value list, unlock the head node
-#if 0
-        Val_t vnodeVal = reinterpret_cast<Val_t>(targetVnode);
-        int newLevel = mainIndex->generateRandomLevel();
-        Inode *inodes[newLevel];
-#endif
         ret = mainIndex->insert(targetVnode);
         if(ret == false) {
             std::cout << "Failed to insert the key and value into the main index." << std::endl;
         }
-#if 0
-        inode = inodes[0];
-        for(int i = 1; i < newLevel; i++) {
-            ckp_entry *entry = new ckp_entry(inodes[i]);
-            cptq->push(entry);
-        }
-#endif
     #ifdef DBG
         int id = inode->getId();
         cout << "inserted inode " << id <<endl;
@@ -239,23 +234,22 @@ Val_t TandemIndex::lookup(Key_t key)
     }
 }
 
-void TandemIndex::createCheckpointThread()
+void TandemIndex::createLogMergeThread()
 {
     g_spinLock.lock();
-    checkpointThread = new std::thread(&TandemIndex::checkpointThreadExec, this, 0);
-    wtInitialized = true;
+    logMergeThread = new std::thread(&TandemIndex::logMergeThreadExec, this, 0);
+    mgInitialized = true;
     g_spinLock.unlock();
 }
 
-void TandemIndex::checkpointThreadExec(int id)
+void TandemIndex::logMergeThreadExec(int id)
 {
-    CheckpointThread ckpt(id, cptq, this->pmemRecoveryArray, this->mainIndex);
+    LogMergeThread lmt(id, this->ckptLog, this->pmemRecoveryArray);
     while(true)
     {
         g_spinLock.lock();
-        if(!wtInitialized) {
+        if(!mgInitialized) {
             g_spinLock.unlock();
-            
             usleep(500);
             continue;
         }else {
@@ -266,9 +260,7 @@ void TandemIndex::checkpointThreadExec(int id)
     }
     while(!g_endTandem) {
         usleep(200);
-        while(!ckpt.isCheckpointQueueEmpty()) {
-            ckpt.checkpointOperation();
-        }
+        lmt.logMergeOperation();
     }
 }
 

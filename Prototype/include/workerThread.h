@@ -2,6 +2,7 @@
 #include "checkpoint.h"
 #include "pmemInodePool.h"
 #include "dramSkiplist.h"
+#include "ckpt_log.h"
 #include <queue>
 #include <boost/lockfree/spsc_queue.hpp>
 #pragma once
@@ -35,13 +36,26 @@ class CheckpointThread {
 private:
     //std::queue<std::vector<ckp_entry *>*> *checkpointQueue;
     CheckpointQueue *cptq;
+    CkptLogNVM *ckptLog;
     PmemInodePool *pmemInodePool;
     DramSkiplist *index;
     int id;
 public:
-    CheckpointThread(int tid, CheckpointQueue *cq, PmemInodePool *pmemInodePool, DramSkiplist *index);
+    CheckpointThread(int tid, CheckpointQueue *cq, CkptLogNVM *log, PmemInodePool *pmemInodePool, DramSkiplist *index);
     ~CheckpointThread();
     void checkpointOperation();
     bool isCheckpointQueueEmpty();
+};
+
+class LogMergeThread {
+private:
+    CkptLog *ckptLog;
+    PmemInodePool *pmemInodePool;
+    int id;
+public:
+    LogMergeThread(int tid, CkptLog *cklog, PmemInodePool *pmemInodePool);
+    ~LogMergeThread();
+    void logMergeOperation();
+    bool isCkptLogEmpty();
 };
 

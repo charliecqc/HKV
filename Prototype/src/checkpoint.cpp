@@ -1,26 +1,48 @@
 #include "checkpoint.h"
 #include "tandemIndex.h"
 
+CheckpointVector::CheckpointVector() {
+    // Initialize the checkpoint's position
+}
+
+void CheckpointVector::push(ckp_entry *entry) {
+    std::unique_lock<std::shared_mutex> lock(vecLock);
+    ckpvec.push_back(entry);
+}
+
+ckp_entry *CheckpointVector::pop()
+{
+    std::unique_lock<std::shared_mutex> lock(vecLock);
+    if(ckpvec.size() > 0) {
+        ckp_entry *entry = ckpvec.back();
+        ckpvec.pop_back();
+        return entry;
+    }else {
+        return nullptr;
+    }
+}
+
+
 CheckpointQueue::CheckpointQueue() {
     this->checkpointQueue = &g_checkpointQueue;
     // Initialize the checkpoint's position
     queueLock = new std::mutex();
 }
 
-void CheckpointQueue::push(ckp_entry *entry) {
+void CheckpointQueue::push(CheckpointVector *vec) {
     queueLock->lock();
-    checkpointQueue->push(entry);
+    checkpointQueue->push(vec);
     queueLock->unlock();
 }
 
-ckp_entry *CheckpointQueue::pop() {
-    ckp_entry *entry;
+CheckpointVector *CheckpointQueue::pop() {
+    CheckpointVector *vec;
     queueLock->lock();
    // if(checkpointQueue->pop(entry)) {
-   if((entry = checkpointQueue->front())) {
+   if((vec = checkpointQueue->front())) {
         checkpointQueue->pop();
         queueLock->unlock();
-        return entry;
+        return vec;
     }else {
         queueLock->unlock();
         return nullptr;

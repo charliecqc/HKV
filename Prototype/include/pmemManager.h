@@ -2,6 +2,7 @@
 #include <string>
 #include <iostream>
 #include <unistd.h>
+#include "common.h"
 #pragma once
 using namespace std;
 
@@ -70,11 +71,27 @@ class PmemManager {
         static inline void memcpyToNVM(int poolId, char *dest, char *src, size_t size) {
             PMEMobjpool *pop = (PMEMobjpool *)pmemPool[poolId];
             pmemobj_memcpy_persist(pop, dest, src, size);
+#if 0
+            for(size_t i = 0; i < size; i += L1_CACHE_LINE_SIZE) {
+                pmemobj_memcpy_persist(pop, dest + i, src + i, L1_CACHE_LINE_SIZE);
+            }
+#endif
         }
 
         static inline void memcpyToDRAM(int poolId, char *dest, char *src, size_t size) {
-            PMEMobjpool *pop = (PMEMobjpool *)pmemPool[poolId];
+            [[maybe_unused]]PMEMobjpool *pop = (PMEMobjpool *)pmemPool[poolId];
             memcpy(dest, src, size);
+        }
+
+        static inline unsigned char *align_ptr_to_cacheline(void *p)
+        {
+            return (unsigned char *)(((unsigned long)p + ~L1_CACHE_LINE_MASK) &
+			L1_CACHE_LINE_MASK);
+        }
+
+        static inline unsigned long align_uint_to_cacheline(unsigned int size)
+        {
+            return (size + ~L1_CACHE_LINE_MASK) & L1_CACHE_LINE_MASK;
         }
 
 };

@@ -28,19 +28,34 @@ public:
 class CheckpointVector {
     public:
         CheckpointVector();
+#if 0
         static CheckpointVector *getPerThreadInstance();
         static void setPerThreadInstance(CheckpointVector *ptr) {perThreadVector = ptr;}
         static CheckpointVector *getCheckpointVector();
         static void enqPerThreadVector(int id, int inode_offset, int length, void *content);
         static void enqPerThreadVector(ckp_entry *entry);
+#endif
+        void push(ckp_entry *entry);
+        ckp_entry *pop();
         void lock() {vecLock.lock();}
         void unlock() {vecLock.unlock();}
-    private:
-        std::mutex vecLock;
+        std::shared_mutex vecLock;
         std::vector<ckp_entry *> ckpvec;
-        static thread_local CheckpointVector *perThreadVector;
 };
 
+class CheckpointQueue {
+    public:
+        CheckpointQueue();
+        void push(CheckpointVector *vec);
+        CheckpointVector *pop();
+        bool isEmpty();
+        std::mutex *queueLock;
+    private:
+        //boost::lockfree::spsc_queue<ckp_entry *, boost::lockfree::capacity<1000000>> *checkpointQueue;
+        std::queue<CheckpointVector *> *checkpointQueue;
+};
+
+#if 0
 class CheckpointQueue {
     public:
         CheckpointQueue();
@@ -51,20 +66,6 @@ class CheckpointQueue {
     private:
         //boost::lockfree::spsc_queue<ckp_entry *, boost::lockfree::capacity<1000000>> *checkpointQueue;
         std::queue<ckp_entry *> *checkpointQueue;
-};
-
-#if 0
-class CheckpointQueue {
-    public:
-        CheckpointQueue();
-        void push(CheckpointVector *vec);
-        CheckpointVector *pop();
-        bool isEmpty();
-        CheckpointVector cpkvec1;
-        CheckpointVector cpkvec2;
-        std::vector<CheckpointVector *> vec_{&cpkvec1, &cpkvec2};
-    private:
-        boost::lockfree::spsc_queue<CheckpointVector*, boost::lockfree::capacity<1000000>> *checkpointQueue;
 };
 #endif
 

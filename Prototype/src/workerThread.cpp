@@ -2,9 +2,10 @@
 #include "tandemIndex.h"
 
 
-CheckpointThread::CheckpointThread(int tid, CheckpointQueue *cq, PmemInodePool *pmemInodePool, DramSkiplist *index) {
+CheckpointThread::CheckpointThread(int tid, CheckpointQueue *cq, CkptLogNVM *cklog, PmemInodePool *pmemInodePool, DramSkiplist *index) {
     this->id = tid;
     this->index = index;
+    this->ckptLog = cklog;
     this->cptq = cq;
     this->pmemInodePool = pmemInodePool;
 }
@@ -20,18 +21,40 @@ CheckpointThread::~CheckpointThread() {
         PmemManager::flushToNVM(1, reinterpret_cast<char *>(superNode), sizeof(Inode));
     }
     delete cptq;
+    delete ckptLog;
 }
 
 void CheckpointThread::checkpointOperation() {
-    ckp_entry *entry = cptq->pop();
-    if(entry != nullptr) {
-        Inode *inode = static_cast<Inode *>(entry->content);
-        if(inode != nullptr) {
-            std::shared_lock<std::shared_mutex> lock(index->inode_locks[inode->getId()]);
-            int id = inode->getId();
-            Inode *pmemInode = pmemInodePool->at(id);
-            PmemManager::memcpyToNVM(1, reinterpret_cast<char *>(pmemInode), reinterpret_cast<char *>(inode), sizeof(Inode));
-            //PmemManager::memcpyToNVM(1,)
-        }
+#if 0
+    CheckpointVector *vec = cptq->pop();
+    if(vec != nullptr) {
+        ckptLog->enq(vec);
+    }
+#endif
+}
+
+LogMergeThread::LogMergeThread(int tid, CkptLog *cklog, PmemInodePool *pmemInodePool) {
+    this->id = tid;
+    this->ckptLog = cklog;
+    this->pmemInodePool = pmemInodePool;
+}
+
+bool LogMergeThread::isCkptLogEmpty() {
+    return ckptLog->isEmpty();
+}
+
+LogMergeThread::~LogMergeThread() {
+    assert(ckptLog->isEmpty());
+    Inode *superNode = pmemInodePool->at(MAX_NODES);
+    if(superNode != nullptr) {
+        superNode->hdr.last_index = pmemInodePool->getCurrentIdx();  
+        PmemManager::flushToNVM(1, reinterpret_cast<char *>(superNode), sizeof(Inode));
+    }
+    delete ckptLog;
+}
+
+void LogMergeThread::logMergeOperation() {
+    while(!isCkptLogEmpty()) {
+        ckptLog->mergeToInodePool(ckptLog->ckptlog, pmemInodePool);
     }
 }

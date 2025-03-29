@@ -2,6 +2,7 @@
 #include "checkpoint.h"
 #include "dramInodePool.h"
 #include "pmemVnodePool.h"
+#include "ckpt_log.h"
 #include "common.h"
 #pragma once// SkipList class
 class DramSkiplist  {
@@ -9,13 +10,13 @@ private:
     Inode* header[MAX_LEVEL];
     Inode* tail[MAX_LEVEL];
     DramInodePool *dramInodePool;
-    CheckpointQueue *ckpq;
+    CkptLog *ckpt_log;
     int level; //level is the current max level of the skiplist
     std::shared_mutex level_lock;
 public:
     std::shared_mutex inode_locks[MAX_NODES];
     std::shared_mutex rebalance_lock;
-    DramSkiplist(CheckpointQueue *q, DramInodePool *dramInodePool);
+    DramSkiplist(CkptLog *ckp_log, DramInodePool *dramInodePool);
     ~DramSkiplist();
     bool insert(Key_t &key, Val_t &val);
     bool insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel);
