@@ -54,7 +54,11 @@ LogMergeThread::~LogMergeThread() {
 }
 
 void LogMergeThread::logMergeOperation() {
-    while(!isCkptLogEmpty()) {
-        ckptLog->mergeToInodePool(ckptLog->ckptlog, pmemInodePool);
+    try {
+        while(!isCkptLogEmpty()) {
+            ckptLog->reclaim(pmemInodePool);
+        }
+    }catch(std::exception &e) {
+        std::cout << "Exception in logMergeOperation: " << e.what() << std::endl;
     }
 }

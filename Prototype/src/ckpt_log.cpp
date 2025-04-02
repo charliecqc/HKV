@@ -34,20 +34,27 @@ int CkptLogNVM::init(root_obj *root) {
 void CkptLog::enq(Inode inode) 
 {
     //cpy the modification of inode to the log entry
-    std::unique_lock<std::shared_mutex> lock(logLock);
+#if 1
+    //std::unique_lock<std::mutex> lock(mtx);
+    g_ckptlock.lock();
     [[maybe_unused]]log_entry_t *entry = put_log_entry(ckptlog, inode);
+    g_ckptlock.unlock();
+#endif
+
 }
 
-log_entry_t *CkptLog::log_deq(CkptLogNVM *nvm_log)
+log_entry_t *CkptLog::log_deq()
 {
     log_entry_t *entry;
-    if(unlikely(nvm_log->start == nvm_log->end))
+    if(unlikely(ckptlog->start == ckptlog->end))
     {
         cout << "Log is empty" << endl;
         return nullptr;
     }
-    entry = nvm_log_at(nvm_log, nvm_log->start);
-    nvm_log->start += PmemManager::align_uint_to_cacheline(sizeof(entry->inode));
+    entry = nvm_log_at(ckptlog, ckptlog->start);
+    unsigned long entry_size = PmemManager::align_uint_to_cacheline(sizeof(entry->inode));
+    ckptlog->start += entry_size;
+    return entry;
 }
 
 log_entry_t * CkptLog::put_log_entry(CkptLogNVM *nvm_log, Inode inode) {
@@ -103,33 +110,30 @@ unsigned int CkptLog::nvm_log_index(CkptLogNVM *nvm_log, unsigned long idx)
     return (idx & ~(nvm_log->mask));
 }
 
-void CkptLog::reclaim(CkptLogNVM *nvm_log, PmemInodePool *pmemInodePool)
+void CkptLog::reclaim(PmemInodePool *pmemInodePool)
 {
-    log_entry_t *entry;
-    unsigned long old_head_idx = nvm_log->start;
-    while(entry = log_peek_head(nvm_log))
-    {
-        Inode *inode = &(entry->inode);
-        int id = inode->getId();
-        assert(pmemInodePool->at(33)->getId() == 33);
-        PmemManager::memcpyToNVM(1, reinterpret_cast<char *>(pmemInodePool->at(id)), reinterpret_cast<char *>(inode), sizeof(Inode));
-        if(pmemInodePool->at(33)->getId() != 33) 
+    try{
+        g_ckptlock.lock();
+        assert(pmemInodePool != nullptr);
+        log_entry_t *entry;
+        unsigned long old_head_idx = ckptlog->start;
+        while((entry = log_peek_head(ckptlog)) != nullptr)
         {
-            std::cout << "Error in copying the inode to pmemInodePool" << std::endl;
-            return;
+            
+            Inode *inode = &(entry->inode);
+            int id = inode->getId();
+            PmemManager::memcpyToNVM(1, reinterpret_cast<char *>(pmemInodePool->at(id)), reinterpret_cast<char *>(inode), sizeof(Inode));
+            log_deq();
         }
-        log_deq(nvm_log);
-        
+        if(old_head_idx != ckptlog->start)
+        {
+            ckptlog->end = ckptlog->start = 0;
+            PmemManager::flushToNVM(3, reinterpret_cast<char *>(ckptlog), sizeof(*ckptlog));
+        }
+        g_ckptlock.unlock();
     }
-    if(old_head_idx != nvm_log->start)
-    {
-        nvm_log->end = nvm_log->start = 0;
-        PmemManager::flushToNVM(3, reinterpret_cast<char *>(nvm_log), sizeof(*nvm_log));
+    catch (std::exception &e) {
+        std::cout << "Exception in reclaim: " << e.what() << std::endl;
+        g_ckptlock.unlock();
     }
-}
-
-
-void CkptLog::mergeToInodePool(CkptLogNVM *nvm_log, PmemInodePool *pmemInodePool) {
-    std::unique_lock<std::shared_mutex> lock(logLock);
-    reclaim(nvm_log, pmemInodePool);
 }

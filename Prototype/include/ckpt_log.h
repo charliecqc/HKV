@@ -4,6 +4,7 @@
 #include "checkpoint.h"
 #include "pmemManager.h"
 #include "pmemInodePool.h"
+#include "spinLock.h"
 #include "common.h"
 
 #pragma once
@@ -66,7 +67,7 @@ public:
 
 class CkptLog {
     public:
-    std::shared_mutex logLock;
+    SpinLock g_ckptlock;
     CkptLogNVM *ckptlog;
     CkptLog(size_t maxSize) {
         ckptlog = new CkptLogNVM(maxSize);
@@ -75,16 +76,18 @@ class CkptLog {
     void enq(Inode inode);
     log_entry_t *put_log_entry(CkptLogNVM *nvm_log, Inode inode);
     void enq(CkptLogNVM *nvm_log, Inode inode);
-    log_entry_t *log_deq(CkptLogNVM *nvm_log);
+    log_entry_t *log_deq();
     log_entry_t *nvm_log_at(CkptLogNVM *nvm_log, size_t index);
     log_entry_t *nvm_log_enq(CkptLogNVM *nvm_log, size_t obj_size);
     log_entry_t *log_peek_head(CkptLogNVM *nvm_log);
     unsigned int nvm_log_index(CkptLogNVM *nvm_log, unsigned long index);
-    void reclaim(CkptLogNVM *nvm_log, PmemInodePool *pmemInodePool);
-    void mergeToInodePool(CkptLogNVM *nvm_log,PmemInodePool *pmemInodePool);
+    void reclaim(PmemInodePool *pmemInodePool);
     bool isEmpty() {
-        std::shared_lock<std::shared_mutex> lock(logLock);
-        return ckptlog->isEmpty();
+        //std::unique_lock<std::mutex> lock(mtx);
+        g_ckptlock.lock();
+        bool ret = ckptlog->isEmpty();
+        g_ckptlock.unlock();
+        return ret;
     }
 };
 
