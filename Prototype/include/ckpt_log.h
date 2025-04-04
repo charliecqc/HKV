@@ -68,25 +68,26 @@ public:
 class CkptLog {
     public:
     SpinLock g_ckptlock;
+    std::shared_mutex mtx;
     CkptLogNVM *ckptlog;
     CkptLog(size_t maxSize) {
         ckptlog = new CkptLogNVM(maxSize);
     }
     ~CkptLog() {}
     void enq(Inode inode);
-    log_entry_t *put_log_entry(CkptLogNVM *nvm_log, Inode inode);
-    void enq(CkptLogNVM *nvm_log, Inode inode);
+    log_entry_t *put_log_entry(Inode inode);
     log_entry_t *log_deq();
-    log_entry_t *nvm_log_at(CkptLogNVM *nvm_log, size_t index);
-    log_entry_t *nvm_log_enq(CkptLogNVM *nvm_log, size_t obj_size);
-    log_entry_t *log_peek_head(CkptLogNVM *nvm_log);
-    unsigned int nvm_log_index(CkptLogNVM *nvm_log, unsigned long index);
+    log_entry_t *nvm_log_at(size_t index);
+    log_entry_t *nvm_log_enq(size_t obj_size);
+    log_entry_t *log_peek_head();
+    unsigned int nvm_log_index(unsigned long index);
     void reclaim(PmemInodePool *pmemInodePool);
     bool isEmpty() {
         //std::unique_lock<std::mutex> lock(mtx);
-        g_ckptlock.lock();
+       // g_ckptlock.lock();
+        std::shared_lock<std::shared_mutex> lock(mtx);
         bool ret = ckptlog->isEmpty();
-        g_ckptlock.unlock();
+        //g_ckptlock.unlock();
         return ret;
     }
 };

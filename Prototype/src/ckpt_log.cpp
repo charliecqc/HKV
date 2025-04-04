@@ -36,9 +36,10 @@ void CkptLog::enq(Inode inode)
     //cpy the modification of inode to the log entry
 #if 1
     //std::unique_lock<std::mutex> lock(mtx);
-    g_ckptlock.lock();
-    [[maybe_unused]]log_entry_t *entry = put_log_entry(ckptlog, inode);
-    g_ckptlock.unlock();
+    //g_ckptlock.lock();
+    std::unique_lock<std::shared_mutex> lock(mtx);
+    [[maybe_unused]]log_entry_t *entry = put_log_entry(inode);
+    //g_ckptlock.unlock();
 #endif
 
 }
@@ -51,73 +52,74 @@ log_entry_t *CkptLog::log_deq()
         cout << "Log is empty" << endl;
         return nullptr;
     }
-    entry = nvm_log_at(ckptlog, ckptlog->start);
+    entry = nvm_log_at(ckptlog->start);
     unsigned long entry_size = PmemManager::align_uint_to_cacheline(sizeof(entry->inode));
     ckptlog->start += entry_size;
     return entry;
 }
 
-log_entry_t * CkptLog::put_log_entry(CkptLogNVM *nvm_log, Inode inode) {
+log_entry_t * CkptLog::put_log_entry(Inode inode) {
     log_entry_t *log_entry = nullptr;
     unsigned long entry_size = PmemManager::align_uint_to_cacheline(sizeof(inode));
-    [[maybe_unused]]unsigned long log_index = nvm_log->end - nvm_log->start + entry_size;
-    log_entry = nvm_log_enq(nvm_log, entry_size);
+    [[maybe_unused]]unsigned long log_index = ckptlog->end - ckptlog->start + entry_size;
+    log_entry = nvm_log_enq(entry_size);
     PmemManager::memcpyToNVM(3, reinterpret_cast<char *>(&log_entry->inode), reinterpret_cast<char *>(&inode), sizeof(inode));
     assert(log_entry->inode.getId() == inode.getId());
     return log_entry;
 }
 
-log_entry_t *CkptLog::nvm_log_enq(CkptLogNVM *nvm_log, size_t obj_size)
+log_entry_t *CkptLog::nvm_log_enq(size_t obj_size)
 {
     log_entry_t *nv_log_entry;
     unsigned int entry_size;
     entry_size = PmemManager::align_uint_to_cacheline(obj_size);
-    if(entry_size > nvm_log->log_size)
+    if(entry_size > ckptlog->log_size)
     {
         cout << "Object size is greater than log size" << endl;
         return NULL;
     }
-    if((nvm_log->end + entry_size) - nvm_log->start > nvm_log->log_size)
+    if((ckptlog->end + entry_size) - ckptlog->start > ckptlog->log_size)
     {
         std::cout << "Log is full" << std::endl;
         return NULL;
     }
-    nv_log_entry = nvm_log_at(nvm_log, nvm_log->end);
+    nv_log_entry = nvm_log_at(ckptlog->end);
     memset((void *)nv_log_entry, 0, entry_size);
-    nvm_log->end = nvm_log->end + entry_size;
+    ckptlog->end = ckptlog->end + entry_size;
     return nv_log_entry;
 }
 
-log_entry_t *CkptLog::log_peek_head(CkptLogNVM *nvm_log)
+log_entry_t *CkptLog::log_peek_head()
 {
     log_entry_t *nvl_entry;
     //check if log is empty
-    if(unlikely(nvm_log->start == nvm_log->end))
+    if(unlikely(ckptlog->start == ckptlog->end))
     {
         return NULL;
     }
-    nvl_entry = nvm_log_at(nvm_log, nvm_log->start);
+    nvl_entry = nvm_log_at(ckptlog->start);
     return nvl_entry;
 }
 
-log_entry_t * CkptLog::nvm_log_at(CkptLogNVM *nvm_log, unsigned long idx)
+log_entry_t * CkptLog::nvm_log_at(unsigned long idx)
 {
-    return (log_entry_t *)(&nvm_log->buf[nvm_log_index(nvm_log, idx)]);
+    return (log_entry_t *)(&ckptlog->buf[nvm_log_index(idx)]);
 }
 
-unsigned int CkptLog::nvm_log_index(CkptLogNVM *nvm_log, unsigned long idx)
+unsigned int CkptLog::nvm_log_index(unsigned long idx)
 {
-    return (idx & ~(nvm_log->mask));
+    return (idx & ~(ckptlog->mask));
 }
 
 void CkptLog::reclaim(PmemInodePool *pmemInodePool)
 {
     try{
-        g_ckptlock.lock();
+        //g_ckptlock.lock();
         assert(pmemInodePool != nullptr);
+        std::unique_lock<std::shared_mutex> lock(mtx);
         log_entry_t *entry;
         unsigned long old_head_idx = ckptlog->start;
-        while((entry = log_peek_head(ckptlog)) != nullptr)
+        while((entry = log_peek_head()) != nullptr)
         {
             
             Inode *inode = &(entry->inode);
@@ -130,10 +132,10 @@ void CkptLog::reclaim(PmemInodePool *pmemInodePool)
             ckptlog->end = ckptlog->start = 0;
             PmemManager::flushToNVM(3, reinterpret_cast<char *>(ckptlog), sizeof(*ckptlog));
         }
-        g_ckptlock.unlock();
+        //g_ckptlock.unlock();
     }
     catch (std::exception &e) {
         std::cout << "Exception in reclaim: " << e.what() << std::endl;
-        g_ckptlock.unlock();
+        //g_ckptlock.unlock();
     }
 }

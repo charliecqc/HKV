@@ -34,11 +34,6 @@ DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool)
             header[i]->hdr.next = tail[i]->getId();
             ckpt_log->enq(*tail[i]);
             ckpt_log->enq(*header[i]);
-            //ckp_entry *header_entry = new ckp_entry(header[i]);
-            //checkVec[i].push(header_entry);
-            //ckp_entry *tail_entry = new ckp_entry(tail[i]);
-            //checkVec[i].push(tail_entry);
-            //ckpq->push(&checkVec[i]);
         }
         level = 1;
     }else {
@@ -91,14 +86,10 @@ bool DramSkiplist::insert(Vnode *targetVnode)
 
         next->hdr.next = current_update->hdr.next;
         current_update->hdr.next = next->getId();
-#if 0
-        ckp_entry *entry_tail = new ckp_entry(next);
-        checkVec[i].push(entry_tail);
-        ckp_entry *entry_head = new ckp_entry(current_update);
-        checkVec[i].push(entry_head);
-#endif
+
         ckpt_log->enq(*next);
         ckpt_log->enq(*current_update);
+
         current_update = next;
         if (i == 0) {
             current_update->insertAtPos(targetKey, targetVnode->getId(), 0);
@@ -107,10 +98,6 @@ bool DramSkiplist::insert(Vnode *targetVnode)
         }
         prev_update = current_update;
 
-#if 0
-        ckp_entry *entry_cur = new ckp_entry(prev_update);
-        checkVec[i].push(entry_cur);
-#endif
         ckpt_log->enq(*prev_update);
 
         if(i != 0 && lock_updates[i-1]) {
@@ -160,8 +147,6 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
             if(target->gps[idx].key == oldKey) {
                 target->gps[idx].key = newKey;
                 ckpt_log->enq(*target);
-               // ckp_entry *entry = new ckp_entry(target);
-                //checkVec[i].push(entry);
             }   
             if(i != 0) {
                 target = dramInodePool->at(target->gps[idx].value);
@@ -339,14 +324,10 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
             lock_updates_next[i].emplace(inode_locks[next->getId()]);
             next->hdr.next = current_update->hdr.next;
             current_update->hdr.next = next->getId();
+
             ckpt_log->enq(*next);
             ckpt_log->enq(*current_update); 
-#if 0
-            ckp_entry *entry2 = new ckp_entry(next);
-            checkVec[i].push(entry2);
-            ckp_entry *entry = new ckp_entry(current_update);
-            checkVec[i].push(entry);
-#endif
+
             if(current_update->isHeader()) {
                 current_update = next;
             } else { 
@@ -361,10 +342,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
         } else {
             current_update->insertAtPos(targetKey, prev_update->getId(), pos);
         }
-#if 0
-        ckp_entry *entry = new ckp_entry(current_update);
-        checkVec[i].push(entry);
-#endif
+
         ckpt_log->enq(*current_update);
         prev_update = current_update;
         if(i != 0 && lock_updates[i-1]) {

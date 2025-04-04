@@ -6,7 +6,7 @@ CXX = g++
 #CXXFLAGS = -Wall -Iinclude --std=c++17 -O3
 #CXXFLAGS = -Wall -Iinclude -g --std=c++17 -O3
 CXXFLAGS = -Wall -Iinclude --std=c++17 -O3
-$CXXFLAGS = -Wall -Iinclude --std=c++17 -g -fsanitize=thread -O3
+#CXXFLAGS = -Wall -Iinclude --std=c++17 -g -fsanitize=thread -O3
 
 # Directories
 SRC_DIR = src
