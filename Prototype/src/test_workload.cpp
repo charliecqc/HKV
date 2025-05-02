@@ -40,7 +40,7 @@ void exec(int num_thread) {
 }
 
 int main() {
-    int num_thread = 4;
+    int num_thread = 1;
     exec(num_thread);
     // Lookup nodes
 

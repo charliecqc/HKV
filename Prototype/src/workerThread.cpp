@@ -40,11 +40,11 @@ LogMergeThread::LogMergeThread(int tid, CkptLog *cklog, PmemInodePool *pmemInode
 }
 
 bool LogMergeThread::isCkptLogEmpty() {
-    return ckptLog->isEmpty();
+    return ckptLog->isLogEmpty();
 }
 
 LogMergeThread::~LogMergeThread() {
-    assert(ckptLog->isEmpty());
+    assert(ckptLog->isLogEmpty());
     Inode *superNode = pmemInodePool->at(MAX_NODES);
     if(superNode != nullptr) {
         superNode->hdr.last_index = pmemInodePool->getCurrentIdx();  
@@ -55,9 +55,7 @@ LogMergeThread::~LogMergeThread() {
 
 void LogMergeThread::logMergeOperation() {
     try {
-        while(!isCkptLogEmpty()) {
-            ckptLog->reclaim(pmemInodePool);
-        }
+        ckptLog->reclaim(pmemInodePool);
     }catch(std::exception &e) {
         std::cout << "Exception in logMergeOperation: " << e.what() << std::endl;
     }

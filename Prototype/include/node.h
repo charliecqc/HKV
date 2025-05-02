@@ -40,8 +40,8 @@ public:
 class header{
     public:
         int16_t id; //2 bytes
-        int8_t coveredNodes; // 1 byte
-        int8_t level; //1 byte
+        int16_t coveredNodes; // 1 byte
+        int16_t level; //1 byte
         int16_t next; //2 bytes 
         int16_t last_index; //2 bytes
         //std::shared_mutex mtx; //8 bytes
@@ -224,25 +224,35 @@ public:
     }
 
     bool split(Inode *targetInode) {
+        if(isHeader() || targetInode->isHeader()) {
+            std::cout << " this is also weird" << std::endl;
+        }
         memmove(targetInode->gps, &gps[hdr.last_index / 2], sizeof(entry) * (hdr.last_index / 2 + 1));
         int temp_index = hdr.last_index;
         hdr.last_index = hdr.last_index / 2 - 1;
         targetInode->hdr.last_index = temp_index / 2;
         hdr.coveredNodes = hdr.last_index + 1;
         targetInode->hdr.coveredNodes = targetInode->hdr.last_index + 1;
-        //int next = hdr.next;
-        //targetInode->hdr.next = next;
-        //hdr.next = targetInode->getId();
         return true;
     }
 
     bool insertAtPos(Key_t key, Val_t value, int pos) {
+        if(isHeader()) {
+            std::cout << "this is weird" << std::endl;
+        }
         shift(pos);
         hdr.last_index++;
         gps[pos].key = key;
         gps[pos].value = value;
         hdr.coveredNodes++;
         return true;
+    }
+
+    void updateKeyVal(Key_t newKey, int pos) {
+        if(isHeader()) {
+            std::cout << " this is weird 2" << std::endl;
+        }
+        gps[pos].key = newKey;
     }
 };
 

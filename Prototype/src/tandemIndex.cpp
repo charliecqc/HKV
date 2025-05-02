@@ -40,6 +40,9 @@ TandemIndex::TandemIndex() {
     Inode *index_header = mainIndex->getHeader();
     Vnode *value_header = valueList->getHeader();
     index_header->gps[0].value = value_header->getId();
+    dram_log_entry_t *header_entry = new dram_log_entry_t(index_header->getId(), index_header->hdr.coveredNodes,index_header->hdr.last_index,index_header->hdr.next);
+    header_entry->setKeyVal(0, index_header->gps[0].key, index_header->gps[0].value);
+    ckptLog->enq(header_entry);
 }
 
 TandemIndex::~TandemIndex() {
@@ -104,7 +107,6 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         }
         //incease the covered nodes of the inode due to newly added vnodes
         {
-            CheckpointVector ckvec;
             std::unique_lock<std::shared_mutex> inode_wlock(mainIndex->inode_locks[inode->getId()]);
             inode->hdr.coveredNodes++;
             if(inode->checkForActivateGP()) {
@@ -122,7 +124,13 @@ bool TandemIndex::insert(Key_t key, Val_t value)
                         return ret;
                     }
                     inode->gps[pos].key = targetKey;
-                    ckptLog->enq(*inode);
+                    dram_log_entry_t *entry = new dram_log_entry_t(inode->getId(),inode->hdr.coveredNodes, inode->hdr.last_index, inode->hdr.next);
+                    for(int i = 0; i <= inode->hdr.last_index; i++) {
+                        entry->setKeyVal(i, inode->gps[i].key, inode->gps[i].value);
+                    }
+                    entry->setCoveredNodes(inode->hdr.coveredNodes);
+                    entry->setLastIndex(inode->hdr.last_index);
+                    ckptLog->enq(entry);
                 }else {
                     //rebalance the main index, if necessary
                     needToRebalance = true;
@@ -196,7 +204,6 @@ Val_t TandemIndex::lookup(Key_t key)
         return -1;
     }
     {
-        //std::shared_lock<std::shared_mutex> lock(inode->hdr.mtx);
         std::shared_lock<std::shared_mutex> lock(mainIndex->inode_locks[inode->getId()]);
         vnode = valueList->pmemVnodePool->at(inode->gps[idx].value);
     }
