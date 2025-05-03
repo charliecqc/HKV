@@ -44,6 +44,8 @@ bool LogMergeThread::isCkptLogEmpty() {
 }
 
 LogMergeThread::~LogMergeThread() {
+    if(!ckptLog->isLogEmpty())
+        ckptLog->forceReclaim(pmemInodePool);
     assert(ckptLog->isLogEmpty());
     Inode *superNode = pmemInodePool->at(MAX_NODES);
     if(superNode != nullptr) {

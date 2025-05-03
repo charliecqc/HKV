@@ -12,12 +12,6 @@
 
 #define MAX_CKP_LOG_ENTR
 
-class log_entry_t {
-public:
-    Inode inode;
-    log_entry_t(Inode inode) : inode(inode){};
-};
-
 class log_entry_hdr {
 public:
     int16_t id; //id of inode that has modifications
@@ -55,16 +49,6 @@ public:
         memset(value, 0, sizeof(value));
     }
 
-#if 0
-    dram_log_entry_t(){
-        this->hdr.id = -1;
-        this->hdr.coveredNodes = 0;
-        this->hdr.last_index = -1;
-        this->hdr.next = -1;
-        initArrays();
-    }
-#endif
-
     dram_log_entry_t(int16_t id, int16_t coveredNodes, int16_t last_index, int16_t next) : hdr(id, coveredNodes, last_index, next) {
         initArrays();
     }
@@ -82,7 +66,6 @@ public:
         this->hdr.last_index = last_index;
         this->hdr.next = next;
     }
-
 
     size_t getLoadCount() {
         return hdr.count;
@@ -109,63 +92,6 @@ public:
         return sizeof(Key_t) * activated_count + sizeof(Val_t) * activated_count + sizeof(int32_t) * activated_count;
     }
 };
-
-class entry_t {
-    public:
-    entry_t(int16_t id, int16_t next) : id(id), next(next) {
-        this->gp_idx = new int16_t[fanout];
-        this->key = new Key_t[fanout];
-        this->value = new Val_t[fanout];
-        this->coveredNodes = 0;
-        this->last_index = -1;
-    }
-
-    entry_t(int16_t id) : id(id) {
-        this->gp_idx = new int16_t[fanout];
-        this->key = new Key_t[fanout];
-        this->value = new Val_t[fanout];
-        this->coveredNodes = 0;
-        this->last_index = -1;
-    }
-    int16_t id; //2 bytes
-    int16_t coveredNodes;
-    int16_t last_index;
-    int16_t next; // 2 bytes
-    size_t count;
-
-    int16_t *gp_idx; //0-fanout/2-1: gp, fanout/2-fanout-1: sgp, fanout:next
-    Key_t *key; 
-    Val_t *value;
-
-    size_t getObjSize() {
-        size_t tem_size = sizeof(Key_t) * count + sizeof(Val_t) * count + sizeof(int16_t) * count;
-        if(next != -1) {
-            tem_size += sizeof(next);
-        }
-        return tem_size;
-    }
-
-    void setLogKeyVal(int16_t idx, Key_t key, Val_t value) {
-        gp_idx[count] = idx;
-        this->key[count] = key;
-        this->value[count] = value;
-        count += 1;
-    }
-
-    void setCoveredNodes(int16_t coveredNodes) {
-        this->coveredNodes = coveredNodes;
-    }
-
-    void setLogNext(int16_t next) {
-        this->next = next;
-    }
-
-    void setLastIndex(int16_t last_index) {
-        this->last_index = last_index;
-    }
-
-};
-
 
 class CkptLogNVM {
 private:
@@ -211,14 +137,15 @@ public:
         return false;
     }
 
-    size_t getSize() {
-        if (isFull) {
-            return maxSize;
-        }
-        if (end >= start) {
+    size_t getLogQueueSize() {
+        if (end > start) {
             return end - start;
+        }else if(start == end) {
+            return 0;
+        }else {
+            cout << "Log is over empty " << "ckptlog->start: " << start << " ckptlog->end: "<< end<< endl;
+            return -1;
         }
-        return maxSize - start + end;
     }
 };
 
@@ -226,28 +153,35 @@ class CkptLog {
     public:
     SpinLock g_ckptlock;
     std::shared_mutex mtx;
+    int retry_count;
     CkptLogNVM *ckptlog;
     CkptLog(size_t maxSize) {
         ckptlog = new CkptLogNVM(maxSize);
+        retry_count = 0;
     }
     ~CkptLog() {}
     //void enq(Inode inode);
+    void initInodeFromLogEntry(Inode *inode, log_entry_hdr *entry_hdr) {
+        inode->hdr.id = entry_hdr->id;
+        inode->hdr.coveredNodes = entry_hdr->coveredNodes;
+        inode->hdr.last_index = entry_hdr->last_index;
+        inode->hdr.next = entry_hdr->next;
+    }
     void enq(dram_log_entry_t *entry);
-    //log_entry_t *put_log_entry(Inode inode);
     log_entry_hdr *put_log_entry(dram_log_entry_t *entry);
-    //log_entry_t *log_deq();
     log_entry_hdr *log_deq();
-    //log_entry_t *nvm_log_at(size_t index);
     log_entry_hdr *nvm_log_at(size_t index);
-    //log_entry_t *nvm_log_enq(size_t obj_size);
     log_entry_hdr *nvm_log_enq(size_t obj_size);
-    //log_entry_t *log_peek_head();
     log_entry_hdr *log_peek_head();
     unsigned int nvm_log_index(unsigned long index);
     void reclaim(PmemInodePool *pmemInodePool);
+    void forceReclaim(PmemInodePool *pmemInodePool);
     bool isLogEmpty() {
         bool ret = ckptlog->isEmpty();
         return ret;
+    }
+    size_t getLogQueueSize() {
+        return ckptlog->getLogQueueSize();
     }
 };
 

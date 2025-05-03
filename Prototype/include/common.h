@@ -7,10 +7,12 @@ const int MAX_LEVEL = 16;
 #define WORKERQUEUE_NUM 1
 #define L1_CACHE_LINE_SIZE 64
 #define L1_CACHE_LINE_MASK (~(L1_CACHE_LINE_SIZE - 1))
+#define RECLAIM_THRESHOLD 40000
+#define RECLAIM_RETRY_THRESHOLD 50000
 
 #ifndef unlikely
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif
 
 //#define DBG 1
-#define LOG_DEBUG 1
+//#define LOG_DEBUG 1

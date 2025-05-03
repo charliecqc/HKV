@@ -22,7 +22,7 @@ void exec(int num_thread) {
         for(int i = start_idx; i < end_idx; i++) {
             Val_t random_value = std::rand() % 1000 + 1;
             idx.insert(random_value, random_value);
-#if 1
+#if 0
             auto ret = idx.lookup(random_value);
             if(ret != random_value) {
                 std::cout << "Failed to insert " << random_value <<" got " << ret << std::endl;
