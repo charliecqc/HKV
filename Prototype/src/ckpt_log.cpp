@@ -63,6 +63,46 @@ log_entry_hdr *CkptLog::log_deq()
     return hdr;
 }
 
+log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
+{
+    nvm_log_entry_t *log_entry = nullptr;
+    log_entry_hdr *persistent_start_addr = nullptr;
+    log_entry_hdr *log_entry_hdr = nullptr;
+
+    unsigned long obj_size = entry->getPayLoadSize();
+    unsigned long entry_size = obj_size + sizeof(entry->hdr);
+    entry_size = PmemManager::align_uint_to_cacheline(entry_size);
+    {
+        std::unique_lock<std::shared_mutex> lock(mtx);
+        log_entry_hdr = nvm_log_enq(entry_size);
+        initLogEntryHeaderFromDramLogEntry(log_entry_hdr, entry);
+        log_entry = reinterpret_cast<nvm_log_entry_t *>((char *)log_entry_hdr + sizeof(*log_entry_hdr));
+        for(int i = 0; i < entry->hdr.count; i++)
+        {
+            log_entry->gp_idx = entry->gp_idx[i];
+            log_entry->key = entry->key[i];
+            log_entry->value = entry->value[i];
+            char *temp = reinterpret_cast<char *>(log_entry);
+            temp += sizeof(nvm_log_entry_t);
+            log_entry = reinterpret_cast<nvm_log_entry_t *>(temp);
+        }
+        ckptlog->current_update += entry_size;
+        
+        if(ckptlog->end_persistent - ckptlog->start_persistent > PERSISTENT_THRESHOLD)
+        {
+            persistent_start_addr = nvm_log_at(ckptlog->start_persistent);
+            size_t buf_size = ckptlog->end_persistent - ckptlog->start_persistent;
+            buf_size += entry_size;
+            PmemManager::flushToNVM(3, reinterpret_cast<char *>(persistent_start_addr), buf_size);
+            ckptlog->start_persistent = ckptlog->end_persistent;
+        }
+        ckptlog->end_persistent = ckptlog->current_update;
+    }
+    assert(log_entry_hdr->id == entry->hdr.id);
+    return log_entry_hdr;
+}
+
+#if 0
 log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry) 
 {
     nvm_log_entry_t *log_entry = nullptr;
@@ -76,12 +116,7 @@ log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
 #ifdef LOG_DEBUG
         cout << "Log enq, log_entry_hdr->id: " << entry->hdr.id << " log_entry_hdr->count: " << entry->hdr.count << " size: " << entry_size<<endl;
 #endif
-        
-        log_entry_hdr->id = entry->hdr.id;
-        log_entry_hdr->count = entry->hdr.count;
-        log_entry_hdr->next = entry->hdr.next;
-        log_entry_hdr->coveredNodes = entry->hdr.coveredNodes;
-        log_entry_hdr->last_index = entry->hdr.last_index;
+        initLogEntryHeaderFromDramLogEntry(log_entry_hdr, entry); 
         log_entry = reinterpret_cast<nvm_log_entry_t *>((char *)log_entry_hdr + sizeof(*log_entry_hdr));
         for(int i = 0; i < entry->hdr.count; i++)
         {
@@ -95,7 +130,6 @@ log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
             if(log_entry->key == static_cast<Key_t>(-1)) {
                 cout << "Key is not set" << endl;
             }
-
             if(entry->hdr.id == 425 && entry->hdr.next == 73 && entry->hdr.coveredNodes == 10 && i == 9) {
                 cout << "Log entry id is set to 168" << endl;
             }
@@ -113,6 +147,7 @@ log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
     assert(log_entry_hdr->id == entry->hdr.id);
     return log_entry_hdr;
 }
+#endif
 
 log_entry_hdr *CkptLog::nvm_log_enq(size_t entry_size)
 {
@@ -151,6 +186,14 @@ log_entry_hdr *CkptLog::log_peek_head()
     {
 #ifdef LOG_DEBUG
         cout << "Log start is under modification" << " ckptlog->start: " << ckptlog->start <<" ckptlog->current_update: "<< ckptlog->current_update << " ckptlog->end: "<< ckptlog->end <<" at line: " << __LINE__ << endl;
+#endif
+        return NULL;
+    }
+
+    if(ckptlog->start >= ckptlog->start_persistent)
+    {
+#ifdef LOG_DEBUG1
+        cout << "Log start has not been persistent" << " ckptlog->start: " << ckptlog->start <<" ckptlog->current_update: "<< ckptlog->current_update << " ckptlog->end: "<< ckptlog->end <<" at line: " << __LINE__ << endl;
 #endif
         return NULL;
     }
@@ -207,7 +250,7 @@ void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
 #ifdef LOG_DEBUG
         cout << "Reclaiming log, old_head_idx: " << old_head_idx << " ckptlog->start: " << ckptlog->start <<" ckptlog->end: " <<ckptlog->end<< endl;
 #endif
-        ckptlog->current_update= ckptlog->end = ckptlog->start = 0;
+        ckptlog->start_persistent = ckptlog->end_persistent = ckptlog->current_update= ckptlog->end = ckptlog->start = 0;
         PmemManager::flushToNVM(3, reinterpret_cast<char *>(ckptlog), sizeof(*ckptlog));
     }
 }
@@ -255,7 +298,7 @@ void CkptLog::reclaim(PmemInodePool *pmemInodePool)
 #ifdef LOG_DEBUG
             cout << "Reclaiming log, old_head_idx: " << old_head_idx << " ckptlog->start: " << ckptlog->start <<" ckptlog->end: " <<ckptlog->end<< endl;
 #endif  
-            ckptlog->current_update= ckptlog->end = ckptlog->start = 0;
+            ckptlog->start_persistent = ckptlog->end_persistent = ckptlog->current_update= ckptlog->end = ckptlog->start = 0;
             PmemManager::flushToNVM(3, reinterpret_cast<char *>(ckptlog), sizeof(*ckptlog));
         }
         retry_count = 0;

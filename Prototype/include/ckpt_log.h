@@ -103,6 +103,8 @@ public:
     size_t start;
     size_t end;
     size_t current_update;
+    size_t end_persistent;
+    size_t start_persistent;
     size_t log_size;
     size_t mask;
     bool isFull;
@@ -115,6 +117,8 @@ public:
         start = 0;
         end = 0;
         current_update = 0;
+        end_persistent = 0;
+        start_persistent = 0;
         log_size = maxSize;
         mask = (~(log_size - 1));
     }
@@ -167,6 +171,15 @@ class CkptLog {
         inode->hdr.last_index = entry_hdr->last_index;
         inode->hdr.next = entry_hdr->next;
     }
+
+    void initLogEntryHeaderFromDramLogEntry(log_entry_hdr *entry_hdr, dram_log_entry_t *entry) {
+        entry_hdr->id = entry->hdr.id;
+        entry_hdr->count = entry->hdr.count;
+        entry_hdr->next = entry->hdr.next;
+        entry_hdr->coveredNodes = entry->hdr.coveredNodes;
+        entry_hdr->last_index = entry->hdr.last_index;
+    }
+
     void enq(dram_log_entry_t *entry);
     log_entry_hdr *put_log_entry(dram_log_entry_t *entry);
     log_entry_hdr *log_deq();
