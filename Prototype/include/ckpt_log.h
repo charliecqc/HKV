@@ -188,6 +188,7 @@ class CkptLog {
     log_entry_hdr *log_peek_head();
     unsigned int nvm_log_index(unsigned long index);
     void reclaim(PmemInodePool *pmemInodePool);
+    void forcePersist();
     void forceReclaim(PmemInodePool *pmemInodePool);
     bool isLogEmpty() {
         bool ret = ckptlog->isEmpty();

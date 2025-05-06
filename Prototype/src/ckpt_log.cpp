@@ -214,6 +214,20 @@ unsigned int CkptLog::nvm_log_index(unsigned long idx)
     return (idx & ~(ckptlog->mask));
 }
 
+void CkptLog::forcePersist()
+{
+    std::unique_lock<std::shared_mutex> lock(mtx);
+    log_entry_hdr *persistent_start_addr = nvm_log_at(ckptlog->start_persistent);
+    log_entry_hdr *persistent_end_addr = nvm_log_at(ckptlog->end_persistent);
+    size_t obj_size = persistent_end_addr->getPayLoadSize();
+    size_t entry_size = obj_size + sizeof(log_entry_hdr); 
+    entry_size = PmemManager::align_uint_to_cacheline(entry_size);
+    size_t buf_size = ckptlog->end_persistent - ckptlog->start_persistent;
+    buf_size += entry_size;
+    PmemManager::flushToNVM(3, reinterpret_cast<char *>(persistent_start_addr), buf_size);
+    ckptlog->start_persistent = ckptlog->end_persistent;
+}
+
 void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
 {
     std::unique_lock<std::shared_mutex> lock(mtx);
