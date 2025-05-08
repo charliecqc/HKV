@@ -22,7 +22,7 @@ void exec(int num_thread) {
         for(int i = start_idx; i < end_idx; i++) {
             Val_t random_value = std::rand() % 1000 + 1;
             idx.insert(random_value, random_value);
-#if 0
+#if 1
             auto ret = idx.lookup(random_value);
             if(ret != random_value) {
                 std::cout << "Failed to insert " << random_value <<" got " << ret << std::endl;
@@ -40,7 +40,7 @@ void exec(int num_thread) {
 }
 
 int main() {
-    int num_thread = 1;
+    int num_thread = 4;
     exec(num_thread);
     // Lookup nodes
 

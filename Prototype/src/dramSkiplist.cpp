@@ -264,8 +264,6 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
     return current;
 }
 
-
-
 Inode* DramSkiplist::getHeader()
 {
     return header[0];
@@ -335,9 +333,6 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
             current_update->hdr.next = next->getId();
             current_update_entry->initHeader(current_update->getId(),current_update->hdr.coveredNodes,current_update->hdr.last_index,current_update->hdr.next);
             next_entry->initHeader(next->getId(),next->hdr.coveredNodes, next->hdr.last_index,next->hdr.next);
-            if(current_update->hdr.id == 32) {
-                cout << "current_update->hdr.id: " << current_update->hdr.id << endl;
-            }
 
             if(current_update->isHeader()) {
                 current_update = next;

@@ -10,7 +10,6 @@
 #pragma once
 
 #define INDEX_POOL_LAYOUT_NAME "index_pool"
-#define MAX_NODES 10000
 #define NODE_POOL_SIZE ((30LL*1024*1024*1024))
 
 using namespace std;

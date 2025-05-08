@@ -55,7 +55,7 @@ log_entry_hdr *CkptLog::log_deq()
     size_t old_start = ckptlog->start;
     ckptlog->start += entry_size;
 #ifdef LOG_DEBUG
-    cout << "Log deq, old_start: " << old_start << " new ckptlog->start: " << ckptlog->start << " ckptlog->end: "<< ckptlog->end << endl;
+    cout << "Log deq, old_start: " << old_start << " new ckptlog->start: " << ckptlog->start << " ckptlog->end: "<< ckptlog->end << " ckptlog->current_update: "<< ckptlog->current_update << " ckptlog->start_pers: " << ckptlog->start_persistent << " ckptlog->end_perss: " << ckptlog->end_persistent<< endl;
     if(ckptlog->start > ckptlog->end) {
         cout << "Log is empty in log_deq, current start: "<<ckptlog->start <<" current end: "<< ckptlog->end << endl;
     }
@@ -76,6 +76,9 @@ log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
         std::unique_lock<std::shared_mutex> lock(mtx);
         log_entry_hdr = nvm_log_enq(entry_size);
         initLogEntryHeaderFromDramLogEntry(log_entry_hdr, entry);
+#ifdef LOG_DEBUG
+        cout << "Log enq, log_entry_hdr->id: " << entry->hdr.id << " log_entry_hdr->count: " << entry->hdr.count << " size: " << entry_size<<endl;
+#endif
         log_entry = reinterpret_cast<nvm_log_entry_t *>((char *)log_entry_hdr + sizeof(*log_entry_hdr));
         for(int i = 0; i < entry->hdr.count; i++)
         {
@@ -87,7 +90,8 @@ log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
             log_entry = reinterpret_cast<nvm_log_entry_t *>(temp);
         }
         ckptlog->current_update += entry_size;
-        
+        ckptlog->end_persistent = ckptlog->current_update;
+
         if(ckptlog->end_persistent - ckptlog->start_persistent > PERSISTENT_THRESHOLD)
         {
             persistent_start_addr = nvm_log_at(ckptlog->start_persistent);
@@ -95,8 +99,13 @@ log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
             buf_size += entry_size;
             PmemManager::flushToNVM(3, reinterpret_cast<char *>(persistent_start_addr), buf_size);
             ckptlog->start_persistent = ckptlog->end_persistent;
+#ifdef LOG_DEBUG
+            cout << "Log is persistent, ckptlog->start_persistent: " << ckptlog->start_persistent << " ckptlog->end_persistent: "<< ckptlog->end_persistent << endl;
+#endif
         }
-        ckptlog->end_persistent = ckptlog->current_update;
+#ifdef LOG_DEBUG
+        cout << "Increase end_persistent, ckptlog->start_persistent: " << ckptlog->start_persistent << " ckptlog->end_persistent: "<< ckptlog->end_persistent << endl;
+#endif
     }
     assert(log_entry_hdr->id == entry->hdr.id);
     return log_entry_hdr;
@@ -168,7 +177,7 @@ log_entry_hdr *CkptLog::nvm_log_enq(size_t entry_size)
     size_t old_end = ckptlog->end;
     ckptlog->end = ckptlog->end + entry_size;
 #ifdef LOG_DEBUG
-    cout << "Log enq, old_end: " << old_end << " ckptlog->start: " << ckptlog->start << " ckptlog->end: "<< ckptlog->end << endl;
+    cout << "Log enq, old_end: " << old_end << " ckptlog->start: " << ckptlog->start << " ckptlog->end: "<< ckptlog->end <<" ckptlog->current_update "<< ckptlog->current_update <<" ckptlog->start_persistent " << ckptlog->start_persistent << " ckptlog->end_persis " << ckptlog->end_persistent << endl;
 #endif
     return log_entry_hdr;
 }
@@ -218,12 +227,12 @@ void CkptLog::forcePersist()
 {
     std::unique_lock<std::shared_mutex> lock(mtx);
     log_entry_hdr *persistent_start_addr = nvm_log_at(ckptlog->start_persistent);
-    log_entry_hdr *persistent_end_addr = nvm_log_at(ckptlog->end_persistent);
-    size_t obj_size = persistent_end_addr->getPayLoadSize();
-    size_t entry_size = obj_size + sizeof(log_entry_hdr); 
-    entry_size = PmemManager::align_uint_to_cacheline(entry_size);
+    //log_entry_hdr *persistent_end_addr = nvm_log_at(ckptlog->end_persistent);
+    //size_t obj_size = persistent_end_addr->getPayLoadSize();
+    //size_t entry_size = obj_size + sizeof(log_entry_hdr); 
+    //entry_size = PmemManager::align_uint_to_cacheline(entry_size);
     size_t buf_size = ckptlog->end_persistent - ckptlog->start_persistent;
-    buf_size += entry_size;
+    //buf_size += entry_size;
     PmemManager::flushToNVM(3, reinterpret_cast<char *>(persistent_start_addr), buf_size);
     ckptlog->start_persistent = ckptlog->end_persistent;
 }
