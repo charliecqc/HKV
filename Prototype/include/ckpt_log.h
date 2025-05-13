@@ -12,6 +12,13 @@
 
 #define MAX_CKP_LOG_ENTR
 
+class nvm_log_entry_t {
+public:
+    int32_t gp_idx;
+    Key_t key;
+    Val_t value;
+};
+
 class log_entry_hdr {
 public:
     int16_t id; //id of inode that has modifications
@@ -25,15 +32,8 @@ public:
 
     size_t getPayLoadSize() {
         size_t activated_count = count;
-        return sizeof(Key_t) * activated_count + sizeof(Val_t) * activated_count + sizeof(int32_t) * activated_count;
+        return sizeof(nvm_log_entry_t) * activated_count;
     }
-};
-
-class nvm_log_entry_t {
-public:
-    int32_t gp_idx;
-    Key_t key;
-    Val_t value;
 };
 
 class dram_log_entry_t {
@@ -89,7 +89,8 @@ public:
 
     size_t getPayLoadSize() {
         size_t activated_count = hdr.count;
-        return sizeof(Key_t) * activated_count + sizeof(Val_t) * activated_count + sizeof(int32_t) * activated_count;
+        return sizeof(nvm_log_entry_t) * activated_count;
+        //return sizeof(Key_t) * activated_count + sizeof(Val_t) * activated_count + sizeof(int32_t) * activated_count;
     }
 };
 
