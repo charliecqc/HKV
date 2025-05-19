@@ -5,13 +5,41 @@
 #include <chrono>
 #include <sys/time.h>
 #include "tandemIndex.h"
+
 #pragma once
-enum {
-    OP_INSERT,
-    OP_READ,
-    OP_UPSERT,
-    OP_DELETE,
-    OP_SCAN,
+enum
+{
+  TYPE_MTS,
+  TYPE_NONE,
+};
+
+// These are workload operations
+enum
+{
+  OP_INSERT,
+  OP_READ,
+  OP_UPSERT,
+  OP_SCAN,
+};
+
+// These are YCSB workloads
+enum
+{
+  WORKLOAD_A,
+  WORKLOAD_B,
+  WORKLOAD_C,
+  WORKLOAD_E,
+  WORKLOAD_F,
+  WORKLOAD_D,
+};
+
+// These are key types we use for running the benchmark
+enum
+{
+  RAND_KEY,
+  MONO_KEY,
+  RDTSC_KEY,
+  EMAIL_KEY,
 };
 
 void startThreads(TandemIndex *idx, int num_thread, std::function<void(int)> fn)

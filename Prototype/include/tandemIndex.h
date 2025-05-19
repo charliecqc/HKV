@@ -22,9 +22,10 @@ class TandemIndex {
 
         bool insert(Key_t key, Val_t value);
         //void remove(int key);
-        //void update(int key, int value);
+        void update(Key_t key, Val_t value);
         //void print();
         Val_t lookup(Key_t key);
+        void recover(Key_t key);
 
         //std::thread *workerThread;
         std::thread *checkpointThread;

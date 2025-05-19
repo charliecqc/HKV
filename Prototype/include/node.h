@@ -282,6 +282,16 @@ public:
         return false;
     }
 
+    bool lookup(Key_t key, int &pos) {
+        for(int32_t i = fanout - 1 ; i >= 0; i--) {
+            if(records[i].key == key && hdr.isBitSet(i)) {
+                pos = i;
+                return true;
+            }
+        }
+        return false;
+    }
+
     Key_t getMaxKey() {
         //Todo:: use figer print to get the max key
         Key_t maxKey = std::numeric_limits<Key_t>::min();
@@ -337,26 +347,30 @@ public:
     }
 
     bool split(Vnode *targetVnode) {
-        std::unique_lock<std::shared_mutex> lock(hdr.mtx);
-        Key_t midKey = getMidKey();
-        Key_t key = std::numeric_limits<Key_t>::max();
-        Val_t value = std::numeric_limits<Val_t>::max();
-        for(int32_t i = 0; i < fanout; i++) {
+       // try {
+            std::unique_lock<std::shared_mutex> lock(hdr.mtx);
+            Key_t midKey = getMidKey();
+            Key_t key = std::numeric_limits<Key_t>::max();
+            Val_t value = std::numeric_limits<Val_t>::max();
+            for(int32_t i = 0; i < fanout; i++) 
             {
                 key = records[i].key;
                 value = records[i].value;
+                if(key > midKey) {
+                    targetVnode->insert(key, value);
+                }
+                hdr.unsetBit(i);
             }
-            if(key > midKey) {
-                targetVnode->insert(key, value);
-            }
-            hdr.unsetBit(i);
-        }
-        targetVnode->hdr.next = hdr.next;
-        hdr.next = targetVnode->getId();
+            targetVnode->hdr.next = hdr.next;
+            hdr.next = targetVnode->getId();
 #ifdef DBG
         std::cout << "split done this: " << this->getId() << " this->max: " <<getMaxKey() << " new: " << targetVnode->getId() << " max: " << targetVnode->getMaxKey()<< std::endl;
 #endif
-        return true;
+            return true;
+       // } catch (const std::exception& e) {
+        //    std::cerr << "Exception occurred during split: " << e.what() << std::endl;
+         //   return false;
+       // }
     }
 
 //Todo: Implement insert with finger print and bloom filter

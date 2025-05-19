@@ -83,19 +83,11 @@ log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
         cout << "Log enq, log_entry_hdr->id: " << entry->hdr.id << " log_entry_hdr->count: " << entry->hdr.count << " size: " << entry_size<<endl;
 #endif
     log_entry = reinterpret_cast<nvm_log_entry_t *>((char *)log_entry_hdr + sizeof(*log_entry_hdr));
-    if(entry->hdr.id == 368 && entry->hdr.coveredNodes == 49 && entry->hdr.last_index == 12)
-    {
-        cout << "this is the debug target" << endl;
-    }
     for(int i = 0; i < entry->hdr.count; i++)
     {
         log_entry->gp_idx = entry->gp_idx[i];
         log_entry->key = entry->key[i];
         log_entry->value = entry->value[i];
-        if(entry->hdr.id == 368 && entry->hdr.coveredNodes == 49 && entry->hdr.last_index == 12 && log_entry->gp_idx == 12)
-        {
-            cout << "this is the debug target" << endl;
-        }
         char *temp = reinterpret_cast<char *>(log_entry);
         temp += sizeof(nvm_log_entry_t);
         log_entry = reinterpret_cast<nvm_log_entry_t *>(temp);
@@ -284,10 +276,6 @@ void CkptLog::reclaim(PmemInodePool *pmemInodePool)
             while(count > 0)
             {
                 int32_t idx = entry->gp_idx;
-                if(entry_hdr->id == 368 && idx == 11)
-                {
-                    cout << "this is the debug target" << endl;
-                }
                 inode->gps[idx].key = entry->key;
                 inode->gps[idx].value = entry->value;
                 char *temp = reinterpret_cast<char *>(entry);

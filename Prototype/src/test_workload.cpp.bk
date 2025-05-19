@@ -32,13 +32,13 @@ void exec(int num_thread) {
         }    
     };
     start_time = get_now();
-    startThreads(&idx, num_thread, func);
+    //startThreads(&idx, num_thread, func);
     end_time = get_now();
     elapsed_time = end_time - start_time;
     std::cout << "Elapsed time: " << elapsed_time <<" Build time: "<< build_time << std::endl;
     return;
 }
-
+#if 0
 int main() {
     int num_thread = 1;
     exec(num_thread);
@@ -50,5 +50,6 @@ int main() {
     return 0;
 
 }
+#endif
 
 

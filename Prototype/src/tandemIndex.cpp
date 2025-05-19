@@ -170,7 +170,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             std::cout << "Failed to insert the key and value into the vnode when inode is null. Key: " << key << std::endl;
             return ret;
         }
-            // headVnode is the first node of the value list
+        // headVnode is the first node of the value list
         ret = valueList->append(headVnode, targetVnode);
         if(ret == false) {
                 //Todo: rollback vnode
@@ -271,11 +271,104 @@ void TandemIndex::logMergeThreadExec(int id)
     }
 }
 
-#if 0
-void TandemIndex::update(int key, int value)
+void TandemIndex::recover(Key_t key)
 {
-    mainIndex->update(key, value);
+    //recoveryManager->recoveryOperation(key);
 }
+
+
+void TandemIndex::update(Key_t key, Val_t value)
+{
+    int idx = -1;
+    bool needToRebalance = false;
+    Vnode *targetVnode = nullptr; // new vnode to be inserted
+    Inode *inode = mainIndex->lookup(key, idx);
+    if(inode == nullptr) {
+        std::cout << "Failed to find the inode for the key: " << key << std::endl;
+        return;
+    }
+    std::shared_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[inode->getId()]);
+    Vnode *vnode = valueList->pmemVnodePool->at(inode->gps[idx].value);
+    inode_lock.unlock();
+    if(vnode == nullptr) {
+        std::cout << "Failed to find the vnode for the key: " << key << std::endl;
+        return;
+    }
+    while(true) {
+        std::unique_lock<std::shared_mutex> lock(vnode->hdr.mtx);
+        if(key > vnode->getMaxKey() && vnode->hdr.next != -1) {
+            vnode = valueList->pmemVnodePool->at(vnode->hdr.next);
+        }else {
+            int pos = -1;
+            if(vnode->lookup(key,pos)) {
+                if(!vnode->isFull()) {
+                    vnode->insert(key, value);
+                    vnode->hdr.unsetBit(pos);
+                    return;
+                }else {
+                    targetVnode = valueList->pmemVnodePool->getNextNode();  // get a new vnode;
+                    valueList->split(vnode, targetVnode); //redisribute the keys between the two vnodes
+                    if(key <= vnode->getMaxKey()) { // key is smaller than the max key of the previous value node after split
+                        if(!vnode->lookup(key, pos)) {
+                            vnode->insert(key, value);
+                            vnode->hdr.unsetBit(pos);
+                        }
+                    }else{
+                        std::unique_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
+                        if(!targetVnode->lookup(key, pos)) {
+                            targetVnode->insert(key, value);
+                            targetVnode->hdr.unsetBit(pos);
+                        }
+                    }
+                    break;
+                }
+            }else {
+                std::cout << "Failed to find the key in the vnode: " << vnode->hdr.id << std::endl;
+                return;
+            }
+        }
+    }
+    {
+        std::unique_lock<std::shared_mutex> inode_wlock(mainIndex->inode_locks[inode->getId()]);
+        inode->hdr.coveredNodes++;
+        if(inode->checkForActivateGP()) {
+            //activate GP
+            Key_t targetKey;
+            int pos = -1;
+            {
+                std::shared_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
+                targetKey = targetVnode->getMinKey();
+            }
+            if(inode->activateGP(targetKey, pos)) {
+                bool ret = mainIndex->linkVnodeToInode(*inode, pos, *targetVnode);
+                if(!ret) {
+                    std::cout << "Failed to link the vnode to the inode." << std::endl;
+                    return;
+                }
+                inode->gps[pos].key = targetKey;
+                dram_log_entry_t *entry = new dram_log_entry_t(inode->getId(),inode->hdr.coveredNodes, inode->hdr.last_index, inode->hdr.next);
+                for(int i = 0; i <= inode->hdr.last_index; i++) {
+                    entry->setKeyVal(i, inode->gps[i].key, inode->gps[i].value);
+                }
+                entry->setCoveredNodes(inode->hdr.coveredNodes);
+                entry->setLastIndex(inode->hdr.last_index);
+                ckptLog->enq(entry);
+            }else {
+                //rebalance the main index, if necessary
+                needToRebalance = true;
+            }
+        }else {
+            //no needs to activate GP, just return 
+            return;
+        }
+    } 
+    if(needToRebalance && inode){
+        std::unique_lock<std::shared_mutex> rebalance_lock(mainIndex->rebalance_lock);
+        bool ret = mainIndex->rebalanceInode(*inode, *targetVnode);
+        return;
+    }
+}
+#if 0
 
 void TandemIndex::remove(int key)
 {
