@@ -368,6 +368,34 @@ void TandemIndex::update(Key_t key, Val_t value)
         return;
     }
 }
+
+void TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &result)
+{
+    int idx = -1;
+    Inode *inode = mainIndex->lookup(key, idx);
+    Vnode *vnode = nullptr;
+    if(inode == nullptr) {
+        std::cout << "Failed to find the inode for the key: " << key << std::endl;
+        return;
+    }
+    {
+        std::shared_lock<std::shared_mutex> lock(mainIndex->inode_locks[inode->getId()]);
+        vnode = valueList->pmemVnodePool->at(inode->gps[idx].value);
+    }
+    int remaining_range = range;
+    while(true) {
+        std::shared_lock<std::shared_mutex> lock(vnode->hdr.mtx);
+        remaining_range=vnode->scan(key, remaining_range, result);
+        if(remaining_range > 0 && vnode->hdr.next != -1) {
+            vnode = valueList->pmemVnodePool->at(vnode->hdr.next);
+        }else {
+            if(remaining_range > 0) {
+                std::cout << "Failed to scan key: " << key << " with range: " << range <<" remaining_range: " << remaining_range << std::endl;
+            }
+            return;
+        }
+    }
+}
 #if 0
 
 void TandemIndex::remove(int key)

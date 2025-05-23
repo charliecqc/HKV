@@ -23,11 +23,12 @@ class TandemIndex {
         bool insert(Key_t key, Val_t value);
         //void remove(int key);
         void update(Key_t key, Val_t value);
+        void scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &result);
         //void print();
         Val_t lookup(Key_t key);
         void recover(Key_t key);
 
-        //std::thread *workerThread;
+        //std::thread *workerThread;kk
         std::thread *checkpointThread;
         std::thread *logMergeThread;
 

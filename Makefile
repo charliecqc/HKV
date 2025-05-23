@@ -20,8 +20,8 @@ masstree/mtIndexAPI.a:
 bwtree.o: ./BwTree/bwtree.h ./BwTree/bwtree.cpp libs
 	        $(CXX) $(CFLAGS) -c -o bwtree.o ./BwTree/bwtree.cpp
 
-workload.o: workload_micro.cpp microbench.h index.h util.h ./papi_util.cpp ./PRISM/include/MTS.h ./BwTree/bwtree.h ./masstree/mtIndexAPI.hh
-	$(CXX) $(CFLAGS) -I ./PRISM/include/ -I ./PRISM/src/ -c -o workload.o workload_micro.cpp -I ./PRISM/lib/pactree/include/
+workload.o: workload.cpp microbench.h index.h util.h ./papi_util.cpp ./PRISM/include/MTS.h ./BwTree/bwtree.h ./masstree/mtIndexAPI.hh
+	$(CXX) $(CFLAGS) -I ./PRISM/include/ -I ./PRISM/src/ -c -o workload.o workload.cpp -I ./PRISM/lib/pactree/include/
 
 
 workload: workload.o bwtree.o ./masstree/mtIndexAPI.a PRISM/libMTS.a

@@ -372,6 +372,28 @@ public:
          //   return false;
        // }
     }
+    
+    //return remaining number of keys need to be scanned
+    int scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &pq) {
+        size_t remaining_range = range;
+        for(int32_t i = fanout - 1; i >= 0; i--) {
+            if(hdr.isBitSet(i) == false) {
+                continue;
+            }
+            if(records[i].key == std::numeric_limits<Key_t>::max()) {
+                continue;
+            }
+            if(records[i].key < key) {
+                continue;
+            }
+            pq.push(records[i].key);
+            remaining_range--;
+            if(pq.size() > remaining_range) {
+                break;
+            }
+        }
+        return remaining_range;
+    }
 
 //Todo: Implement insert with finger print and bloom filter
 //find the first empty slot and insert the key and value

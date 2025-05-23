@@ -421,7 +421,8 @@ inline void exec(int wl,
             }
             else if (op == OP_SCAN)
             { // SCAN
-                //idx->scan(keys[i], ranges[i], ti);
+                std::priority_queue<keytype, std::vector<keytype>, std::greater<keytype>> pq;
+                idx->scan(keys[i], ranges[i], pq);
             }
 
             // periodic_count(1000, "thread_id %d", thread_id);
