@@ -1,3 +1,4 @@
+#pragma once
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -6,13 +7,12 @@
 #include <vector>
 #include <atomic>
 #include "dramManager.h"
-#include "node.h"
 #include "common.h"
-#pragma once
+#include "node.h"
+
+
 
 #define NODE_POOL_SIZE ((30LL*1024*1024*1024))
-
-using namespace std;
 
 class DramInodePool {
 private:
@@ -50,7 +50,7 @@ public:
     Inode* getNextNode() {
         int idx = currentIdx.fetch_add(1);
         if (idx >= numNodes) {
-            cout << "Exceeding the maximum number of nodes in dramInodePool, idx: " << idx << endl;
+            std::cout << "Exceeding the maximum number of nodes in dramInodePool, idx: " << idx << std::endl;
             return nullptr;
         }
         Inode *node = dramInodePool[idx];

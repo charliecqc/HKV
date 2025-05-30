@@ -1,3 +1,4 @@
+#pragma once
 #include <utility>
 #include <iostream>
 #include <cstdlib>
@@ -12,30 +13,104 @@
 #include <mutex>
 #include <unordered_set>
 #include "common.h"
-
-#pragma once
-
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 const int32_t fanout = 28;
 
-class Node {
+class BloomFilter {
 public:
-    int id;
-    int next;
-    Node() {
-        this->id = -1;
-        this->next = 0;
+    static const size_t FILTER_SIZE = 256;  // 过滤器大小
+    static const size_t HASH_FUNCTIONS = 4;  // 哈希函数数量
+    uint8_t fingerprints[32];      // 使用指纹数组替代位图
+    uint8_t bits[FILTER_SIZE];
+    
+    // 哈希函数，返回位置
+    size_t getPosition(Key_t key, int seed) const {
+        return (std::hash<Key_t>{}(key) ^ seed) % FILTER_SIZE;
+    }
+    
+    // 计算指纹，与 Vnode 使用相同的哈希函数
+    uint8_t calculateFingerprint(Key_t key) const {
+        return static_cast<uint8_t>((key ^ (key >> 32)) & 0xFF);
+    }
+    
+public:
+    BloomFilter() {
+        std::memset(fingerprints, 0, 32);
+        std::memset(bits, 0, FILTER_SIZE);
+    }
+    
+    void add(Key_t key, int pos) {
+        uint8_t fp = calculateFingerprint(key);
+        fingerprints[pos] = fp;  // store fingerprint at the specified position
+        // set bit at all positions determined by the hash functions
+        for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
+            size_t pos = getPosition(key, i);
+            bits[pos] = 1;
+        }
+    }
+    bool mightContain(Key_t key) const {
+    #ifdef __AVX2__
+        const int SIMD_WIDTH = 32;
+        // 收集所有需要检查的位置
+        size_t positions[HASH_FUNCTIONS];
+        for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
+            positions[i] = getPosition(key, i);
+        }
+        
+        // 检查每个位置的bit是否为1
+        for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
+            size_t pos = positions[i];
+            size_t aligned_pos = pos & ~(SIMD_WIDTH - 1);  // 对齐到SIMD边界
+            
+            // 加载32个字节
+            __m256i data = _mm256_loadu_si256((__m256i*)&bits[aligned_pos]);
+            
+            // 创建比较目标 - 全1
+            __m256i target = _mm256_set1_epi8(1);
+            
+            // 比较每个字节是否等于1
+            __m256i cmp = _mm256_cmpeq_epi8(data, target);
+            int mask = _mm256_movemask_epi8(cmp);
+            
+            // 检查指定位置是否为1
+            if (!(mask & (1 << (pos - aligned_pos)))) {
+                return false;  // 如果任一位置不为1，则返回false
+            }
+        }
+        return true;
+    #else
+        for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
+            size_t pos = getPosition(key, i);
+            if (bits[pos] != 1) {
+                return false;
+            }
+        }
+        return true;
+    #endif
     }
 
-    Node(int id, uint32_t next = 0) {
-        this->id = id;
-        this->next = next;
+    bool checkFingerprint(Key_t key, int pos) const {
+        uint8_t fp = calculateFingerprint(key);
+        return fingerprints[pos] == fp;  // 检查指定位置的指纹是否匹配
+    }
+    
+    void clear() {
+        std::memset(fingerprints, 0, 32);
+        std::memset(bits, 0, FILTER_SIZE);
+    }
+public:
+    uint8_t hashKey(Key_t key) const {
+        return static_cast<uint8_t>((key ^ (key >> 32)) & 0xFF);
     }
 
-    int getId()
-    {
-        return this->id;
+    void updateFingerprint(int pos, Key_t key) {
+        fingerprints[pos] = hashKey(key);
     }
 };
+
+//extern BloomFilter bf[MAX_VALUE_NODES];
 
 class header{
     public:
@@ -54,33 +129,6 @@ class header{
             last_index = -1;
         }
     friend class Inode;
-};
-
-class vnodeHeader{
-    public:
-        uint32_t id; //4 bytes
-        int next; //4 bytes 
-        // used to keep track of the keys are valid or not in the vnode
-        uint32_t bitmap; // 4 bytes
-        std::shared_mutex mtx;
-        vnodeHeader() {
-            id = 0;
-            next = 0;
-            bitmap = 0;
-        }
-    public:
-        void setBit(int pos) {
-            bitmap |= (1 << pos);
-        }
-
-        void unsetBit(int pos) {
-            bitmap &= ~(1 << pos);
-        }
-
-        bool isBitSet(int pos) {
-            return (bitmap & (1 << pos)) != 0;
-        }
-    friend class Vnode;
 };
 
 class entry
@@ -256,11 +304,39 @@ public:
     }
 };
 
+class vnodeHeader {
+public:
+    uint32_t id; //4 bytes
+    int next; //4 bytes 
+    // used to keep track of the keys are valid or not in the vnode
+    uint32_t bitmap; // 4 bytes
+    std::shared_mutex mtx;
+    vnodeHeader() {
+        id = 0;
+        next = 0;
+        bitmap = 0;
+    }
+public:
+    void setBit(int pos) {
+        bitmap |= (1 << pos);
+    }
+
+    void unsetBit(int pos) {
+        bitmap &= ~(1 << pos);
+    }
+
+    bool isBitSet(int pos) {
+        return (bitmap & (1 << pos)) != 0;
+    }
+    friend class Vnode;
+};
+
 class Vnode
 {
 public:
     vnodeHeader hdr;
     entry records[fanout];
+    //BloomFilter bloom;
     Vnode(int id, int next = 0)
     {
         hdr.id = id;
@@ -272,23 +348,99 @@ public:
         }
     }
 
-    bool lookup(Key_t key, Val_t &value) {
-        for(int32_t i = fanout - 1 ; i >= 0; i--) {
-            if(records[i].key == key && hdr.isBitSet(i)) {
-                value = records[i].value;
-                return true;
-            }
+    bool lookup(Key_t key, Val_t &value, BloomFilter *bloom) {
+        // check bloom filter first
+        if (!bloom->mightContain(key)) {
+            return false;
         }
-        return false;
+        return lookupWithoutFilter(key, value, bloom); // use the existing lookup method
     }
 
-    bool lookup(Key_t key, int &pos) {
-        for(int32_t i = fanout - 1 ; i >= 0; i--) {
-            if(records[i].key == key && hdr.isBitSet(i)) {
-                pos = i;
-                return true;
+    bool lookup(Key_t key, int &pos, BloomFilter *bloom) {
+        // check bloom filter first
+        if (!bloom->mightContain(key)) {
+            return false;
+        }
+        return lookupWithoutFilter(key, pos, bloom); // use the existing lookup method
+    }
+
+    bool lookupWithoutFilter(Key_t key, Val_t &value, BloomFilter *bloom) 
+    {
+           // use SIMD to optimize fingerprint comparison
+#ifdef __AVX2__
+        uint8_t target_fp = bloom->hashKey(key);
+        int SIMD_WIDTH = 32;
+        for (int32_t i = 0; i < fanout; i += SIMD_WIDTH) {
+            // load 32 fingerprints into a vector
+            __m256i fp_vec = _mm256_loadu_si256((__m256i*)&bloom->fingerprints[i]);
+            // create a vector with the target fingerprint
+            __m256i target_vec = _mm256_set1_epi8(target_fp);
+            // compare the fingerprints
+            int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(fp_vec, target_vec));
+            
+            // handle the mask to find matching fingerprints
+            while (mask) {
+                // get the index of the rightmost set bit
+                int idx = i + __builtin_ctz(mask);
+                if (idx < fanout && hdr.isBitSet(idx) && records[idx].key == key) {
+                    value = records[idx].value;
+                    return true;
+                }
+                // clear the rightmost set bit
+                mask &= (mask - 1);
             }
         }
+#else
+        // non-SIMD version for fingerprint comparison
+        for (int32_t i = fanout - 1; i >= 0; i--) {
+            if (hdr.isBitSet(i) && bloom->checkFingerprint(key, i)) {
+                if (records[i].key == key) {
+                    value = records[i].value;
+                    return true;
+                }
+            }
+        }
+#endif
+        return false; 
+    }
+
+    bool lookupWithoutFilter(Key_t key, int &pos, BloomFilter *bloom) 
+    {
+#ifdef __AVX2__
+        uint8_t target_fp = bloom->hashKey(key);
+        // use SIMD to optimize fingerprint comparison
+        const int SIMD_WIDTH = 32;
+        for (int32_t i = 0; i < fanout; i += SIMD_WIDTH) {
+            // load 32 fingerprints into a vector
+            __m256i fp_vec = _mm256_loadu_si256((__m256i*)&bloom->fingerprints[i]);
+            // create a vector with the target fingerprint
+            __m256i target_vec = _mm256_set1_epi8(target_fp);
+            // compare the fingerprints
+            int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(fp_vec, target_vec));
+            
+            // handle the mask to find matching fingerprints
+            while (mask) {
+                // get the index of the rightmost set bit
+                int idx = i + __builtin_ctz(mask);
+                if (idx < fanout && hdr.isBitSet(idx) && records[idx].key == key) {
+                    pos = idx;
+                    return true;
+                }
+                // clear the rightmost set bit
+                mask &= (mask - 1);
+            }
+        }
+#else
+        // non-SIMD version for fingerprint comparison
+        for (int32_t i = fanout - 1; i >= 0; i--) {
+            if (hdr.isBitSet(i) && bloom->checkFingerprint(key, i)) {
+                if (records[i].key == key) {
+                    pos = i;
+                    return true;
+                }
+            }
+        }
+#endif
         return false;
     }
 
@@ -346,33 +498,6 @@ public:
         return pq.top();
     }
 
-    bool split(Vnode *targetVnode) {
-       // try {
-            std::unique_lock<std::shared_mutex> lock(hdr.mtx);
-            Key_t midKey = getMidKey();
-            Key_t key = std::numeric_limits<Key_t>::max();
-            Val_t value = std::numeric_limits<Val_t>::max();
-            for(int32_t i = 0; i < fanout; i++) 
-            {
-                key = records[i].key;
-                value = records[i].value;
-                if(key > midKey) {
-                    targetVnode->insert(key, value);
-                }
-                hdr.unsetBit(i);
-            }
-            targetVnode->hdr.next = hdr.next;
-            hdr.next = targetVnode->getId();
-#ifdef DBG
-        std::cout << "split done this: " << this->getId() << " this->max: " <<getMaxKey() << " new: " << targetVnode->getId() << " max: " << targetVnode->getMaxKey()<< std::endl;
-#endif
-            return true;
-       // } catch (const std::exception& e) {
-        //    std::cerr << "Exception occurred during split: " << e.what() << std::endl;
-         //   return false;
-       // }
-    }
-    
     //return remaining number of keys need to be scanned
     int scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &pq) {
         size_t remaining_range = range;
@@ -397,20 +522,19 @@ public:
 
 //Todo: Implement insert with finger print and bloom filter
 //find the first empty slot and insert the key and value
-    bool insert(Key_t key, Val_t value) {
-        {
-            int32_t pos = __builtin_ffs(~hdr.bitmap) - 1;
-            if (pos >= 0 && pos < fanout) {
-                records[pos].key = key;
-                records[pos].value = value;
-                hdr.setBit(pos);
+    bool insert(Key_t key, Val_t value, BloomFilter *bloom) {
+        int32_t pos = __builtin_ffs(~hdr.bitmap) - 1;
+        if (pos >= 0 && pos < fanout) {
+            records[pos].key = key;
+            records[pos].value = value;
+            hdr.setBit(pos);
+            bloom->add(key, pos);  // 添加到布隆过滤器
 #ifdef DBG
-                std::cout << "vnode id: " << hdr.id << " insert key: " << key << " value: " << value << " at pos: " << pos << std::endl;
+            std::cout << "vnode id: " << hdr.id << " insert key: " << key << " value: " << value << " at pos: " << pos << std::endl;
 #endif
-                return true;
-            }
-            return false;
+            return true;
         }
+        return false;
     }
 
    //Todo: Implement update and remove 

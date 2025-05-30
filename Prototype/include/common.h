@@ -15,10 +15,13 @@ const int MAX_LEVEL = 16;
 #define RECLAIM_RETRY_THRESHOLD 50000
 #define PERSISTENT_THRESHOLD 4096
 #define MAX_NODES 20000
+#define MAX_VALUE_NODES 10000000
 
 #ifndef unlikely
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif
+
+
 
 //#define DBG 1
 //#define LOG_DEBUG 1

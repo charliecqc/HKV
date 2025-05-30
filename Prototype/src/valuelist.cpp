@@ -36,7 +36,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
             Key_t key = curNode->records[i].key;
             Val_t value = curNode->records[i].value;
             if(key > midKey) {
-                nextNode->insert(key, value);
+                nextNode->insert(key, value, &bf[nextNode->hdr.id]);
                 curNode->hdr.unsetBit(i);
             }
         }
@@ -44,7 +44,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
         for(uint32_t i = 0; i < fanout / 2; i++) {
             Key_t key = curNode->records[i].key;
             Val_t value = curNode->records[i].value;
-            nextNode->insert(key, value);
+            nextNode->insert(key, value, &bf[nextNode->hdr.id]);
             curNode->hdr.unsetBit(i);
         }
     }
@@ -98,7 +98,7 @@ bool ValueList::lookup(Key_t key, Val_t &value)
         curNode = nextNode;
         nextNode = getNext(curNode);
     }
-    bool ret = curNode->lookup(key, value);
+    bool ret = curNode->lookup(key, value, &bf[curNode->hdr.id]);
     return ret;
 }
 

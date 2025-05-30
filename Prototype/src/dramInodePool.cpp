@@ -1,6 +1,5 @@
 #include "dramInodePool.h"
 #define DRAMINDEXPOOL 1
-using namespace std;
 
 bool DramInodePool::init() {
     size_t ip_size = NODE_POOL_SIZE;

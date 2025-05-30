@@ -1,7 +1,8 @@
 #include <iostream>
 #include "node.h"
 #include "pmemVnodePool.h"
-#define MAX_VALUE_NODES 10000000
+#include "common.h"
+
 
 #pragma once
 // Value list class on pmem
@@ -9,6 +10,7 @@ class ValueList {
 public:
     PmemVnodePool *pmemVnodePool;
     Vnode *head;
+    BloomFilter bf[MAX_VALUE_NODES]; // Bloom filters for each vnode
 public:
     ValueList();
     bool insert(Key_t key, Val_t value);
