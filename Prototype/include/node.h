@@ -27,7 +27,18 @@ public:
     
     // 哈希函数，返回位置
     size_t getPosition(Key_t key, int seed) const {
-        return (std::hash<Key_t>{}(key) ^ seed) % FILTER_SIZE;
+        // 使用更快的哈希函数
+        static constexpr uint64_t PRIME1 = 11400714785074694791ULL;
+        static constexpr uint64_t PRIME2 = 14029467366897019727ULL;
+        
+        uint64_t h = key + seed;
+        h ^= h >> 33;
+        h *= PRIME1;
+        h ^= h >> 29;
+        h *= PRIME2;
+        h ^= h >> 32;
+        
+        return h % FILTER_SIZE;
     }
     
     // calculate fingerprint for a key
