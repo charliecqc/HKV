@@ -22,15 +22,15 @@ class BloomFilter {
 public:
     static const size_t FILTER_SIZE = 256;  // 过滤器大小
     static const size_t HASH_FUNCTIONS = 4;  // 哈希函数数量
-    uint8_t fingerprints[32];      // 使用指纹数组替代位图
-    uint8_t bits[FILTER_SIZE];
+    alignas(64) uint8_t fingerprints[32];      // 使用指纹数组替代位图
+    alignas(64) uint8_t bits[FILTER_SIZE];
     
     // 哈希函数，返回位置
     size_t getPosition(Key_t key, int seed) const {
         return (std::hash<Key_t>{}(key) ^ seed) % FILTER_SIZE;
     }
     
-    // 计算指纹，与 Vnode 使用相同的哈希函数
+    // calculate fingerprint for a key
     uint8_t calculateFingerprint(Key_t key) const {
         return static_cast<uint8_t>((key ^ (key >> 32)) & 0xFF);
     }
@@ -53,30 +53,31 @@ public:
     bool mightContain(Key_t key) const {
     #ifdef __AVX2__
         const int SIMD_WIDTH = 32;
-        // 收集所有需要检查的位置
+        // collect all positions for the hash functions
         size_t positions[HASH_FUNCTIONS];
         for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
             positions[i] = getPosition(key, i);
+            __builtin_prefetch(&bits[positions[i] & ~(SIMD_WIDTH-1)], 0, 0);  // prefetch aligned memory
         }
         
-        // 检查每个位置的bit是否为1
+        // check if all positions are set to 1
         for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
             size_t pos = positions[i];
-            size_t aligned_pos = pos & ~(SIMD_WIDTH - 1);  // 对齐到SIMD边界
+            size_t aligned_pos = pos & ~(SIMD_WIDTH - 1);  // align to 32-byte boundary
             
-            // 加载32个字节
+            //load 32 bytes starting from aligned position
             __m256i data = _mm256_loadu_si256((__m256i*)&bits[aligned_pos]);
             
-            // 创建比较目标 - 全1
+            // create a target vector with all bytes set to 1
             __m256i target = _mm256_set1_epi8(1);
             
-            // 比较每个字节是否等于1
+            // compare the data with the target
             __m256i cmp = _mm256_cmpeq_epi8(data, target);
             int mask = _mm256_movemask_epi8(cmp);
             
-            // 检查指定位置是否为1
+            // check if the specific bit for this position is set
             if (!(mask & (1 << (pos - aligned_pos)))) {
-                return false;  // 如果任一位置不为1，则返回false
+                return false;  //if any position is not set, return false
             }
         }
         return true;
