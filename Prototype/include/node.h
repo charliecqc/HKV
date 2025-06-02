@@ -456,6 +456,7 @@ public:
         return false;
     }
 
+#if 0
     Key_t getMaxKey() {
         //Todo:: use figer print to get the max key
         Key_t maxKey = std::numeric_limits<Key_t>::min();
@@ -466,6 +467,22 @@ public:
             if(records[i].key >= maxKey) {
                 maxKey = records[i] .key;
             }
+        }
+        return maxKey;
+    }
+#endif
+
+    Key_t getMaxKey()
+    {
+        // 优化的非 SIMD 版本
+        Key_t maxKey = std::numeric_limits<Key_t>::min();
+        uint32_t bitmap = hdr.bitmap;
+        while(bitmap) {
+            int idx = __builtin_ctz(bitmap);
+            if(records[idx].key > maxKey) {
+                maxKey = records[idx].key;
+            }
+            bitmap &= (bitmap - 1);
         }
         return maxKey;
     }
