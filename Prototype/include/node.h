@@ -12,6 +12,7 @@
 #include <shared_mutex>
 #include <mutex>
 #include <unordered_set>
+#include <algorithm>
 #include "common.h"
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -474,7 +475,6 @@ public:
 
     Key_t getMaxKey()
     {
-        // 优化的非 SIMD 版本
         Key_t maxKey = std::numeric_limits<Key_t>::min();
         uint32_t bitmap = hdr.bitmap;
         while(bitmap) {
@@ -489,17 +489,18 @@ public:
 
     Key_t getMinKey() {
         Key_t minKey = std::numeric_limits<Key_t>::max();
-        for(int i = fanout - 1; i >= 0; i--) {
-            if(hdr.isBitSet(i) == false) {
-                continue;
+        uint32_t bitmap = hdr.bitmap;
+        while(bitmap) {
+            int idx = __builtin_ctz(bitmap);  // find the lowest set bit
+            if(records[idx].key < minKey) {
+                minKey = records[idx].key;
             }
-            if(records[i].key <= minKey) {
-                minKey = records[i].key;
-            }
+            bitmap &= (bitmap - 1);  // clear the lowest set bit
         }
         return minKey;
     }
 
+#if 0
     Key_t getMidKey() {
         std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> pq;
         std::unordered_set<Key_t> keySet;
@@ -525,6 +526,28 @@ public:
             }
         }
         return pq.top();
+    }
+#endif
+    Key_t getMidKey() 
+    {
+        std::vector<Key_t> validKeys;
+        validKeys.reserve(fanout);
+
+        uint32_t bitmap = hdr.bitmap;
+        while(bitmap) {
+            int idx = __builtin_ctz(bitmap);  // find the lowest set bit
+            if(records[idx].key != std::numeric_limits<Key_t>::max()) {
+                validKeys.push_back(records[idx].key);
+            }
+            bitmap &= (bitmap - 1);  // clear the lowest set bit
+        }
+
+        if (validKeys.empty()) {
+            return std::numeric_limits<Key_t>::max(); // or some other sentinel value
+        }
+        size_t mid = validKeys.size() / 2;
+        std::nth_element(validKeys.begin(), validKeys.begin() + mid, validKeys.end());
+        return validKeys[mid]; // return the median key
     }
 
     //return remaining number of keys need to be scanned
