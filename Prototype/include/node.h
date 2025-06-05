@@ -25,6 +25,15 @@ public:
     static const size_t HASH_FUNCTIONS = 4;  // 哈希函数数量
     alignas(64) uint8_t fingerprints[32];      // 使用指纹数组替代位图
     alignas(64) uint8_t bits[FILTER_SIZE];
+    std::shared_mutex mtx;  // 
+    // 缓存字段
+    mutable Key_t cached_min_key;
+    mutable Key_t cached_max_key;
+    mutable Key_t cached_mid_key;
+    mutable bool min_key_valid;
+    mutable bool max_key_valid;
+    mutable bool mid_key_valid;
+    mutable uint32_t cached_bitmap_version;  // 用于检测位图变化
     
     // 哈希函数，返回位置
     size_t getPosition(Key_t key, int seed) const {
@@ -51,6 +60,17 @@ public:
     BloomFilter() {
         std::memset(fingerprints, 0, 32);
         std::memset(bits, 0, FILTER_SIZE);
+        invalidateCache();
+    }
+    
+    void invalidateCache() {
+        cached_min_key = std::numeric_limits<Key_t>::max();
+        cached_max_key = std::numeric_limits<Key_t>::min();
+        cached_mid_key = std::numeric_limits<Key_t>::max();
+        min_key_valid = false;
+        max_key_valid = false;
+        mid_key_valid = false;
+        cached_bitmap_version = 0;
     }
     
     void add(Key_t key, int pos) {
@@ -61,7 +81,17 @@ public:
             size_t pos = getPosition(key, i);
             bits[pos] = 1;
         }
+        
+        // 智能更新缓存
+        updateCacheOnAdd(key);
     }
+
+    void remove(Key_t key, int pos) {
+        fingerprints[pos] = 0;
+        // 删除时缓存失效（因为需要重新计算）
+        invalidateCache();
+    }
+
     bool mightContain(Key_t key) const {
     #ifdef __AVX2__
         const int SIMD_WIDTH = 32;
@@ -112,7 +142,58 @@ public:
     void clear() {
         std::memset(fingerprints, 0, 32);
         std::memset(bits, 0, FILTER_SIZE);
+        invalidateCache();
     }
+
+    // 缓存管理方法
+    bool isCacheValid(uint32_t current_bitmap) const {
+        return cached_bitmap_version == current_bitmap;
+    }
+    
+    void updateBitmapVersion(uint32_t bitmap) {
+        cached_bitmap_version = bitmap;
+    }
+
+private:
+    void updateCacheOnAdd(Key_t key) {
+        // update cached min keys intelligently
+        if (!min_key_valid) {
+            // if cache is invalid, force recalculation
+            // so it can aoid unnecessary updates
+        } else if (key < cached_min_key) {
+            cached_min_key = key;
+        }
+        
+        // update cached max keys intelligently
+        if (!max_key_valid) {
+            // if cache is invalid, force recalculation
+        } else if (key > cached_max_key) {
+            cached_max_key = key;
+        }
+        
+        // invalidate mid key cache
+        mid_key_valid = false;
+    }
+#if 0
+    void updateCacheOnAdd(Key_t key) {
+        // 智能更新最小值缓存
+        if (min_key_valid && key < cached_min_key) {
+            cached_min_key = key;
+        } else if (!min_key_valid) {
+            min_key_valid = false;  // 强制重新计算
+        }
+        
+        // 智能更新最大值缓存
+        if (max_key_valid && key > cached_max_key) {
+            cached_max_key = key;
+        } else if (!max_key_valid) {
+            max_key_valid = false;  // 强制重新计算
+        }
+        
+        // 中位数缓存失效（插入后需要重新计算）
+        mid_key_valid = false;
+    }
+#endif
 public:
     uint8_t hashKey(Key_t key) const {
         return static_cast<uint8_t>((key ^ (key >> 32)) & 0xFF);
@@ -323,7 +404,7 @@ public:
     int next; //4 bytes 
     // used to keep track of the keys are valid or not in the vnode
     uint32_t bitmap; // 4 bytes
-    std::shared_mutex mtx;
+    //std::shared_mutex mtx;
     vnodeHeader() {
         id = 0;
         next = 0;
@@ -456,23 +537,6 @@ public:
 #endif
         return false;
     }
-
-#if 0
-    Key_t getMaxKey() {
-        //Todo:: use figer print to get the max key
-        Key_t maxKey = std::numeric_limits<Key_t>::min();
-        for(int i = fanout - 1; i >= 0; i--) {
-            if(hdr.isBitSet(i) == false) {
-                continue;
-            }
-            if(records[i].key >= maxKey) {
-                maxKey = records[i] .key;
-            }
-        }
-        return maxKey;
-    }
-#endif
-
     Key_t getMaxKey()
     {
         Key_t maxKey = std::numeric_limits<Key_t>::min();
@@ -483,6 +547,29 @@ public:
                 maxKey = records[idx].key;
             }
             bitmap &= (bitmap - 1);
+        }
+        return maxKey;
+    }
+
+    Key_t getMaxKey(BloomFilter *bloom)
+    {
+        if(bloom && bloom->max_key_valid && bloom->isCacheValid(hdr.bitmap)) {
+            return bloom->cached_max_key; // return cached max key if valid
+        }
+        Key_t maxKey = std::numeric_limits<Key_t>::min();
+        uint32_t bitmap = hdr.bitmap;
+        while(bitmap) {
+            int idx = __builtin_ctz(bitmap);
+            if(records[idx].key > maxKey) {
+                maxKey = records[idx].key;
+            }
+            bitmap &= (bitmap - 1);
+        }
+        //update the bloom filter cache
+        if(bloom) {
+            bloom->cached_max_key = maxKey;
+            bloom->max_key_valid = true;
+            bloom->updateBitmapVersion(hdr.bitmap);
         }
         return maxKey;
     }
@@ -500,34 +587,28 @@ public:
         return minKey;
     }
 
-#if 0
-    Key_t getMidKey() {
-        std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> pq;
-        std::unordered_set<Key_t> keySet;
-        {
-            for(int i = fanout - 1; i >= 0; i--) {
-                if(hdr.isBitSet(i) == false) {
-                    continue;
-                }
-                if(records[i].key == std::numeric_limits<Key_t>::max()) {
-                    continue;
-                }
-                if (keySet.find(records[i].key) != keySet.end()) {
-                    continue;
-                }
-                keySet.insert(records[i].key);
-            }
+    Key_t getMinKey(BloomFilter *bloom) {
+        if(bloom && bloom->min_key_valid && bloom->isCacheValid(hdr.bitmap)) {
+            return bloom->cached_min_key; // return cached min key if valid
         }
-        unsigned long size = keySet.size();
-        for (const Key_t& key : keySet) {
-            pq.push(key);
-            if(pq.size() > size / 2 + 1) {
-                pq.pop();
+        Key_t minKey = std::numeric_limits<Key_t>::max();
+        uint32_t bitmap = hdr.bitmap;
+        while(bitmap) {
+            int idx = __builtin_ctz(bitmap);  // find the lowest set bit
+            if(records[idx].key < minKey) {
+                minKey = records[idx].key;
             }
+            bitmap &= (bitmap - 1);  // clear the lowest set bit
         }
-        return pq.top();
+        //update the bloom filter cache
+        if(bloom) {
+            bloom->cached_min_key = minKey;
+            bloom->min_key_valid = true;
+            bloom->updateBitmapVersion(hdr.bitmap);
+        }
+        return minKey;
     }
-#endif
+
     Key_t getMidKey() 
     {
         std::vector<Key_t> validKeys;
@@ -547,6 +628,38 @@ public:
         }
         size_t mid = validKeys.size() / 2;
         std::nth_element(validKeys.begin(), validKeys.begin() + mid, validKeys.end());
+        return validKeys[mid]; // return the median key
+    }
+
+    Key_t getMidKey(BloomFilter *bloom) 
+    {
+        if(bloom && bloom->mid_key_valid && bloom->isCacheValid(hdr.bitmap)) {
+            return bloom->cached_mid_key; // return cached mid key if valid
+        }
+        std::vector<Key_t> validKeys;
+        validKeys.reserve(fanout);
+
+        uint32_t bitmap = hdr.bitmap;
+        while(bitmap) {
+            int idx = __builtin_ctz(bitmap);  // find the lowest set bit
+            if(records[idx].key != std::numeric_limits<Key_t>::max()) {
+                validKeys.push_back(records[idx].key);
+            }
+            bitmap &= (bitmap - 1);  // clear the lowest set bit
+        }
+
+        if (validKeys.empty()) {
+            return std::numeric_limits<Key_t>::max(); // or some other sentinel value
+        }
+        size_t mid = validKeys.size() / 2;
+        std::nth_element(validKeys.begin(), validKeys.begin() + mid, validKeys.end());
+        
+        //update the bloom filter cache
+        if(bloom) {
+            bloom->cached_mid_key = validKeys[mid];
+            bloom->mid_key_valid = true;
+            bloom->updateBitmapVersion(hdr.bitmap);
+        }
         return validKeys[mid]; // return the median key
     }
 

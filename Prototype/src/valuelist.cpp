@@ -18,7 +18,8 @@ ValueList::ValueList() {
 
 bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 {
-    std::unique_lock<std::shared_mutex> lock(curNode->hdr.mtx);
+    BloomFilter *bloom = &bf[curNode->hdr.id];
+    std::unique_lock<std::shared_mutex> lock(bloom->mtx);
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
@@ -29,8 +30,8 @@ bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 bool ValueList::split(Vnode *curNode, Vnode *nextNode)
 {
     assert(nextNode->isEmpty());
-    Key_t midKey = curNode->getMidKey();
-    Key_t maxKey = curNode->getMaxKey();
+    Key_t midKey = curNode->getMidKey(&bf[curNode->hdr.id]);
+    Key_t maxKey = curNode->getMaxKey(&bf[curNode->hdr.id]);
     if(midKey != maxKey) {
         for(uint32_t i = 0; i < fanout; i++) {
             Key_t key = curNode->records[i].key;
@@ -50,7 +51,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     }
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
-    assert(curNode->getMaxKey() <= nextNode->getMinKey());
+    assert(curNode->getMaxKey(&bf[curNode->hdr.id]) <= nextNode->getMinKey(&bf[nextNode->hdr.id]));
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
     return true;
@@ -94,7 +95,7 @@ bool ValueList::lookup(Key_t key, Val_t &value)
 {
     Vnode *curNode = head;
     Vnode *nextNode = getNext(curNode);
-    while(nextNode != nullptr && nextNode->getMaxKey() <= key) {
+    while(nextNode != nullptr && nextNode->getMaxKey(&bf[nextNode->hdr.id]) <= key) {
         curNode = nextNode;
         nextNode = getNext(curNode);
     }
@@ -109,20 +110,8 @@ bool ValueList::recovery()
 
 Vnode *ValueList::getNext(Vnode *curNode)
 {
-    shared_lock<std::shared_mutex> lock(curNode->hdr.mtx);
+    BloomFilter *bloom = &bf[curNode->hdr.id];
+    shared_lock<std::shared_mutex> lock(bloom->mtx);
     return pmemVnodePool->at(curNode->hdr.next);
-}
-
-int ValueList::getKeyPos(Key_t key)
-{
-    Vnode *curNode = head;
-    while(true) {
-        if(curNode->getMaxKey() < key) {
-            curNode = getNext(curNode);
-            continue;
-        }
-        break;
-    }
-    return curNode->getKeyPos(key);
 }
 

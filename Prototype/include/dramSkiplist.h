@@ -3,6 +3,7 @@
 #include "dramInodePool.h"
 #include "pmemVnodePool.h"
 #include "ckpt_log.h"
+#include "valuelist.h"
 #include "common.h"
 #pragma once// SkipList class
 class DramSkiplist  {
@@ -11,12 +12,13 @@ private:
     Inode* tail[MAX_LEVEL];
     DramInodePool *dramInodePool;
     CkptLog *ckpt_log;
+    ValueList *valueList;
     int level; //level is the current max level of the skiplist
     std::shared_mutex level_lock;
 public:
     std::shared_mutex inode_locks[MAX_NODES];
     std::shared_mutex rebalance_lock;
-    DramSkiplist(CkptLog *ckp_log, DramInodePool *dramInodePool);
+    DramSkiplist(CkptLog *ckp_log, DramInodePool *dramInodePool, ValueList *valuelist);
     ~DramSkiplist();
     bool insert(Key_t &key, Val_t &val);
     bool insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel);
