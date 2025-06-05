@@ -28,6 +28,11 @@ class TandemIndex {
         Val_t lookup(Key_t key);
         void recover(Key_t key);
 
+        bool handleExistingInodeInsert(Inode *inode, Key_t key, Val_t value, 
+                                          int idx, bool &needToRebalance, Vnode* &targetVnode);
+        bool updateInodeAfterSplit(Inode *inode, Vnode *targetVnode, bool &needToRebalance);
+        bool handleNewInodeInsert(Key_t key, Val_t value);
+
         //std::thread *workerThread;kk
         std::thread *checkpointThread;
         std::thread *logMergeThread;

@@ -722,7 +722,8 @@ public:
     
     bool isFull()
     {
-        return hdr.bitmap == static_cast<uint32_t>((1 << fanout) - 1);
+        //return hdr.bitmap == static_cast<uint32_t>((1 << fanout) - 1);
+        return __builtin_popcount(hdr.bitmap) == fanout; // check if all bits are set
     }
 
     bool isEmpty()
