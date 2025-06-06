@@ -140,6 +140,47 @@ bool DramSkiplist::insert(Vnode *targetVnode)
 
 bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
 {
+     int currentHighestLevelIndex;
+    {
+        std::shared_lock<std::shared_mutex> lock(level_lock);
+        currentHighestLevelIndex = level - 1;
+    }
+    
+    Inode *current = header[currentHighestLevelIndex];
+    
+    for(int i = currentHighestLevelIndex; i >= 0; i--) {
+        current = findNodeInLevel(current, oldKey);
+        // update operation
+        {
+            std::unique_lock<std::shared_mutex> lock(inode_locks[current->getId()]);
+            int idx = current->findKeyPos(oldKey);
+            
+            if(current->gps[idx].key == oldKey) {
+                // 创建日志条目
+                auto entry = std::make_unique<dram_log_entry_t>(
+                    current->getId(), 
+                    current->hdr.coveredNodes, 
+                    current->hdr.last_index, 
+                    current->hdr.next
+                );
+                
+                current->updateKeyVal(newKey, idx);
+                entry->setKeyVal(idx, current->gps[idx].key, current->gps[idx].value);
+                ckpt_log->enq(entry.release());
+            }
+            
+            // 移动到下一层
+            if(i != 0) {
+                current = dramInodePool->at(current->gps[idx].value);
+            }
+        }
+    }
+    return true; 
+}
+
+#if 0
+bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
+{
     int currentHighestLevelIndex = -1;
     {
         std::shared_lock<std::shared_mutex> lock(level_lock); //to protect level
@@ -175,6 +216,7 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
     }
     return true;
 }
+#endif
 
 void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
 {
@@ -218,6 +260,44 @@ void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
     }
 }
 
+Inode *DramSkiplist::lookup(Key_t key, int &idx)
+{
+    //get the current highest level
+    int currentHighestLevelIndex;
+    {
+        std::shared_lock<std::shared_mutex> lock(level_lock);
+        currentHighestLevelIndex = level - 1;
+    }
+    
+    Inode* current = header[currentHighestLevelIndex];
+    
+    // lookup from the highest level down to the lowest level
+    for(int i = currentHighestLevelIndex; i >= 0; i--) {
+        // find the node in the current level that contains the key
+        current = findNodeInLevel(current, key);
+        
+        //if its the lowest level, we can return the node directly
+        if (i == 0) {
+            std::shared_lock<std::shared_mutex> lock_current(inode_locks[current->getId()]);
+            
+            if (current->isHeader()) {
+                idx = -1;
+                return nullptr;
+            }
+            
+            idx = current->findKeyPos(key);
+            return current;
+        }
+        
+        //move to the next level
+        current = getNextLevelNode(current, key);
+        assert(current != nullptr);
+    }
+    
+    return current;
+}
+
+#if 0
 Inode* DramSkiplist::lookup(Key_t key, int &idx)
 {
     std::shared_lock<std::shared_mutex> lock(level_lock);
@@ -265,6 +345,7 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
     }
     return current;
 }
+#endif
 
 Inode* DramSkiplist::getHeader()
 {
@@ -405,4 +486,41 @@ int DramSkiplist::getLevel()
 {
     std::shared_lock<std::shared_mutex> lock(level_lock);
     return level;
+}
+
+Inode *DramSkiplist::findNodeInLevel(Inode *start, Key_t key)
+{
+    Inode* current = start;
+        
+    while(true) {
+        Inode* next = nullptr;
+        {
+            std::shared_lock<std::shared_mutex> lock_current(inode_locks[current->getId()]);
+            next = dramInodePool->at(current->hdr.next);
+                
+            // 提前检查，减少锁的持有时间
+            if (next->isTail()) {
+                return current;
+            }
+                
+            // 使用局部变量缓存，减少重复调用
+            Key_t nextMinKey = next->getMinKey();
+            if (key < nextMinKey) {
+                return current;
+            }
+        }
+        current = next;
+    }
+}
+
+Inode *DramSkiplist::getNextLevelNode(Inode *current, Key_t key)
+{
+    std::shared_lock<std::shared_mutex> lock_current(inode_locks[current->getId()]);
+        
+    if (current->isHeader()) {
+        return dramInodePool->at(current->gps[0].value);
+    }
+        
+    int pos = current->findKeyPos(key);
+    return dramInodePool->at(current->gps[pos].value);
 }

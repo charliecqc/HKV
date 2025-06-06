@@ -56,88 +56,65 @@ TandemIndex::~TandemIndex() {
         PmemManager::flushToNVM(0, reinterpret_cast<char *>(metaVnode), sizeof(Vnode));
     }
 }
-#if 0
-bool TandemIndex::insert(Key_t key, Val_t value)
-{
-    int idx = -1;
-    bool ret = false;
-    bool needToRebalance = false;
-    Inode *inode = mainIndex->lookup(key, idx);
-    Vnode *targetVnode = nullptr;
-    
-    if(inode != nullptr) {
-        return handleExistingInodeInsert(inode, key, value, idx, needToRebalance, targetVnode);
-    } else {
-        return handleNewInodeInsert(key, value);
-    }
-    
-    // 处理重平衡 - 在函数最后统一处理
-    if(needToRebalance && inode && targetVnode) {
-        std::unique_lock<std::shared_mutex> rebalance_lock(mainIndex->rebalance_lock);
-        ret = mainIndex->rebalanceInode(*inode, *targetVnode);
-    }
-    return ret;
-}
-#endif
-// 处理已存在inode的插入逻辑
+// handle the case when the inode already exists
 bool TandemIndex::handleExistingInodeInsert(Inode *inode, Key_t key, Val_t value, 
                                           int idx, bool &needToRebalance, Vnode* &targetVnode)
 {
-      // 初始化引用参数
+    // initialize variables
     needToRebalance = false;
     targetVnode = nullptr;
     
-    // 1. 获取初始vnode - 缩小锁范围
+    // 1. get the value node from the inode
     Vnode *valueNode = nullptr;
     {
         std::shared_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[inode->getId()]);
         valueNode = valueList->pmemVnodePool->at(inode->gps[idx].value);
-    } // inode_lock 在这里自动释放
+    } // release the lock after getting the value node
     
-    // 2. 遍历vnode链寻找插入位置
+    // 2. traverse the value node linked list
     while(true) {
-        // 预先获取bloom filter指针，避免重复计算
+        // get bloom filter for the current value node
         BloomFilter *bloom = &valueList->bf[valueNode->hdr.id];
         
-        // 使用RAII管理锁，缩小锁范围
+        // use a shared lock for reading the bloom filter
         {
             std::unique_lock<std::shared_mutex> lock_value(bloom->mtx);
             
-            // 缓存maxKey避免重复计算
+            // cache maxKey to avoid repeated calculations
             Key_t maxKey = valueNode->getMaxKey(bloom);
             
             if(key > maxKey && valueNode->hdr.next != -1) {
-                // 移动到下一个节点 - 先获取下一个节点再释放锁
+                //move to the next vnode
                 Vnode *nextNode = valueList->pmemVnodePool->at(valueNode->hdr.next);
-                lock_value.unlock(); // 手动释放当前锁
+                lock_value.unlock(); // manually unlock before continuing
                 valueNode = nextNode;
                 continue;
             }
             
             // 尝试直接插入
             if(valueNode->insert(key, value, &valueList->bf[valueNode->getId()])) {
-                return true; // 插入成功，锁自动释放
+                return true; // return true if insert is successful
             }
             
-            // 节点已满，需要分裂
+            // node is full, need to split
             targetVnode = valueList->pmemVnodePool->getNextNode();
             if(!targetVnode) {
                 return false;
             }
             
-            // 执行分裂操作
+            // split operation
             valueList->split(valueNode, targetVnode);
             
-            // 根据分裂后的maxKey决定插入位置
+            // decide where to insert the new key
             Key_t splitMaxKey = valueNode->getMaxKey(bloom);
             if(key <= splitMaxKey) {
-                // 插入到原节点
+                // insert into the original node
                 if(!valueNode->insert(key, value, &valueList->bf[valueNode->getId()])) {
                     std::cout << "Failed to insert after split. key: " << key << std::endl;
                     return false;
                 }
             } else {
-                // 插入到新节点 - 需要获取新节点的锁
+                // insert into the new vnode, need to lock it
                 BloomFilter *target_bloom = &valueList->bf[targetVnode->getId()];
                 std::unique_lock<std::shared_mutex> lock_target(target_bloom->mtx);
                 if(!targetVnode->insert(key, value, target_bloom)) {
@@ -145,35 +122,34 @@ bool TandemIndex::handleExistingInodeInsert(Inode *inode, Key_t key, Val_t value
                     return false;
                 }
             }
-            break; // 退出循环
-        } // lock_value 在这里自动释放
+            break; // quit the loop after handling the split
+        }
     }
     
-    // 3. 更新inode元数据 - 独立的锁作用域
+    // 3. update the inode after split
     return updateInodeAfterSplit(inode, targetVnode, needToRebalance);
 }
 
-// 更新inode元数据的独立函数
 bool TandemIndex::updateInodeAfterSplit(Inode *inode, Vnode *targetVnode, bool &needToRebalance)
 {
     std::unique_lock<std::shared_mutex> inode_wlock(mainIndex->inode_locks[inode->getId()]);
     inode->hdr.coveredNodes++;
     
     if(!inode->checkForActivateGP()) {
-        return true; // 不需要激活GP
+        return true; // no need to activate new GP
     }
     
-    // 获取目标键 - 使用独立的锁作用域
+    // obtain the minimum key from the target vnode
     Key_t targetKey;
     {
         BloomFilter *bloom = &valueList->bf[targetVnode->hdr.id];
         std::shared_lock<std::shared_mutex> lock_target(bloom->mtx);
         targetKey = targetVnode->getMinKey(bloom);
-    } // target锁在这里释放
+    } // release target vnode lock
     
     int pos = -1;
     if(inode->activateGP(targetKey, pos)) {
-        // 执行链接操作
+        // link the new vnode to the inode
         bool ret = mainIndex->linkVnodeToInode(*inode, pos, *targetVnode);
         if(!ret) {
             std::cout << "Failed to link vnode to inode." << std::endl;
@@ -182,7 +158,7 @@ bool TandemIndex::updateInodeAfterSplit(Inode *inode, Vnode *targetVnode, bool &
         
         inode->gps[pos].key = targetKey;
         
-        // 创建日志条目 - 使用智能指针避免内存泄漏
+        // create a new log entry for the checkpoint
         auto entry = std::make_unique<dram_log_entry_t>(
             inode->getId(), inode->hdr.coveredNodes, 
             inode->hdr.last_index, inode->hdr.next);
@@ -193,7 +169,7 @@ bool TandemIndex::updateInodeAfterSplit(Inode *inode, Vnode *targetVnode, bool &
         entry->setCoveredNodes(inode->hdr.coveredNodes);
         entry->setLastIndex(inode->hdr.last_index);
         
-        ckptLog->enq(entry.release()); // 转移所有权
+        ckptLog->enq(entry.release()); // move ownership to the log
         return true;
     } else {
         needToRebalance = true;
@@ -201,57 +177,56 @@ bool TandemIndex::updateInodeAfterSplit(Inode *inode, Vnode *targetVnode, bool &
     }
 }
 
-// 处理新inode插入的优化版本
+// process the case when a new inode is inserted
 bool TandemIndex::handleNewInodeInsert(Key_t key, Val_t value)
 {
     Vnode *headVnode = valueList->getHeader();
     Vnode *targetVnode = nullptr;
     
-    // 方案1：使用更大粒度的锁保护整个操作
     BloomFilter *head_bloom = &valueList->bf[headVnode->getId()];
     std::unique_lock<std::shared_mutex> head_lock(head_bloom->mtx);
     
-    // 1. 尝试插入到现有的第一个vnode
+    // 1. try to insert into the first vnode
     if(headVnode->hdr.next != -1) {
         targetVnode = valueList->pmemVnodePool->at(headVnode->hdr.next);
         
-        // 尝试插入到第一个数据节点
+        
         BloomFilter *bloom = &valueList->bf[targetVnode->getId()];
         std::unique_lock<std::shared_mutex> lock_target(bloom->mtx);
         
         if(!targetVnode->isFull()) {
             Key_t old_min_key = targetVnode->getMinKey(bloom);
             if(targetVnode->insert(key, value, bloom)) {
-                // 传播新的最小键
+                // propgate the change to the main index
                 return mainIndex->update(old_min_key, key, value);
             }
         }
     }
     
-    // 2. 创建新节点并插入
+    // 2. create a new vnode if the first one is full
     targetVnode = valueList->pmemVnodePool->getNextNode();
     if(!targetVnode) {
         std::cout << "Failed to get new node from pool." << std::endl;
         return false;
     }
     
-    // 插入到新节点
+    //insert the key value into the new vnode
     bool ret = targetVnode->insert(key, value, &valueList->bf[targetVnode->getId()]);
     if(!ret) {
         std::cout << "Failed to insert into new vnode. Key: " << key << std::endl;
         return false;
     }
     
-    // 添加到值列表 - 此时仍持有头节点锁
+    // 3. insert the new vnode into the value list
     ret = valueList->append(headVnode, targetVnode);
     if(!ret) {
         std::cout << "Failed to append to value list." << std::endl;
         return false;
     }
     
-    head_lock.unlock(); // 在所有操作完成后才释放头节点锁
+    head_lock.unlock(); // release the lock on the head vnode after appending
     
-    // 插入到主索引
+    // 4. create a new inode and link it to the main index
     ret = mainIndex->insert(targetVnode);
     if(!ret) {
         std::cout << "Failed to insert into main index." << std::endl;

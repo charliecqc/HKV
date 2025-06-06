@@ -15,6 +15,8 @@ private:
     ValueList *valueList;
     int level; //level is the current max level of the skiplist
     std::shared_mutex level_lock;
+    Inode *findNodeInLevel(Inode *start, Key_t key);
+    Inode *getNextLevelNode(Inode *current, Key_t key);
 public:
     std::shared_mutex inode_locks[MAX_NODES];
     std::shared_mutex rebalance_lock;
