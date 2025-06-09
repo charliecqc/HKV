@@ -65,6 +65,8 @@ int DramSkiplist::generateRandomLevel()
     return level;
 } 
 
+
+#if 0
 bool DramSkiplist::insert(Vnode *targetVnode) 
 {
     Key_t targetKey = std::numeric_limits<Key_t>::max();
@@ -135,6 +137,115 @@ bool DramSkiplist::insert(Vnode *targetVnode)
         lock_updates_next[newlevel-1]->unlock();
         lock_updates_next[newlevel-1].reset();
     }
+    return true;
+}
+#endif
+
+bool DramSkiplist::insert(Vnode *targetVnode) 
+{
+    Key_t targetKey = std::numeric_limits<Key_t>::max();
+    Inode* updates[MAX_LEVEL];
+    {
+        BloomFilter *bloom = &valueList->bf[targetVnode->hdr.id];
+        std::shared_lock<std::shared_mutex> lock(bloom->mtx);
+        targetKey = reinterpret_cast<Vnode *>(targetVnode)->getMinKey(bloom);
+    }
+    int newlevel = generateRandomLevel();
+    {
+        std::shared_lock<std::shared_mutex> read_lock(level_lock);
+        if (newlevel <= level) {
+            // do nothing, just use the current level
+        } else {
+            read_lock.unlock();
+            std::unique_lock<std::shared_mutex> write_lock(level_lock);
+            if (newlevel > level) { // check again after acquiring the write lock
+                level = newlevel;
+            }
+        }
+    }
+    for(int i = 0; i < newlevel; i++) {
+        updates[i] = header[i];
+    }
+
+    std::vector<std::unique_ptr<dram_log_entry_t>> log_entries;
+    log_entries.reserve(newlevel * 2); // preallocate space for log entries
+
+    std::optional<std::unique_lock<std::shared_mutex> > lock_updates[MAX_LEVEL];
+    std::optional<std::unique_lock<std::shared_mutex> > lock_updates_next[MAX_LEVEL];
+
+    Inode *prev_update = nullptr;
+    
+    for(int i = 0; i < newlevel; i++) {
+        lock_updates[i].emplace(inode_locks[updates[i]->getId()]);
+        
+        Inode *current_update = updates[i];
+        Inode *next = dramInodePool->getNextNode();
+        
+        lock_updates_next[i].emplace(inode_locks[next->getId()]);
+        
+        // link the next node
+        next->hdr.next = current_update->hdr.next;
+        current_update->hdr.next = next->getId();
+        
+        // use smart pointers to manage log entries
+        auto next_entry = std::make_unique<dram_log_entry_t>(
+            next->getId(), next->hdr.coveredNodes, 
+            next->hdr.last_index, next->hdr.next
+        );
+        auto current_update_entry = std::make_unique<dram_log_entry_t>(
+            current_update->getId(), current_update->hdr.coveredNodes,
+            current_update->hdr.last_index, current_update->hdr.next
+        );
+        
+        current_update = next;
+        assert(!current_update->isHeader());
+        
+        // insert the new key-value pair
+        if (i == 0) {
+            current_update->insertAtPos(targetKey, targetVnode->getId(), 0);
+        } else {
+            current_update->insertAtPos(targetKey, prev_update->getId(), 0);
+        }
+        
+        // update the log entries
+        next_entry->setKeyVal(0, current_update->gps[0].key, current_update->gps[0].value);
+        next_entry->setCoveredNodes(current_update->hdr.coveredNodes);
+        next_entry->setLastIndex(current_update->hdr.last_index);
+        
+        prev_update = current_update;
+        
+        // 7. batch log entries
+        log_entries.push_back(std::move(next_entry));
+        log_entries.push_back(std::move(current_update_entry));
+        
+        // release locks for the previous level
+        if(i > 0) {
+            if(lock_updates[i-1]) {
+                lock_updates[i-1]->unlock();
+                lock_updates[i-1].reset();
+            }
+            if(lock_updates_next[i-1]) {
+                lock_updates_next[i-1]->unlock();
+                lock_updates_next[i-1].reset();
+            }
+        }
+    }
+    
+    // release locks for the last level
+    if(lock_updates[newlevel-1]) {
+        lock_updates[newlevel-1]->unlock();
+        lock_updates[newlevel-1].reset();
+    }
+    if(lock_updates_next[newlevel-1]) {
+        lock_updates_next[newlevel-1]->unlock();
+        lock_updates_next[newlevel-1].reset();
+    }
+    
+    // 9. 优化：批量提交日志
+    for(auto& entry : log_entries) {
+        ckpt_log->enq(entry.release());
+    }
+    
     return true;
 }
 
@@ -216,7 +327,8 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
     }
     return true;
 }
-#endif
+
+
 
 void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
 {
@@ -256,6 +368,69 @@ void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
                 assert(temp != nullptr);
                 current = temp;
             }
+        }
+    }
+}
+#endif
+
+void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
+{
+     int currentHighestLevelIndex = -1;
+    {
+        std::shared_lock<std::shared_mutex> lock(level_lock);
+        currentHighestLevelIndex = level - 1;
+    }
+    
+    Inode *current = header[currentHighestLevelIndex]; 
+    
+    for(int i = currentHighestLevelIndex; i >= 0; i--) {
+        // maintain a shared lock on the current node
+        std::shared_lock<std::shared_mutex> current_lock(inode_locks[current->getId()]);
+        
+        while(true) {
+            assert(current != nullptr);
+            
+            uint32_t next_id = current->hdr.next;
+            Inode *next = dramInodePool->at(next_id);
+            
+            // obtain a shared lock on the next node(still holding current_lock)
+            std::shared_lock<std::shared_mutex> next_lock(inode_locks[next->getId()]);
+            
+            //check if the next node is still valid
+            if (current->hdr.next != next_id) {
+                // the next node has changed, release the current lock and retry
+                next_lock.unlock();
+                continue;
+            }
+            
+            bool is_tail = next->isTail();
+            bool should_advance = false;
+            
+            if (!is_tail) {
+                should_advance = (key >= next->getMinKey());
+            }
+            
+            if (is_tail || !should_advance) {
+                break;
+            }
+            
+            //move to the next node
+            current = next;
+            current_lock.unlock();
+            current_lock = std::move(next_lock);
+        }
+        
+        updates[i] = current;
+        
+        // move to the next level if not at the lowest level
+        if(i != 0) {
+            int pos = current->findKeyPos(key);
+            if (current->isHeader() && pos > 0)
+                assert(false);
+            uint32_t down_id = current->gps[pos].value;
+            current_lock.unlock();
+            
+            current = dramInodePool->at(down_id);
         }
     }
 }
