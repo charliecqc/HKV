@@ -547,6 +547,174 @@ bool DramSkiplist::checkForRebalance(Inode &inode, bool &activeNewGP)
 
 bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode) 
 {
+    std::vector<std::unique_ptr<dram_log_entry_t>> log_entries;
+    log_entries.reserve(MAX_LEVEL * 2); // 预分配空间，避免频繁重新分配
+
+    // 初始化变量
+    Key_t targetKey;
+    Inode* updates[MAX_LEVEL];
+    Inode* prev_update = nullptr;
+    
+    // 获取目标键（使用最小锁范围）
+    {
+        BloomFilter *bloom = &valueList->bf[targetVnode.hdr.id];
+        std::shared_lock<std::shared_mutex> lock(bloom->mtx);
+        targetKey = targetVnode.getMinKey(bloom);
+    }
+    
+    // 生成随机层级并获取插入位置
+    int newlevel = generateRandomLevel();
+    getPivotNodesForInsert(targetKey, updates);
+    
+    // 层级更新使用读写锁优化
+    {
+        std::shared_lock<std::shared_mutex> read_lock(level_lock);
+        if (newlevel <= level) {
+            // 如果不需要更新层级，直接继续
+        } else {
+            read_lock.unlock();
+            std::unique_lock<std::shared_mutex> write_lock(level_lock);
+            // 双重检查避免竞态条件
+            if (newlevel > level) {
+                for(int i = level; i < newlevel; i++) {
+                    updates[i] = header[i];
+                }
+                level = newlevel;
+            }
+        }
+    }
+
+    // 使用vector存储锁，便于管理
+    std::vector<std::unique_ptr<std::unique_lock<std::shared_mutex>>> current_locks;
+    std::vector<std::unique_ptr<std::unique_lock<std::shared_mutex>>> next_locks;
+    current_locks.resize(MAX_LEVEL);
+    next_locks.resize(MAX_LEVEL);
+
+    // 主循环处理每一层
+    for(int i = 0; i < newlevel; i++) {
+        // 获取当前节点
+        Inode *current_update = updates[i];
+        
+        // 先获取锁，确保线程安全
+        current_locks[i] = std::make_unique<std::unique_lock<std::shared_mutex>>(
+            inode_locks[current_update->getId()]
+        );
+        
+        // 保存前一个节点引用（在锁保护下）
+        Inode *prev = current_update;
+        Inode *next_node = nullptr;
+        
+        // 创建日志条目（使用智能指针管理）
+        auto next_entry = std::make_unique<dram_log_entry_t>(-1, 0, -1, -1);
+        auto current_update_entry = std::make_unique<dram_log_entry_t>(-1, 0, -1, -1);
+        
+        // 在锁的保护下判断是否需要分裂
+        bool needSplit = current_update->isFull() || current_update->isHeader();
+        
+        if(needSplit) {
+            // 获取新节点
+            Inode* next = dramInodePool->getNextNode();
+            next_node = next;
+            
+            // 锁定新节点
+            next_locks[i] = std::make_unique<std::unique_lock<std::shared_mutex>>(
+                inode_locks[next->getId()]
+            );
+            
+            // 链接新节点
+            next->hdr.next = current_update->hdr.next;
+            current_update->hdr.next = next->getId();
+            
+            // 初始化日志条目
+            current_update_entry->initHeader(
+                current_update->getId(), 
+                current_update->hdr.coveredNodes,
+                current_update->hdr.last_index,
+                current_update->hdr.next
+            );
+            
+            next_entry->initHeader(
+                next->getId(), 
+                next->hdr.coveredNodes, 
+                next->hdr.last_index,
+                next->hdr.next
+            );
+
+            // 处理头节点或普通节点分裂
+            if(current_update->isHeader()) {
+                current_update = next;
+            } else { 
+                current_update->split(next);
+                assert(current_update->hdr.last_index != -1 && next->hdr.last_index != -1);
+                current_update = (targetKey < next->getMinKey()) ? current_update : next;
+            }
+        }
+        
+        // 确认非头节点
+        assert(!current_update->isHeader());
+        
+        // 找到插入位置并执行插入
+        int pos = current_update->findInsertKeyPos(targetKey);
+        if (i == 0) {
+            current_update->insertAtPos(targetKey, targetVnode.getId(), pos);
+        } else {
+            current_update->insertAtPos(targetKey, prev_update->getId(), pos);
+        }
+
+        // 处理日志条目
+        if(next_node != nullptr) {
+            for(int j = 0; j <= next_node->hdr.last_index; j++) {
+                next_entry->setKeyVal(j, next_node->gps[j].key, next_node->gps[j].value);
+            }
+            next_entry->setCoveredNodes(next_node->hdr.coveredNodes);
+            next_entry->setLastIndex(next_node->hdr.last_index);
+            log_entries.push_back(std::move(next_entry));
+        }
+        
+        if(current_update_entry->hdr.id == -1) {
+            current_update_entry->initHeader(
+                current_update->getId(),
+                current_update->hdr.coveredNodes,
+                current_update->hdr.last_index,
+                current_update->hdr.next
+            );
+        }
+        
+        for(int j = 0; j <= prev->hdr.last_index; j++) {
+            current_update_entry->setKeyVal(j, prev->gps[j].key, prev->gps[j].value);
+        }
+        current_update_entry->setCoveredNodes(prev->hdr.coveredNodes); 
+        current_update_entry->setLastIndex(prev->hdr.last_index);
+        log_entries.push_back(std::move(current_update_entry));
+
+        // 更新prev_update，用于下一层
+        prev_update = current_update;
+        
+        // 释放前一层的锁
+        if(i > 0) {
+            current_locks[i-1].reset();
+            next_locks[i-1].reset();
+        }
+    }
+    
+    // 释放最后一层的锁
+    if(newlevel > 0) {
+        current_locks[newlevel-1].reset();
+        next_locks[newlevel-1].reset();
+    }
+    
+    // 批量提交日志条目
+    for(auto& entry : log_entries) {
+        ckpt_log->enq(entry.release());
+    }
+    
+    return true;
+
+}
+
+#if 0
+bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode) 
+{
     int pos = -1;
     Inode *prev_update = nullptr; // the update node in the previous round
     Inode *next = nullptr;
@@ -650,6 +818,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     }
     return true;
 }
+#endif
 
 void DramSkiplist::setLevel(int level)
 {
