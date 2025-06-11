@@ -147,7 +147,7 @@ bool DramSkiplist::insert(Vnode *targetVnode)
     Inode* updates[MAX_LEVEL];
     {
         BloomFilter *bloom = &valueList->bf[targetVnode->hdr.id];
-        std::shared_lock<std::shared_mutex> lock(bloom->mtx);
+        std::unique_lock<std::shared_mutex> lock(bloom->mtx);
         targetKey = reinterpret_cast<Vnode *>(targetVnode)->getMinKey(bloom);
     }
     int newlevel = generateRandomLevel();
@@ -545,6 +545,7 @@ bool DramSkiplist::checkForRebalance(Inode &inode, bool &activeNewGP)
     return ret;
 }
 
+#if 1
 bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode) 
 {
     std::vector<std::unique_ptr<dram_log_entry_t>> log_entries;
@@ -711,6 +712,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     return true;
 
 }
+#endif
 
 #if 0
 bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode) 
@@ -729,7 +731,7 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     Inode* updates[MAX_LEVEL];
     {
         BloomFilter *bloom = &valueList->bf[targetVnode.hdr.id];
-        std::shared_lock<std::shared_mutex> lock(bloom->mtx);
+        std::unique_lock<std::shared_mutex> lock(bloom->mtx);
         targetKey = targetVnode.getMinKey(bloom);
     }
     int newlevel = generateRandomLevel();
@@ -837,23 +839,36 @@ Inode *DramSkiplist::findNodeInLevel(Inode *start, Key_t key)
     Inode* current = start;
         
     while(true) {
-        Inode* next = nullptr;
+        uint32_t next_id;
+        bool is_tail = false;
+        Key_t nextMinKey;
+        
         {
             std::shared_lock<std::shared_mutex> lock_current(inode_locks[current->getId()]);
-            next = dramInodePool->at(current->hdr.next);
-                
-            // 提前检查，减少锁的持有时间
-            if (next->isTail()) {
+            next_id = current->hdr.next;
+            Inode* next = dramInodePool->at(next_id);
+            
+            // 对 next 节点也加锁保护
+            std::shared_lock<std::shared_mutex> lock_next(inode_locks[next->getId()]);
+            
+            // 检查链接是否仍然有效（避免ABA问题）
+            if (current->hdr.next != next_id) {
+                // 链接已改变，重试
+                continue;
+            }
+            
+            is_tail = next->isTail();
+            if (is_tail) {
                 return current;
             }
-                
-            // 使用局部变量缓存，减少重复调用
-            Key_t nextMinKey = next->getMinKey();
+            
+            nextMinKey = next->getMinKey();
             if (key < nextMinKey) {
                 return current;
             }
         }
-        current = next;
+        
+        current = dramInodePool->at(next_id);
     }
 }
 
