@@ -312,6 +312,7 @@ inline void exec(int wl,
         for (size_t i = start_index; i < end_index; i++)
         {
             idx->insert(init_keys[i], values[i]);
+            //assert(idx->lookup(init_keys[i]) == values[i]);
             // periodic_count(1000, "load_thread_id %d %lu%%", thread_id, i*100LU/end_index);
         }
 

@@ -204,18 +204,26 @@ Val_t TandemIndex::lookup(Key_t key)
         std::shared_lock<std::shared_mutex> lock(mainIndex->inode_locks[inode->getId()]);
         vnode = valueList->pmemVnodePool->at(inode->gps[idx].value);
     }
+
+    BloomFilter *bloom = &valueList->bf[vnode->hdr.id];
+    std::shared_lock<std::shared_mutex> current_lock(vnode->hdr.mtx);
+
     while(true) {
-        std::shared_lock<std::shared_mutex> lock(vnode->hdr.mtx);
 #ifdef DBG
         cout << "look up $_vnode id: " << vnode->hdr.id << " max key: " << vnode->getMaxKey() << endl;
 #endif
-        BloomFilter *bloom = &valueList->bf[vnode->hdr.id];
+
         bool mightContain = bloom->mightContain(key);
         //if(vnode->hdr.next != -1 && !bloom->mightContain(key) && key > vnode->getMaxKey()) {
         if(vnode->hdr.next != -1 && !mightContain) {
             Vnode *next = valueList->pmemVnodePool->at(vnode->hdr.next);
-            lock.unlock();
+            std::shared_lock<std::shared_mutex> next_lock(next->hdr.mtx);
+            BloomFilter *next_bloom = &valueList->bf[next->hdr.id];
+            current_lock.unlock();
             vnode = next;
+            bloom = next_bloom;
+            current_lock = std::move(next_lock); // move the lock to the next vnode
+            continue;
         }else {
             if(mightContain) {
                 if(vnode->lookupWithoutFilter(key, value, bloom)) {
@@ -224,8 +232,12 @@ Val_t TandemIndex::lookup(Key_t key)
                     // could be false positive
                     if (key > vnode->getMaxKey() && vnode->hdr.next != -1) {
                         Vnode *next = valueList->pmemVnodePool->at(vnode->hdr.next);
-                        lock.unlock();
+                        std::shared_lock<std::shared_mutex> next_lock(next->hdr.mtx);
+                        BloomFilter *next_bloom = &valueList->bf[next->hdr.id];
+                        current_lock.unlock();
                         vnode = next;
+                        bloom = next_bloom;
+                        current_lock = std::move(next_lock); // move the lock to the next vnode
                         continue; // retry with the next vnode
                     } else {
                         cout << "Failed to find the key in the value list." << endl;
@@ -233,8 +245,8 @@ Val_t TandemIndex::lookup(Key_t key)
                     }
                 }
             }else { // reach to the end of the list
-//#ifdef DBG
-                lock.unlock();
+#ifdef DBG
+                current_lock.unlock();
                 std::unique_lock<std::shared_mutex> lock_vnode(vnode->hdr.mtx);
                 vnode->dump();
                 Vnode *next_vnode = nullptr;
@@ -246,7 +258,7 @@ Val_t TandemIndex::lookup(Key_t key)
                 }else {
                     std::cout << " this is the last vnode" << std::endl;
                 }
-//#endif
+#endif
                 cout << "Failed to find the key in the value list." << endl;
                 return -1;
             }
