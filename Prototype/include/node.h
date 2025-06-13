@@ -25,6 +25,7 @@ public:
     static const size_t HASH_FUNCTIONS = 4;  // 哈希函数数量
     alignas(64) uint8_t fingerprints[32];      // 使用指纹数组替代位图
     alignas(64) uint8_t bits[FILTER_SIZE];
+    std::shared_mutex vnode_mtx;
     
     // 哈希函数，返回位置
     size_t getPosition(Key_t key, int seed) const {
@@ -323,7 +324,7 @@ public:
     int next; //4 bytes 
     // used to keep track of the keys are valid or not in the vnode
     uint32_t bitmap; // 4 bytes
-    std::shared_mutex mtx;
+    //std::shared_mutex mtx;
     vnodeHeader() {
         id = 0;
         next = 0;
@@ -500,34 +501,6 @@ public:
         return minKey;
     }
 
-#if 0
-    Key_t getMidKey() {
-        std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> pq;
-        std::unordered_set<Key_t> keySet;
-        {
-            for(int i = fanout - 1; i >= 0; i--) {
-                if(hdr.isBitSet(i) == false) {
-                    continue;
-                }
-                if(records[i].key == std::numeric_limits<Key_t>::max()) {
-                    continue;
-                }
-                if (keySet.find(records[i].key) != keySet.end()) {
-                    continue;
-                }
-                keySet.insert(records[i].key);
-            }
-        }
-        unsigned long size = keySet.size();
-        for (const Key_t& key : keySet) {
-            pq.push(key);
-            if(pq.size() > size / 2 + 1) {
-                pq.pop();
-            }
-        }
-        return pq.top();
-    }
-#endif
     Key_t getMidKey() 
     {
         std::vector<Key_t> validKeys;

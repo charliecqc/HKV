@@ -31,7 +31,7 @@ TandemIndex::TandemIndex() {
     dramInodePool = recoveryManager->getDramInodePool();
     ckptLog = new CkptLog(LOG_SIZE);
     PmemManager::flushToNVM(3, reinterpret_cast<char *>(ckptLog), sizeof(ckptLog));
-    mainIndex = new DramSkiplist(ckptLog, dramInodePool);
+    mainIndex = new DramSkiplist(ckptLog, dramInodePool, valueList);
     mainIndex->setLevel(level);
     createLogMergeThread();
     Inode *index_header = mainIndex->getHeader();
@@ -75,8 +75,11 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         std::shared_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[inode->getId()]);
         Vnode *valueNode = valueList->pmemVnodePool->at(inode->gps[idx].value);
         inode_lock.unlock();
+
         while(true) {
-            std::unique_lock<std::shared_mutex> lock_value(valueNode->hdr.mtx);
+            //std::unique_lock<std::shared_mutex> lock_value(valueNode->hdr.mtx);
+            BloomFilter *bloom = &valueList->bf[valueNode->getId()];
+            std::unique_lock<std::shared_mutex> lock_value(bloom->vnode_mtx);
             if(key > valueNode->getMaxKey() && valueNode->hdr.next != -1) {
                 valueNode = valueList->pmemVnodePool->at(valueNode->hdr.next);
             }else {
@@ -92,8 +95,9 @@ bool TandemIndex::insert(Key_t key, Val_t value)
                             return false;
                         }
                     }else{
-                        std::unique_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
-                        if(!targetVnode->insert(key, value, &valueList->bf[targetVnode->getId()])) {
+                        BloomFilter *next_bloom = &valueList->bf[targetVnode->getId()];
+                        std::unique_lock<std::shared_mutex> lock_target(next_bloom->vnode_mtx);
+                        if(!targetVnode->insert(key, value, next_bloom)) {
                             std::cout << "Failed to insert the key and value into the vnode." << std::endl;
                             return false;
                         }
@@ -111,7 +115,9 @@ bool TandemIndex::insert(Key_t key, Val_t value)
                 Key_t targetKey;
                 int pos = -1;
                 {
-                    std::shared_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
+                    //std::shared_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
+                    BloomFilter *target_bloom = &valueList->bf[targetVnode->getId()];
+                    std::shared_lock<std::shared_mutex> lock_target(target_bloom->vnode_mtx);
                     targetKey = targetVnode->getMinKey();
                 }
                 if(inode->activateGP(targetKey, pos)) {
@@ -142,10 +148,13 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         //in the case that either the key is smaller than the min key of first inode or current value node is full
         Vnode *headVnode = valueList->getHeader();
         {
-            std::shared_lock<std::shared_mutex> lock(headVnode->hdr.mtx);
+            //std::shared_lock<std::shared_mutex> lock(headVnode->hdr.mtx);
+            BloomFilter *head_bloom = &valueList->bf[headVnode->getId()];
+            std::shared_lock<std::shared_mutex> lock(head_bloom->vnode_mtx);
             targetVnode = valueList->pmemVnodePool->at(headVnode->hdr.next);
             if(targetVnode != nullptr) {
-                std::unique_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
+                BloomFilter *target_bloom = &valueList->bf[targetVnode->getId()];
+                std::unique_lock<std::shared_mutex> lock_target(target_bloom->vnode_mtx);
                 if(!targetVnode->isFull()) {
                     Key_t old_min_key = targetVnode->getMinKey();
                     if(targetVnode->insert(key, value, &valueList->bf[targetVnode->getId()])) {
@@ -206,19 +215,17 @@ Val_t TandemIndex::lookup(Key_t key)
     }
 
     BloomFilter *bloom = &valueList->bf[vnode->hdr.id];
-    std::shared_lock<std::shared_mutex> current_lock(vnode->hdr.mtx);
+    std::shared_lock<std::shared_mutex> current_lock(bloom->vnode_mtx);
 
     while(true) {
-#ifdef DBG
-        cout << "look up $_vnode id: " << vnode->hdr.id << " max key: " << vnode->getMaxKey() << endl;
-#endif
-
         bool mightContain = bloom->mightContain(key);
         //if(vnode->hdr.next != -1 && !bloom->mightContain(key) && key > vnode->getMaxKey()) {
         if(vnode->hdr.next != -1 && !mightContain) {
             Vnode *next = valueList->pmemVnodePool->at(vnode->hdr.next);
-            std::shared_lock<std::shared_mutex> next_lock(next->hdr.mtx);
+            //std::shared_lock<std::shared_mutex> next_lock(next->hdr.mtx);
             BloomFilter *next_bloom = &valueList->bf[next->hdr.id];
+            std::shared_lock<std::shared_mutex> next_lock(next_bloom->vnode_mtx);
+            //std::cout << "next vnode id: " << next->hdr.id << " max key: " << next->getMaxKey() << std::endl;
             current_lock.unlock();
             vnode = next;
             bloom = next_bloom;
@@ -232,8 +239,10 @@ Val_t TandemIndex::lookup(Key_t key)
                     // could be false positive
                     if (key > vnode->getMaxKey() && vnode->hdr.next != -1) {
                         Vnode *next = valueList->pmemVnodePool->at(vnode->hdr.next);
-                        std::shared_lock<std::shared_mutex> next_lock(next->hdr.mtx);
                         BloomFilter *next_bloom = &valueList->bf[next->hdr.id];
+                        std::shared_lock<std::shared_mutex> next_lock(next_bloom->vnode_mtx);
+                        //std::shared_lock<std::shared_mutex> next_lock(next->hdr.mtx);
+                        
                         current_lock.unlock();
                         vnode = next;
                         bloom = next_bloom;
@@ -320,7 +329,9 @@ void TandemIndex::update(Key_t key, Val_t value)
         return;
     }
     while(true) {
-        std::unique_lock<std::shared_mutex> lock(vnode->hdr.mtx);
+        //std::unique_lock<std::shared_mutex> lock(vnode->hdr.mtx);
+        BloomFilter *bloom = &valueList->bf[vnode->hdr.id];
+        std::unique_lock<std::shared_mutex> lock(bloom->vnode_mtx);
         if(key > vnode->getMaxKey() && vnode->hdr.next != -1) {
         //if(vnode->hdr.next != -1 && !valueList->bf[vnode->hdr.id].mightContain(key)) {
             vnode = valueList->pmemVnodePool->at(vnode->hdr.next);
@@ -340,8 +351,10 @@ void TandemIndex::update(Key_t key, Val_t value)
                             vnode->hdr.unsetBit(pos);
                         }
                     }else{
-                        std::unique_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
-                        if(!targetVnode->lookup(key, pos, &valueList->bf[targetVnode->hdr.id])) {
+                        //std::unique_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
+                        BloomFilter *target_bloom = &valueList->bf[targetVnode->hdr.id];
+                        std::unique_lock<std::shared_mutex> lock_target(target_bloom->vnode_mtx);
+                        if(!targetVnode->lookup(key, pos, target_bloom)) {
                             targetVnode->insert(key, value, &valueList->bf[targetVnode->hdr.id]);
                             targetVnode->hdr.unsetBit(pos);
                         }
@@ -362,7 +375,9 @@ void TandemIndex::update(Key_t key, Val_t value)
             Key_t targetKey;
             int pos = -1;
             {
-                std::shared_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
+                //std::shared_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
+                BloomFilter *target_bloom = &valueList->bf[targetVnode->getId()];
+                std::shared_lock<std::shared_mutex> lock_target(target_bloom->vnode_mtx);
                 targetKey = targetVnode->getMinKey();
             }
             if(inode->activateGP(targetKey, pos)) {
@@ -410,7 +425,9 @@ void TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
     }
     int remaining_range = range;
     while(true) {
-        std::shared_lock<std::shared_mutex> lock(vnode->hdr.mtx);
+        //std::shared_lock<std::shared_mutex> lock(vnode->hdr.mtx);
+        BloomFilter *bloom = &valueList->bf[vnode->hdr.id];
+        std::shared_lock<std::shared_mutex> lock(bloom->vnode_mtx);
         remaining_range=vnode->scan(key, remaining_range, result);
         if(remaining_range > 0 && vnode->hdr.next != -1) {
             vnode = valueList->pmemVnodePool->at(vnode->hdr.next);

@@ -7,7 +7,7 @@ CXX = g++
 CXXFLAGS = -Wall -Iinclude -mavx2 --std=c++17 -O3
 #CXXFLAGS = -Wall -Iinclude -g --std=c++17 -O0
 #CXXFLAGS = -Wall -Iinclude --std=c++17 -O3
-#CXXFLAGS = -Wall -Iinclude --std=c++17 -g -fsanitize=thread -O3
+#CXXFLAGS = -Wall -Iinclude -g --std=c++17 -mavx2 -fsanitize=thread -O3
 #CXXFLAGS = -Wall -Iinclude -g --std=c++17 -O0
 #CXXFLAGS = -Wall -Iinclude -mavx2 -g --std=c++17 -O0
 

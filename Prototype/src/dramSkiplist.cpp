@@ -5,10 +5,11 @@
 #include <optional>
 #define numNodesInPool 10000000
 
-DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool)
+DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool, ValueList *valuelist)
 {
     ckpt_log = ckp_log;
     dramInodePool = pool;
+    valueList = valuelist;
     if(dramInodePool->getCurrentIdx() == 0) {
         header[MAX_LEVEL - 1] = dramInodePool->getNextNode();
         header[MAX_LEVEL - 1]->gps[0].key = std::numeric_limits<Key_t>::min();
@@ -69,7 +70,9 @@ bool DramSkiplist::insert(Vnode *targetVnode)
     Key_t targetKey = std::numeric_limits<Key_t>::max();
     Inode* updates[MAX_LEVEL];
     {
-        std::shared_lock<std::shared_mutex> lock(reinterpret_cast<Vnode *>(targetVnode)->hdr.mtx);
+        //std::shared_lock<std::shared_mutex> lock(reinterpret_cast<Vnode *>(targetVnode)->hdr.mtx);
+        BloomFilter *bloom = &valueList->bf[targetVnode->hdr.id];
+        std::shared_lock<std::shared_mutex> lock(bloom->vnode_mtx);
         targetKey = reinterpret_cast<Vnode *>(targetVnode)->getMinKey();
     }
     int newlevel = generateRandomLevel();
@@ -302,7 +305,9 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
     Key_t targetKey = std::numeric_limits<Key_t>::max();
     Inode* updates[MAX_LEVEL];
     {
-        std::shared_lock<std::shared_mutex> lock(targetVnode.hdr.mtx);
+        //std::shared_lock<std::shared_mutex> lock(targetVnode.hdr.mtx);
+        BloomFilter *bloom = &valueList->bf[targetVnode.hdr.id];
+        std::shared_lock<std::shared_mutex> lock(bloom->vnode_mtx);
         targetKey = targetVnode.getMinKey();
     }
     int newlevel = generateRandomLevel();

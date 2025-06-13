@@ -18,7 +18,9 @@ ValueList::ValueList() {
 
 bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 {
-    std::unique_lock<std::shared_mutex> lock(curNode->hdr.mtx);
+    //std::unique_lock<std::shared_mutex> lock(curNode->hdr.mtx);
+    BloomFilter *bloom = &bf[curNode->hdr.id];
+    std::unique_lock<std::shared_mutex> lock(bloom->vnode_mtx);
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
@@ -109,7 +111,9 @@ bool ValueList::recovery()
 
 Vnode *ValueList::getNext(Vnode *curNode)
 {
-    shared_lock<std::shared_mutex> lock(curNode->hdr.mtx);
+    //shared_lock<std::shared_mutex> lock(curNode->hdr.mtx);
+    BloomFilter *bloom = &bf[curNode->hdr.id];
+    std::shared_lock<std::shared_mutex> lock(bloom->vnode_mtx);
     return pmemVnodePool->at(curNode->hdr.next);
 }
 
