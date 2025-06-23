@@ -6,6 +6,7 @@
 #include "workerThread.h"
 #include "checkpoint.h"
 #include "common.h"
+#include "statsampler.h"
 
 std::queue<CheckpointVector *> g_checkpointQueue;
 bool wqReady[WORKERQUEUE_NUM] = {false};
@@ -93,6 +94,7 @@ bool TandemIndex::handleExistingInodeInsert(Inode *inode, Key_t key, Val_t value
             
             // 尝试直接插入
             if(valueNode->insert(key, value, &valueList->bf[valueNode->getId()])) {
+                samplingTable.sampleInsert(inode->getId(), key);
                 return true; // return true if insert is successful
             }
             
