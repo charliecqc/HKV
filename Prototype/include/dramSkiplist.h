@@ -24,9 +24,13 @@ public:
     bool insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel);
     bool insert(Vnode *targetVnode);
     bool update(Key_t &oldKey, Key_t &newKey, Val_t &val);
+    bool add(Vnode *targetVnode);
     // return the index in gps of the index node that poionts to the vnode
     Inode *lookup(Key_t key, int &idx);
+    Inode *lookup(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx);
+    Inode *lookupForInsert(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates);
     Inode *getHeader();
+    Inode *getHeader(int level);
     void getPivotNodesForInsert(Key_t key, Inode* updates[]);
     bool linkVnodeToInode(Inode &inode, int idx, Vnode &vnode);
     bool checkForActivateGP(Inode &inode);
@@ -35,6 +39,8 @@ public:
     int generateRandomLevel();
     bool rebalanceInode(Inode &inode);
     bool rebalanceInode(Inode &inode, Vnode &vnode);
+    bool rebalanceIndex(Vnode &targetVnode);
+    int rebalanceIdx(Vnode &targetVnode, Key_t targetKey);
     bool activateGP(Inode &inode);
     void setLevel(int level);
     int getLevel();

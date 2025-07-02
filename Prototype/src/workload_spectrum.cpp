@@ -312,11 +312,13 @@ inline void exec(int wl,
         for (size_t i = start_index; i < end_index; i++)
         {
             idx->insert(init_keys[i], values[i]);
+#if 0
             Val_t value = idx->lookup(init_keys[i]);
             if(value != values[i])
             {
                 std::cout << "Failed to insert key: " << init_keys[i] << " get " << value << " expected value: " << values[i] << "\n";
             }
+#endif
             //assert(idx->lookup(init_keys[i]) == values[i]);
             // periodic_count(1000, "load_thread_id %d %lu%%", thread_id, i*100LU/end_index);
         }

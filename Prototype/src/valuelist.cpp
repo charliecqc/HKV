@@ -19,8 +19,6 @@ ValueList::ValueList() {
 bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 {
     //std::unique_lock<std::shared_mutex> lock(curNode->hdr.mtx);
-    BloomFilter *bloom = &bf[curNode->hdr.id];
-    std::unique_lock<std::shared_mutex> lock(bloom->vnode_mtx);
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));

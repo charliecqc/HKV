@@ -26,7 +26,8 @@ public:
     int16_t coveredNodes; // number of covered nodes
     int16_t last_index; // last valid gp of the inode
     int16_t next; // next inode id
-    log_entry_hdr(int16_t id, int16_t coveredNodes, int16_t last_index, int16_t next) : id(id), coveredNodes(coveredNodes), last_index(last_index), next(next) {
+    int16_t level;
+    log_entry_hdr(int16_t id, int16_t coveredNodes, int16_t last_index, int16_t next, int16_t level) : id(id), coveredNodes(coveredNodes), last_index(last_index), next(next), level(level) {
         count = 0;
     }
 
@@ -49,7 +50,7 @@ public:
         memset(value, 0, sizeof(value));
     }
 
-    dram_log_entry_t(int16_t id, int16_t coveredNodes, int16_t last_index, int16_t next) : hdr(id, coveredNodes, last_index, next) {
+    dram_log_entry_t(int16_t id, int16_t coveredNodes, int16_t last_index, int16_t next, int16_t level) : hdr(id, coveredNodes, last_index, next, level) {
         initArrays();
     }
 
@@ -60,11 +61,12 @@ public:
         hdr.count += 1;
     }
 
-    void initHeader(int16_t id, int16_t coveredNodes, int16_t last_index, int16_t next) {
+    void initHeader(int16_t id, int16_t coveredNodes, int16_t last_index, int16_t next, int16_t level) {
         this->hdr.id = id;
         this->hdr.coveredNodes = coveredNodes;
         this->hdr.last_index = last_index;
         this->hdr.next = next;
+        this->hdr.level = level;
     }
 
     size_t getLoadCount() {

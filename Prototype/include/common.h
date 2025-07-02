@@ -6,7 +6,7 @@
 typedef uint64_t Key_t; // 8 bytes
 typedef uint64_t Val_t; // 8 bytes
 
-const int MAX_LEVEL = 16;
+const int MAX_LEVEL = 20;
 #define SEARCH_STABLITY_COEFFICIENT 4
 #define WORKERQUEUE_NUM 1
 #define L1_CACHE_LINE_SIZE 64

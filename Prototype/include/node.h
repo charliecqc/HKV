@@ -230,42 +230,47 @@ public:
 
     int findInsertKeyPos(Key_t key)
     {
-        int idx = 0;
-        if(key < this->getMinKey())
-            return idx;
-        for(int i = 0; i <= this->hdr.last_index; i++) {
-            if(key >= this->gps[i].key) {
-                if(i + 1 <= this->hdr.last_index) {
-                    if(key < this->gps[i+1].key) {
-                        idx = i + 1;
-                        break;
-                    }
-                } else {
-                    idx = i+1;
-                    break;
-                }
+        //handle the boundary cases
+        if (hdr.last_index < 0) return 0;
+        if (key < gps[0].key) return 0;
+        if (key >= gps[hdr.last_index].key) return hdr.last_index + 1;
+        
+        // binary search for the position
+        int left = 0, right = hdr.last_index;
+        while (left < right) {
+            int mid = left + (right - left) / 2;
+            if (gps[mid].key <= key) {
+                left = mid + 1;
+            } else {
+                right = mid;
             }
         }
-        return idx;
+        return left;
     }
 
     int findKeyPos(Key_t key)
     {
-        int idx = 0;
-        for(int i = 0; i <= this->hdr.last_index; i++) {
-            if(key >= this->gps[i].key) {
-                if(i + 1 <= this->hdr.last_index) {
-                    if(key < this->gps[i+1].key) {
-                        idx = i;
-                        break;
-                    }
-                } else {
-                    idx = i;
-                    break;
-                }
+        // empty inode
+        if (hdr.last_index < 0) return 0;
+        
+        // handle the boundary cases
+        if (key < gps[0].key) return 0;
+        if (key >= gps[hdr.last_index].key) return hdr.last_index;
+        
+        // binary search for the position
+        int left = 0, right = hdr.last_index;
+        int result = 0;
+        
+        while (left <= right) {
+            int mid = left + (right - left) / 2;
+            if (gps[mid].key <= key) {
+                result = mid;  // record the last position where gps[mid].key <= key
+                left = mid + 1;
+            } else {
+                right = mid - 1;
             }
         }
-        return idx;
+        return result; 
     }
 
     bool shift(int oldIdx) { // shift data from oldIdx to newIdx
