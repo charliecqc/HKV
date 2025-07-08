@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include "common.h"
+#include <bitset>
 #ifdef __AVX2__
 #include <immintrin.h>
 #endif
@@ -213,6 +214,8 @@ class header{
         int16_t level; //1 byte
         int16_t next; //2 bytes 
         int16_t last_index; //2 bytes
+        int16_t last_sgp_index;
+        std::bitset<fanout/2> sgp_bitmap; // 4 bytes
         //std::shared_mutex mtx; //8 bytes
     public:
         header() {
@@ -221,6 +224,7 @@ class header{
             level = 0;
             next = 0;
             last_index = -1;
+            last_sgp_index = -1;
         }
     friend class Inode;
 };
@@ -244,6 +248,7 @@ public:
     header hdr;
     entry gps[fanout/2];
     entry sgps[fanout/2];
+
     
 
     Inode(uint32_t level)
@@ -359,6 +364,60 @@ public:
         return true;
     }
 
+    /**********   SGP related mechanism   **********/
+    /***********************************************/
+    
+    bool activateSGP(Key_t targetKey, int &pos)
+    {
+        //check if there is enough space to insert the new SGP
+        int16_t cur_index = this->hdr.last_sgp_index;  
+        if(static_cast<int32_t>(cur_index + 1)>= fanout/2) {
+            return false;
+        }
+            
+        pos = this->findInsertKeyPosSGP(targetKey);
+
+        //avoid duplicates
+        if (pos < hdr.last_sgp_index && sgps[pos].key == targetKey) {
+            return false; // key already exists
+        }
+
+        //shift to preserve order
+        if(pos <= cur_index) 
+            this->shiftSGP(pos);
+
+        //insert the new SGP
+        sgps[pos].key = targetKey;
+        sgps[pos].value = std::numeric_limits<Val_t>::max(); // unlinked
+
+        this->hdr.last_sgp_index = cur_index + 1;
+        return true;
+    }
+    
+    int findInsertKeyPosSGP(Key_t key)
+    {
+        if (hdr.last_sgp_index < 0) return 0;
+        if (key < gps[0].key) return 0;
+        if (key >= gps[hdr.last_sgp_index].key) return hdr.last_sgp_index + 1;
+        
+        int left = 0, right = hdr.last_sgp_index;
+        while (left < right) {
+            int mid = left + (right - left) / 2;
+            if (sgps[mid].key <= key) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        return left;
+    }
+
+    bool shiftSGP(int oldIdx) { // shift data from oldIdx to newIdx
+        memmove(&sgps[oldIdx+1], &sgps[oldIdx], sizeof(entry) * (hdr.last_sgp_index - oldIdx + 1));
+        return true;
+    }
+    /***********************************************/
+
     Key_t getMaxKey() {
         return gps[hdr.last_index].key;
     }
@@ -379,8 +438,57 @@ public:
         int temp_index = hdr.last_index;
         hdr.last_index = hdr.last_index / 2 - 1;
         targetInode->hdr.last_index = temp_index / 2;
+        //TODO - fix covered nodes correctness
         hdr.coveredNodes = hdr.last_index + 1;
         targetInode->hdr.coveredNodes = targetInode->hdr.last_index + 1;
+        return true;
+    }
+
+    bool splitWithSGP(Inode *targetInode) {
+        if(isHeader() || targetInode->isHeader()) {
+            std::cout << " this is also weird" << std::endl;
+        }
+        
+        const int MAX_ENTRIES = sizeof(gps) / sizeof(entry);  // Adjust to actual capacity
+
+        std::vector<entry> merged;
+        merged.reserve(hdr.last_index + 1 + hdr.last_sgp_index + 1);
+
+        int g = 0;
+        int s = 0;
+
+        // Merge gps[] and valid sgps[] in sorted order
+        while (g <= hdr.last_index || s <= hdr.last_sgp_index) {
+            bool gps_valid = (g <= hdr.last_index);
+            bool sgps_valid = (s <= hdr.last_sgp_index) && hdr.sgp_bitmap.test(s);
+
+            if (gps_valid && (!sgps_valid || gps[g].key < sgps[s].key)) {
+                merged.push_back(gps[g++]);
+            } else if (sgps_valid) {
+                merged.push_back(sgps[s++]);
+            } else {
+                s++;  // Skip inactive sgps entries
+            }
+        }
+
+        // Split the merged array into current and target nodes
+        int total = merged.size();
+        int mid = total / 2;
+
+        for (int i = 0; i < mid; ++i) {
+            gps[i] = merged[i];
+        }
+        hdr.last_index = mid - 1;
+
+        for (int i = mid; i < total; ++i) {
+            targetInode->gps[i - mid] = merged[i];
+        }
+        targetInode->hdr.last_index = total - mid - 1;
+
+        // Reset sgps metadata
+        hdr.last_sgp_index = -1;
+        hdr.sgp_bitmap.reset();
+
         return true;
     }
 

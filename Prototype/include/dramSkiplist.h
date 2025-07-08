@@ -31,8 +31,10 @@ public:
     Inode *getHeader();
     void getPivotNodesForInsert(Key_t key, Inode* updates[]);
     bool linkVnodeToInode(Inode &inode, int idx, Vnode &vnode);
+    bool linkVnodetoSGP(Inode &inode, int idx, Vnode &vnode);
     bool checkForActivateGP(Inode &inode);
     bool checkForRebalance(Inode &inode, bool &activeNewGP);
+    int computeCoveredNodes(Inode *inode);
     bool rebalanceInode(Inode *inode, bool lastLevel);
     int generateRandomLevel();
     bool rebalanceInode(Inode &inode);

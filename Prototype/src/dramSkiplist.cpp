@@ -533,6 +533,12 @@ bool DramSkiplist::linkVnodeToInode(Inode &inode, int idx, Vnode &vnode)
     return true;
 }
 
+bool DramSkiplist::linkVnodetoSGP(Inode &inode, int idx, Vnode &vnode)
+{
+    inode.sgps[idx].value = vnode.getId();
+    return true;
+}
+
 bool DramSkiplist::checkForRebalance(Inode &inode, bool &activeNewGP)
 {
     bool ret = false;
@@ -543,6 +549,38 @@ bool DramSkiplist::checkForRebalance(Inode &inode, bool &activeNewGP)
         ret = true;
     }
     return ret;
+}
+
+int DramSkiplist::computeCoveredNodes(Inode* node) { // TODO : optimize
+    if (node->hdr.last_index < 0) return 0;
+
+    // Determine maxKey as the min key of the next sibling
+    Key_t maxKey = std::numeric_limits<Key_t>::max();
+    if (node->hdr.next != std::numeric_limits<uint32_t>::max()) {
+        Inode* next = dramInodePool->at(node->hdr.next);
+        if (next != nullptr && !next->isTail()) {
+            maxKey = next->getMinKey();
+        }
+    }
+
+    int count = 0;
+    uint32_t child_id = node->gps[0].value;
+
+    while (true) {
+        Inode* child = dramInodePool->at(child_id);
+        if (child == nullptr || child->getMinKey() >= maxKey) {
+            break;
+        }
+
+        count++;
+        child_id = child->hdr.next;
+
+        if (child_id == std::numeric_limits<uint32_t>::max()) {
+            break;
+        }
+    }
+
+    return count;
 }
 
 #if 1
@@ -646,6 +684,11 @@ bool DramSkiplist::rebalanceInode(Inode &inode, Vnode &targetVnode)
                 current_update = next;
             } else { 
                 current_update->split(next);
+
+                // fix coverednodes
+                current_update->hdr.coveredNodes = computeCoveredNodes(current_update);
+                next->hdr.coveredNodes = computeCoveredNodes(next);
+
                 assert(current_update->hdr.last_index != -1 && next->hdr.last_index != -1);
                 current_update = (targetKey < next->getMinKey()) ? current_update : next;
             }
