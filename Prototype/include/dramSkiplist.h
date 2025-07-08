@@ -44,4 +44,15 @@ public:
     bool activateGP(Inode &inode);
     void setLevel(int level);
     int getLevel();
+    void recordInodeRelation(Inode* &child, Inode* &parent);
+    Inode *getParentInode(Inode* &child);
+    void removeInodeRelation(Inode* &child);
+    int fastRebalance(Inode *inode, Inode *parent_inode);
+    dram_log_entry_t *create_log_entry(Inode *inode);
+    bool isTail(int16_t id) {
+        return (id >= MAX_LEVEL && id < 2 * MAX_LEVEL);
+    }
+
+    std::mutex inodeRelationMutex;
+    std::unordered_map<Inode *, Inode*> childToParentMap; // map to store child-parent relationships for rebalancing
 };

@@ -8,11 +8,11 @@
 #include "workerThread.h"
 #include <boost/lockfree/spsc_queue.hpp>
 #include <thread>
+#include <queue>
+#include <mutex>
 #pragma once
 
-//extern std::queue<std::vector<ckp_entry *>*> g_checkpointQueue;
-//extern boost::lockfree::spsc_queue<CheckpointVector *, boost::lockfree::capacity<1000000>> g_checkpointQueue;
-//extern boost::lockfree::spsc_queue<ckp_entry *, boost::lockfree::capacity<1000000>> g_checkpointQueue;
+
 extern std::queue<CheckpointVector *> g_checkpointQueue;
 
 class TandemIndex {
@@ -36,20 +36,30 @@ class TandemIndex {
         bool moveToNextVnodeForInsert(Vnode *&vnode, BloomFilter *&bloom, std::unique_lock<std::shared_mutex> &vnode_lock);
         bool handleNodeFullAndSplit(Vnode *vnode, BloomFilter *bloom, 
                                          std::unique_lock<std::shared_mutex> &vnode_lock, 
-                                         Key_t key, Val_t value, Inode *target, int idx);
-        bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, Key_t targetKey);
+                                         Key_t key, Val_t value, Inode *target, Vnode* &newNode);
+        bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates);
 
         //std::thread *workerThread;kk
         std::thread *checkpointThread;
         std::thread *logMergeThread;
+        std::thread *rebalanceThread[MAX_REBALANCE_THREADS];
 
-        //void createWorkerThread(); 
+        //void createWorkerThread();
         void createCheckpointThread();
         void createLogMergeThread();
+        void createRebalanceThread();
+        void rebalanceThreadExec(int id);
         void checkpointThreadExec(int id);
         void logMergeThreadExec(int id);
         //void workerThreadExec();
+        
+        // 重平衡队列相关方法
+        void addToRebalanceQueue(Inode* &inode);
+        bool getFromRebalanceQueue(Inode* &inode);
+        void addToRebalanceMap(Inode *child, Inode *parent);
+        bool getFromRebalanceMap(Inode *child, Inode *parent);
 
+    private:
         DramSkiplist *mainIndex;
         DramInodePool *dramInodePool;
         PmemInodePool *pmemRecoveryArray;
@@ -57,4 +67,9 @@ class TandemIndex {
         ValueList *valueList;
         CkptLog *ckptLog;
         RecoveryManager *recoveryManager;
+        bool needToRebalance;
+        
+        // 重平衡队列相关成员
+        std::queue<Inode *> rebalanceQueue;
+        std::mutex rebalanceQueueMutex;
 };

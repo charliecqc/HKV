@@ -438,6 +438,87 @@ bool DramSkiplist::checkForRebalance(Inode &inode, bool &activeNewGP)
     return ret;
 }
 
+//return 0 if no rebalance is needed, return 1 if the target node is split, return 2 if the parent node is split
+int DramSkiplist::fastRebalance(Inode *inode, Inode *parent_inode) 
+{
+    int ret = 0;
+    std::vector<std::unique_ptr<dram_log_entry_t> > log_entries;
+    //if the parent inode needs tp be split, we will submit it to the rebalnce thread
+    log_entries.reserve(3);
+    Inode *next_node = dramInodePool->getNextNode();
+    next_node->hdr.level = inode->hdr.level;
+    if(parent_inode != nullptr) {
+        std::unique_lock<std::shared_mutex> lock_parent(inode_locks[parent_inode->getId()]);
+        std::unique_lock<std::shared_mutex> lock_target(inode_locks[inode->getId()]);
+        std::unique_lock<std::shared_mutex> lock_next(inode_locks[next_node->getId()]);
+        next_node->hdr.next = inode->hdr.next;
+        inode->hdr.next = next_node->getId();
+        inode->split(next_node);
+        log_entries.emplace_back(create_log_entry(next_node));
+        log_entries.emplace_back(create_log_entry(inode));
+        Key_t minKey = next_node->getMinKey();
+        if(parent_inode->checkForActivateGP()){
+            int pos = -1;
+            if(parent_inode->activateGP(minKey,pos)) {
+                parent_inode->gps[pos].key = minKey;
+                parent_inode->gps[pos].value = next_node->getId();
+                parent_inode->hdr.coveredNodes++;
+                log_entries.emplace_back(create_log_entry(parent_inode));
+                recordInodeRelation(next_node, parent_inode);
+                ret = 1;
+            }else {
+            //need to rebalance the parent node
+                ret = 2;
+            }
+        }
+        for(auto &entry: log_entries) {
+            ckpt_log->enq(entry.release());
+        }
+    }
+    else {// 
+        std::unique_lock<std::shared_mutex> lock_parent;
+        if(inode->hdr.level < MAX_LEVEL - 1) {
+            parent_inode = dramInodePool->getNextNode();
+            Inode *header = getHeader(inode->hdr.level + 1);
+            std::unique_lock<std::shared_mutex> lock_header(inode_locks[header->getId()]);
+            if(!isTail(header->hdr.next)) {
+                parent_inode->hdr.next = header->hdr.next;
+                header->hdr.next =parent_inode->getId();
+                log_entries.emplace_back(create_log_entry(parent_inode));
+                log_entries.emplace_back(create_log_entry(header));
+            }
+            lock_parent = std::unique_lock<std::shared_mutex>(inode_locks[parent_inode->getId()]);
+        }
+        std::unique_lock<std::shared_mutex> lock_target(inode_locks[inode->getId()]);
+        std::unique_lock<std::shared_mutex> lock_next(inode_locks[next_node->getId()]);
+        next_node->hdr.next = inode->hdr.next;
+        inode->hdr.next = next_node->getId();
+        inode->split(next_node);
+        log_entries.emplace_back(create_log_entry(next_node));
+        log_entries.emplace_back(create_log_entry(inode));
+        if(parent_inode && parent_inode->checkForActivateGP()) {
+            int pos = -1;
+            Key_t minKey = next_node->getMinKey();
+            if(parent_inode->activateGP(minKey, pos)) {
+                parent_inode->gps[pos].key = minKey;
+                parent_inode->gps[pos].value = next_node->getId();
+                parent_inode->hdr.coveredNodes++;
+                log_entries.emplace_back(create_log_entry(parent_inode));
+                recordInodeRelation(next_node, parent_inode);
+                ret = 1;
+            } else {
+                //need to rebalance the parent node
+                ret = 2;
+            }
+        }
+        for(auto &entry: log_entries) {
+            ckpt_log->enq(entry.release());
+        }
+        ret = 1;
+    }
+    return ret;
+}
+
 int DramSkiplist::rebalanceIdx(Vnode &targetVnode, Key_t targetKey) 
 {
     // targetVnode is still locked with shared lock
@@ -605,4 +686,34 @@ int DramSkiplist::getLevel()
 {
     std::shared_lock<std::shared_mutex> lock(level_lock);
     return level;
+}
+
+dram_log_entry_t *DramSkiplist::create_log_entry(Inode *inode)
+{
+    auto entry = new dram_log_entry_t(inode->getId(), inode->hdr.coveredNodes, inode->hdr.last_index, inode->hdr.next, inode->hdr.level);
+    for(int i = 0; i <= inode->hdr.last_index; i++) {
+        entry->setKeyVal(i, inode->gps[i].key, inode->gps[i].value);
+    }
+    entry->setCoveredNodes(inode->hdr.coveredNodes);
+    entry->setLastIndex(inode->hdr.last_index);
+    return entry;
+}
+
+void DramSkiplist::recordInodeRelation(Inode* &child, Inode* &parent) {
+    std::lock_guard<std::mutex> lock(inodeRelationMutex);
+    childToParentMap[child] = parent;
+}
+
+Inode* DramSkiplist::getParentInode(Inode* &child) {
+    std::lock_guard<std::mutex> lock(inodeRelationMutex);
+    auto it = childToParentMap.find(child);
+    if (it != childToParentMap.end()) {
+        return it->second;
+    }
+    return nullptr; // 未找到
+}
+
+void DramSkiplist::removeInodeRelation(Inode* &child) {
+    std::lock_guard<std::mutex> lock(inodeRelationMutex);
+    childToParentMap.erase(child);
 }

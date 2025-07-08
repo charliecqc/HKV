@@ -16,6 +16,7 @@ const int MAX_LEVEL = 20;
 #define PERSISTENT_THRESHOLD 4096
 #define MAX_NODES 20000
 #define MAX_VALUE_NODES 10000000
+#define MAX_REBALANCE_THREADS 1
 
 #ifndef unlikely
 #define unlikely(x) __builtin_expect(!!(x), 0)
