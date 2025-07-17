@@ -47,10 +47,20 @@ public:
     void recordInodeRelation(Inode* &child, Inode* &parent);
     Inode *getParentInode(Inode* &child);
     void removeInodeRelation(Inode* &child);
-    int fastRebalance(Inode *inode, Inode *parent_inode);
+    int fastRebalance(Inode* &inode, Inode* &parent_inode);
     dram_log_entry_t *create_log_entry(Inode *inode);
     bool isTail(int16_t id) {
         return (id >= MAX_LEVEL && id < 2 * MAX_LEVEL);
+    }
+
+    bool increaseLevel()
+    {
+        std::unique_lock<std::shared_mutex> lock(level_lock);
+        if (level < MAX_LEVEL - 1) {
+            level++;
+            return true;
+        }
+        return false;
     }
 
     std::mutex inodeRelationMutex;

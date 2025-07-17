@@ -29,30 +29,53 @@ bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 bool ValueList::split(Vnode *curNode, Vnode *nextNode)
 {
     assert(nextNode->isEmpty());
-    Key_t midKey = curNode->getMidKey();
-    Key_t maxKey = curNode->getMaxKey();
-    if(midKey != maxKey) {
-        for(uint32_t i = 0; i < fanout; i++) {
-            Key_t key = curNode->records[i].key;
-            Val_t value = curNode->records[i].value;
-            if(key > midKey) {
-                nextNode->insert(key, value, &bf[nextNode->hdr.id]);
-                curNode->hdr.unsetBit(i);
-            }
-        }
-    }else {// all keys are the same
-        for(uint32_t i = 0; i < fanout / 2; i++) {
-            Key_t key = curNode->records[i].key;
-            Val_t value = curNode->records[i].value;
-            nextNode->insert(key, value, &bf[nextNode->hdr.id]);
-            curNode->hdr.unsetBit(i);
+
+    // 1. 收集所有有效记录
+    std::vector<entry> valid_records;
+    valid_records.reserve(fanout);
+
+    for (uint32_t i = 0; i < fanout; ++i) {
+        if (curNode->hdr.isBitSet(i)) { 
+            valid_records.push_back(curNode->records[i]);
         }
     }
+
+    if (valid_records.empty()) return true;
+
+    // 2. 排序以满足 maxKey <= minKey 的要求
+    std::sort(valid_records.begin(), valid_records.end(), 
+              [](const entry& a, const entry& b) { return a.key < b.key; });
+
+    // 3. 确定分裂点
+    size_t num_to_keep = valid_records.size() / 2;
+    size_t num_to_move = valid_records.size() - num_to_keep;
+
+    // 4. 清理并重新填充节点
+    curNode->clear();
+    nextNode->clear(); // 确保 nextNode 也是干净的
+
+    // 复制数据回 curNode
+    if (num_to_keep > 0) {
+        memcpy(curNode->records, valid_records.data(), num_to_keep * sizeof(entry));
+        curNode->rebuildMetadata(&bf[curNode->hdr.id], num_to_keep); // 【使用新函数】
+    }
+
+    // 复制数据到 nextNode
+    if (num_to_move > 0) {
+        memcpy(nextNode->records, &valid_records[num_to_keep], num_to_move * sizeof(entry));
+        nextNode->rebuildMetadata(&bf[nextNode->hdr.id], num_to_move); // 【使用新函数】
+    }
+
+    assert(curNode->getMaxKey() <= nextNode->getMinKey());
+
+    // 5. 更新链表指针
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
-    assert(curNode->getMaxKey() <= nextNode->getMinKey());
+
+    // 6. 验证和持久化
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
+
     return true;
 }
 

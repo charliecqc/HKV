@@ -32,17 +32,18 @@ class TandemIndex {
 
         bool insertWithoutIndex(Key_t key, Val_t value);
         bool insertWithNewInodes(Key_t key, Val_t value, Vnode* &vnode);
-        bool insertInVnodeChain(Vnode *vnode, BloomFilter *bloom, std::unique_lock<std::shared_mutex> &vnode_lock, Key_t key, Val_t value, Inode *parent_inode, int idx);
-        bool moveToNextVnodeForInsert(Vnode *&vnode, BloomFilter *&bloom, std::unique_lock<std::shared_mutex> &vnode_lock);
-        bool handleNodeFullAndSplit(Vnode *vnode, BloomFilter *bloom, 
+        bool insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock, Key_t key, Val_t value, Inode* &parent_inode, int idx);
+        bool moveToNextVnodeForInsert(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock);
+        bool handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom, 
                                          std::unique_lock<std::shared_mutex> &vnode_lock, 
-                                         Key_t key, Val_t value, Inode *target, Vnode* &newNode);
+                                         Key_t key, Val_t value, Inode* &target, Vnode* &newNode);
         bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates);
 
         //std::thread *workerThread;kk
-        std::thread *checkpointThread;
-        std::thread *logMergeThread;
-        std::thread *rebalanceThread[MAX_REBALANCE_THREADS];
+        std::thread *checkpointThread = nullptr;
+        std::thread *logMergeThread = nullptr;
+        std::thread *rebalanceThread[MAX_REBALANCE_THREADS] = {nullptr,};
+
 
         //void createWorkerThread();
         void createCheckpointThread();
@@ -72,4 +73,7 @@ class TandemIndex {
         // 重平衡队列相关成员
         std::queue<Inode *> rebalanceQueue;
         std::mutex rebalanceQueueMutex;
+        std::mutex printMutex;
+        std::unordered_set<Inode *> rebalancingInodes;
+        std::unordered_set<Inode *> nodesInRebalanceProcess;
 };

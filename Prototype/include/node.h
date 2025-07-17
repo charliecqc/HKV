@@ -215,7 +215,7 @@ public:
             pos = this->findInsertKeyPos(targetKey);
             if(pos <= hdr.last_index) 
                 this->shift(pos); // shift the contents
-            this->hdr.last_index = cur_index + 1;
+            //this->hdr.last_index = cur_index + 1;
             return true;
         }
     }
@@ -294,12 +294,19 @@ public:
         if(isHeader() || targetInode->isHeader()) {
             std::cout << " this is also weird" << std::endl;
         }
-        memmove(targetInode->gps, &gps[hdr.last_index / 2], sizeof(entry) * (hdr.last_index / 2 + 1));
-        int temp_index = hdr.last_index;
-        hdr.last_index = hdr.last_index / 2 - 1;
-        targetInode->hdr.last_index = temp_index / 2;
+        int total_entries = hdr.last_index + 1;
+        int first_half_count = total_entries / 2;
+        int second_half_count = total_entries - first_half_count;
+        int split_point_index = first_half_count;
+
+        memmove(targetInode->gps, &gps[split_point_index], sizeof(entry) * second_half_count);
+        
+        hdr.last_index = first_half_count - 1;
+        targetInode->hdr.last_index = second_half_count - 1;
+        
         hdr.coveredNodes = hdr.last_index + 1;
         targetInode->hdr.coveredNodes = targetInode->hdr.last_index + 1;
+        
         return true;
     }
 
@@ -565,6 +572,21 @@ public:
             return true;
         }
         return false;
+    }
+
+    void clear() {
+        hdr.bitmap = 0;
+    }
+
+    void rebuildMetadata(BloomFilter *bloom, int rebuild_count) {
+        bloom->clear();  // 清空布隆过滤器
+        hdr.bitmap = 0;
+        for (int32_t i = 0; i < rebuild_count; i++) {
+            if (records[i].key != std::numeric_limits<Key_t>::max()) {
+                hdr.setBit(i);
+                bloom->add(records[i].key, i);  // 添加到布隆过滤器
+            }
+        }
     }
 
    //Todo: Implement update and remove 

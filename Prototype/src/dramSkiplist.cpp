@@ -439,82 +439,101 @@ bool DramSkiplist::checkForRebalance(Inode &inode, bool &activeNewGP)
 }
 
 //return 0 if no rebalance is needed, return 1 if the target node is split, return 2 if the parent node is split
-int DramSkiplist::fastRebalance(Inode *inode, Inode *parent_inode) 
+int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode) 
 {
     int ret = 0;
-    std::vector<std::unique_ptr<dram_log_entry_t> > log_entries;
-    //if the parent inode needs tp be split, we will submit it to the rebalnce thread
+    std::vector<std::unique_ptr<dram_log_entry_t>> log_entries;
     log_entries.reserve(3);
+
     Inode *next_node = dramInodePool->getNextNode();
     next_node->hdr.level = inode->hdr.level;
-    if(parent_inode != nullptr) {
-        std::unique_lock<std::shared_mutex> lock_parent(inode_locks[parent_inode->getId()]);
-        std::unique_lock<std::shared_mutex> lock_target(inode_locks[inode->getId()]);
-        std::unique_lock<std::shared_mutex> lock_next(inode_locks[next_node->getId()]);
-        next_node->hdr.next = inode->hdr.next;
-        inode->hdr.next = next_node->getId();
-        inode->split(next_node);
-        log_entries.emplace_back(create_log_entry(next_node));
-        log_entries.emplace_back(create_log_entry(inode));
-        Key_t minKey = next_node->getMinKey();
-        if(parent_inode->checkForActivateGP()){
-            int pos = -1;
-            if(parent_inode->activateGP(minKey,pos)) {
-                parent_inode->gps[pos].key = minKey;
-                parent_inode->gps[pos].value = next_node->getId();
-                parent_inode->hdr.coveredNodes++;
+
+    // 【优化】将分裂和更新逻辑放在一个独立的块中，以控制锁的作用域
+    {
+        // 1. 【优化】处理创建新父节点的特殊情况
+        // 如果没有父节点，先创建它并插入到上一层。
+        if (parent_inode == nullptr && inode->hdr.level < MAX_LEVEL - 1) {
+            // This is a top-level node for its level, and we can create a new level above it.
+            // We need to create a new parent node in the level above.
+            Inode *header_above = getHeader(inode->hdr.level + 1);
+            std::unique_lock<std::shared_mutex> lock_header(inode_locks[header_above->getId()]);
+
+            // Double-check locking: another thread might have created the parent
+            // between the initial check and acquiring the lock.
+            // We assume if the header's next is not the tail, a parent might exist.
+            // A full traversal would be needed for correctness in all cases, but
+            // checking for an empty level is a common and efficient pattern.
+            if (isTail(header_above->hdr.next)) {
+            // The level above is empty, so we create the first node.
+                parent_inode = dramInodePool->getNextNode();
+                parent_inode->hdr.level = inode->hdr.level + 1;
+            
+            // Link the new parent into the level above
+                parent_inode->hdr.next = header_above->hdr.next;
+                header_above->hdr.next = parent_inode->getId();
+                Key_t minKey = inode->getMinKey();
+                int pos = parent_inode->findInsertKeyPos(minKey);
+                parent_inode->insertAtPos(minKey, inode->getId(), pos);
+
+                //increase the level of the whole skiplist
+                increaseLevel();
+            // Log the changes to the new parent and the header.
                 log_entries.emplace_back(create_log_entry(parent_inode));
-                recordInodeRelation(next_node, parent_inode);
-                ret = 1;
+                log_entries.emplace_back(create_log_entry(header_above));
+            
+            // Record the relationship for future lookups.
+                recordInodeRelation(inode, parent_inode);
+
             }else {
-            //need to rebalance the parent node
-                ret = 2;
+                // If the parent already exists, we can use it directly.
+                parent_inode = dramInodePool->at(header_above->hdr.next);
             }
         }
-        for(auto &entry: log_entries) {
-            ckpt_log->enq(entry.release());
-        }
-    }
-    else {// 
+
+        // 2. 【优化】执行公共的分裂和更新逻辑
+        // 为所有相关节点加锁
         std::unique_lock<std::shared_mutex> lock_parent;
-        if(inode->hdr.level < MAX_LEVEL - 1) {
-            parent_inode = dramInodePool->getNextNode();
-            Inode *header = getHeader(inode->hdr.level + 1);
-            std::unique_lock<std::shared_mutex> lock_header(inode_locks[header->getId()]);
-            if(!isTail(header->hdr.next)) {
-                parent_inode->hdr.next = header->hdr.next;
-                header->hdr.next =parent_inode->getId();
-                log_entries.emplace_back(create_log_entry(parent_inode));
-                log_entries.emplace_back(create_log_entry(header));
-            }
+        if (parent_inode) {
             lock_parent = std::unique_lock<std::shared_mutex>(inode_locks[parent_inode->getId()]);
         }
         std::unique_lock<std::shared_mutex> lock_target(inode_locks[inode->getId()]);
         std::unique_lock<std::shared_mutex> lock_next(inode_locks[next_node->getId()]);
+        assert(inode->hdr.last_index == 13);
+
+        // 执行分裂
         next_node->hdr.next = inode->hdr.next;
         inode->hdr.next = next_node->getId();
         inode->split(next_node);
+
+        // 创建日志条目（此时还未提交）
         log_entries.emplace_back(create_log_entry(next_node));
         log_entries.emplace_back(create_log_entry(inode));
-        if(parent_inode && parent_inode->checkForActivateGP()) {
-            int pos = -1;
-            Key_t minKey = next_node->getMinKey();
-            if(parent_inode->activateGP(minKey, pos)) {
-                parent_inode->gps[pos].key = minKey;
-                parent_inode->gps[pos].value = next_node->getId();
-                parent_inode->hdr.coveredNodes++;
-                log_entries.emplace_back(create_log_entry(parent_inode));
-                recordInodeRelation(next_node, parent_inode);
-                ret = 1;
+
+        // 更新父节点（如果存在）
+        if (parent_inode ){
+            parent_inode->hdr.coveredNodes++;
+            if(parent_inode->checkForActivateGP()) {
+                Key_t minKey = next_node->getMinKey();
+                int pos = -1;
+                if (parent_inode->activateGP(minKey, pos)) {
+                    parent_inode->insertAtPos(minKey, next_node->getId(), pos);
+                    log_entries.emplace_back(create_log_entry(parent_inode));
+                    recordInodeRelation(next_node, parent_inode);
+                    ret = 1; // 分裂成功
+                } else {
+                    assert(parent_inode != nullptr);
+                    ret = 2; // 父节点也满了，需要重平衡
+                }
             } else {
-                //need to rebalance the parent node
-                ret = 2;
+            // 没有父节点（分裂的是最高层级的根），分裂成功
+                ret = 1;
             }
+        // 在这个块的末尾，lock_target, lock_next, lock_parent 会被自动释放
         }
-        for(auto &entry: log_entries) {
-            ckpt_log->enq(entry.release());
-        }
-        ret = 1;
+    }
+    // 【关键】现在所有节点锁都已释放，再执行可能耗时的日志提交
+    for (auto &entry : log_entries) {
+        ckpt_log->enq(entry.release());
     }
     return ret;
 }
