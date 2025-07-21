@@ -24,7 +24,7 @@ SpinLock g_spinLock;
 #define LOG_SIZE 1UL*1024UL*1024UL*1024UL
 
 TandemIndex::TandemIndex() {
-    g_endTandem = false;
+    g_endTandem.store(false,std::memory_order_relaxed);
     valueList = new ValueList();
     pmemRecoveryArray = new PmemInodePool(sizeof(Inode), MAX_NODES);
     recoveryManager = new RecoveryManager(pmemRecoveryArray); 
@@ -52,25 +52,36 @@ TandemIndex::TandemIndex() {
 }
 
 TandemIndex::~TandemIndex() {
-   g_endTandem = true; 
-   
-   // 等待并清理 rebalanceThread 数组
-   for(int i = 0; i < MAX_REBALANCE_THREADS; i++) {
-       if(rebalanceThread[i] != nullptr) {
-           if(rebalanceThread[i]->joinable()) {
-               rebalanceThread[i]->join();
-           }
-           delete rebalanceThread[i];
-           rebalanceThread[i] = nullptr;
-       }
-   }
-   
-   if (logMergeThread->joinable()) {
-       logMergeThread->join();
-       delete logMergeThread;
-   }
-   
-   Inode *superNode = pmemRecoveryArray->at(MAX_NODES - 1);
+    // 1. 首先设置结束标志
+    g_endTandem.store(true, std::memory_order_relaxed);
+    
+    // 2. 等待所有重平衡线程完全结束
+    for(int i = 0; i < MAX_REBALANCE_THREADS; i++) {
+        if(rebalanceThread[i] != nullptr) {
+            if(rebalanceThread[i]->joinable()) {
+                rebalanceThread[i]->join();
+            }
+            delete rebalanceThread[i];
+            rebalanceThread[i] = nullptr;
+        }
+    }
+    
+    // 3. 在所有线程结束后，显式清理共享资源
+    {
+        std::lock_guard<std::mutex> lock(rebalanceQueueMutex);
+        rebalanceQueue = std::queue<Inode *>(); // 清空队列
+        rebalancingInodes.clear();              // 清空集合
+        nodesInRebalanceProcess.clear();        // 清空集合
+    }
+    
+    // 4. 等待日志合并线程结束
+    if (logMergeThread && logMergeThread->joinable()) {
+        logMergeThread->join();
+        delete logMergeThread;
+        logMergeThread = nullptr;
+    }
+    
+    Inode *superNode = pmemRecoveryArray->at(MAX_NODES - 1);
     if(superNode != nullptr) {
          superNode->hdr.last_index = dramInodePool->getCurrentIdx();
          superNode->hdr.level = mainIndex->getLevel();
@@ -82,6 +93,8 @@ TandemIndex::~TandemIndex() {
         metaVnode->hdr.next = valueList->pmemVnodePool->getCurrentIdx();
         PmemManager::flushToNVM(0, reinterpret_cast<char *>(metaVnode), sizeof(Vnode));
     }
+    cout << "vnode count: " << valueList->pmemVnodePool->getCurrentIdx() << endl;
+    mainIndex->printStats();
 }
 
 bool TandemIndex::insert(Key_t key, Val_t value)
@@ -322,22 +335,19 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *inode, Vnode *targetVnode, 
     }
     
     int pos = -1;
-    if (inode->activateGP(targetKey, pos)) {
+    if (inode->activateGP(targetKey, targetVnode->getId(), pos)) {
         // 成功激活GP
         //bool link_success = mainIndex->linkVnodeToInode(*inode, pos, *targetVnode);
-        bool link_success = inode->insertAtPos(targetKey, targetVnode->getId(), pos);
-        if (link_success) {
             //inode->gps[pos].key = targetKey;
-            target_lock.unlock(); // 释放targetVnode的锁
-            dram_log_entry_t *entry = new dram_log_entry_t(inode->getId(), inode->hdr.coveredNodes, inode->hdr.last_index, inode->hdr.next, inode->hdr.level);
-            for (int i = 0; i <= inode->hdr.last_index; i++) {
-                entry->setKeyVal(i, inode->gps[i].key, inode->gps[i].value);
-            }
-            entry->setCoveredNodes(inode->hdr.coveredNodes);
-            entry->setLastIndex(inode->hdr.last_index);
-            ckptLog->enq(entry);
+        target_lock.unlock(); // 释放targetVnode的锁
+        dram_log_entry_t *entry = new dram_log_entry_t(inode->getId(), inode->hdr.coveredNodes, inode->hdr.last_index, inode->hdr.next, inode->hdr.level);
+        for (int i = 0; i <= inode->hdr.last_index; i++) {
+            entry->setKeyVal(i, inode->gps[i].key, inode->gps[i].value);
         }
-        return link_success;
+        entry->setCoveredNodes(inode->hdr.coveredNodes);
+        entry->setLastIndex(inode->hdr.last_index);
+        ckptLog->enq(entry);
+        return true;
     } else {
         // 获取target_inode的父节点
         // 记录从根到目标节点的路径上所有父子关系
@@ -467,7 +477,7 @@ void TandemIndex::logMergeThreadExec(int id)
         }
         g_spinLock.unlock();
     }
-    while(!g_endTandem) {
+    while(!g_endTandem.load(std::memory_order_relaxed)) {
         usleep(200);
         lmt.logMergeOperation();
     }
@@ -505,13 +515,13 @@ void TandemIndex::rebalanceThreadExec(int id)
     }
     
     // main loop: process rebalance queue
-    while(!g_endTandem) {
+    while(!g_endTandem.load(std::memory_order_relaxed)) {
         Inode* inode = nullptr;
         
         // 尝试从队列中获取重平衡任务，并将其标记为正在处理
         if(getFromRebalanceQueue(inode)) {
             // 获取重平衡锁
-            std::unique_lock<std::shared_mutex> rebalance_lock(mainIndex->rebalance_lock);
+           // std::unique_lock<std::shared_mutex> rebalance_lock(mainIndex->rebalance_lock);
             
             Inode* parent_inode = mainIndex->getParentInode(inode);
             if(parent_inode != nullptr) {
@@ -526,7 +536,6 @@ void TandemIndex::rebalanceThreadExec(int id)
             
             // TODO: 实现具体的 Inode 重平衡逻辑
             // int ret = mainIndex->rebalanceInode(*inode);
-            rebalance_lock.unlock();
 
             // 处理完成，移除标记
             {
@@ -635,14 +644,8 @@ void TandemIndex::update(Key_t key, Val_t value)
                 std::shared_lock<std::shared_mutex> lock_target(target_bloom->vnode_mtx);
                 targetKey = targetVnode->getMinKey();
             }
-            if(inode->activateGP(targetKey, pos)) {
+            if(inode->activateGP(targetKey, targetVnode->getId(), pos)) {
                 //bool ret = mainIndex->linkVnodeToInode(*inode, pos, *targetVnode);
-                bool ret = inode->insertAtPos(targetKey, targetVnode->getId(), pos);
-                if(!ret) {
-                    std::cout << "Failed to link the vnode to the inode." << std::endl;
-                    return;
-                }
-                //inode->gps[pos].key = targetKey;
                 dram_log_entry_t *entry = new dram_log_entry_t(inode->getId(),inode->hdr.coveredNodes, inode->hdr.last_index, inode->hdr.next, inode->hdr.level);
                 for(int i = 0; i <= inode->hdr.last_index; i++) {
                     entry->setKeyVal(i, inode->gps[i].key, inode->gps[i].value);

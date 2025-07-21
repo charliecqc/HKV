@@ -62,6 +62,7 @@ public:
         }
         return false;
     }
+    void printStats();
 
     std::mutex inodeRelationMutex;
     std::unordered_map<Inode *, Inode*> childToParentMap; // map to store child-parent relationships for rebalancing

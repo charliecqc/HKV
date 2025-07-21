@@ -205,7 +205,7 @@ public:
         return hdr.last_index == fanout/2 - 1;
     }
 
-    bool activateGP(Key_t targetKey, int &pos)
+    bool activateGP(Key_t targetKey, Val_t value, int &pos)
     {
         //check if there is enough space to insert the new GP
         int16_t cur_index = this->hdr.last_index;  
@@ -213,8 +213,11 @@ public:
             return false;
         }else {
             pos = this->findInsertKeyPos(targetKey);
-            if(pos <= hdr.last_index) 
-                this->shift(pos); // shift the contents
+            if(pos < 0 || pos > cur_index + 1) {
+                std::cout << "Invalid position for inserting GP: " << pos << std::endl;
+                return false;
+            }
+            this->insertAtPos(targetKey, value, pos);
             //this->hdr.last_index = cur_index + 1;
             return true;
         }
@@ -306,6 +309,7 @@ public:
         
         hdr.coveredNodes = hdr.last_index + 1;
         targetInode->hdr.coveredNodes = targetInode->hdr.last_index + 1;
+        assert(this->getMaxKey() <= targetInode->getMinKey());
         
         return true;
     }
@@ -314,7 +318,9 @@ public:
         if(isHeader()) {
             std::cout << "this is weird" << std::endl;
         }
-        shift(pos);
+        if(pos <= hdr.last_index) {
+            shift(pos);
+        }
         hdr.last_index++;
         gps[pos].key = key;
         gps[pos].value = value;

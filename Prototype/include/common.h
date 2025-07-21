@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cassert>
 #pragma once
 //typedef int32_t Key_t; // 8 bytes
 //typedef int32_t Val_t; // 8 bytes

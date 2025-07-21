@@ -307,6 +307,7 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode *current, int currentHighe
                 Inode *next = dramInodePool->at(current->hdr.next);
                 std::shared_lock<std::shared_mutex> next_horizental_lock(inode_locks[next->getId()]);
                 if(!next->isTail() && key >= next->getMinKey()) {
+                    assert(current->getMaxKey() <= next->getMinKey());
                     current = next;
                     current_lock.unlock();
                     current_lock = std::move(next_horizental_lock);
@@ -446,6 +447,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode)
     log_entries.reserve(3);
 
     Inode *next_node = dramInodePool->getNextNode();
+    Inode *next_parent_inode = nullptr;
     next_node->hdr.level = inode->hdr.level;
 
     // 【优化】将分裂和更新逻辑放在一个独立的块中，以控制锁的作用域
@@ -493,6 +495,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode)
         // 2. 【优化】执行公共的分裂和更新逻辑
         // 为所有相关节点加锁
         std::unique_lock<std::shared_mutex> lock_parent;
+        std::unique_lock<std::shared_mutex> lock_parent_next;
         if (parent_inode) {
             lock_parent = std::unique_lock<std::shared_mutex>(inode_locks[parent_inode->getId()]);
         }
@@ -504,19 +507,37 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode)
         next_node->hdr.next = inode->hdr.next;
         inode->hdr.next = next_node->getId();
         inode->split(next_node);
-
-        // 创建日志条目（此时还未提交）
         log_entries.emplace_back(create_log_entry(next_node));
-        log_entries.emplace_back(create_log_entry(inode));
+        Key_t minKey = next_node->getMinKey();
+        lock_next.unlock(); // 释放 next_node 的锁
+        lock_target.unlock(); // 释放 inode 的锁
+
+        while(!isTail(parent_inode->hdr.next)) {
+            next_parent_inode = dramInodePool->at(parent_inode->hdr.next);
+            std::unique_lock<std::shared_mutex> lock_next_parent(inode_locks[next_parent_inode->getId()]);
+            if(minKey > parent_inode->getMaxKey()) {
+                parent_inode = next_parent_inode;
+                lock_parent.unlock();
+                lock_parent = std::move(lock_next_parent);
+            }
+            else {
+                break;
+            }
+        }
+        // this is because next_node is already added in the chain
+        parent_inode->hdr.coveredNodes++;
+
+        std::unique_lock<std::shared_mutex> lock_target_again(inode_locks[inode->getId()]);
+        std::unique_lock<std::shared_mutex> lock_next_again(inode_locks[next_node->getId()]);
+        if(minKey != next_node->getMinKey()) { // other thrads might have updated the minKey
+            return 0;
+        }
 
         // 更新父节点（如果存在）
         if (parent_inode ){
-            parent_inode->hdr.coveredNodes++;
             if(parent_inode->checkForActivateGP()) {
-                Key_t minKey = next_node->getMinKey();
                 int pos = -1;
-                if (parent_inode->activateGP(minKey, pos)) {
-                    parent_inode->insertAtPos(minKey, next_node->getId(), pos);
+                if (parent_inode->activateGP(minKey, next_node->getId(), pos)) {
                     log_entries.emplace_back(create_log_entry(parent_inode));
                     recordInodeRelation(next_node, parent_inode);
                     ret = 1; // 分裂成功
@@ -735,4 +756,17 @@ Inode* DramSkiplist::getParentInode(Inode* &child) {
 void DramSkiplist::removeInodeRelation(Inode* &child) {
     std::lock_guard<std::mutex> lock(inodeRelationMutex);
     childToParentMap.erase(child);
+}
+
+void DramSkiplist::printStats()
+{
+    for (int i = 0; i < level; ++i) {
+        Inode* current = header[i];
+        int count = 0;
+        while (current->hdr.next != tail[i]->getId()) {
+            current = dramInodePool->at(current->hdr.next);
+            count++;
+        }
+        std::cout << "Level " << i << " has " << count << " inodes." << std::endl;
+    }
 }
