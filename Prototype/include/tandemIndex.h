@@ -32,12 +32,12 @@ class TandemIndex {
 
         bool insertWithoutIndex(Key_t key, Val_t value);
         bool insertWithNewInodes(Key_t key, Val_t value, Vnode* &vnode);
-        bool insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock, Key_t key, Val_t value, Inode* &parent_inode, int idx);
+        bool insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock, Key_t key, Val_t value, int idx);
         bool moveToNextVnodeForInsert(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock);
         bool handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom, 
                                          std::unique_lock<std::shared_mutex> &vnode_lock, 
-                                         Key_t key, Val_t value, Inode* &target, Vnode* &newNode);
-        bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates);
+                                         Key_t key, Val_t value, Vnode* &newNode);
+        bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &idx, int &coveredNodes);
 
         //std::thread *workerThread;kk
         std::thread *checkpointThread = nullptr;

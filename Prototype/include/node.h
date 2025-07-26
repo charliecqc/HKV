@@ -225,7 +225,13 @@ public:
 
     bool checkForActivateGP()
     {
-        if(this->hdr.coveredNodes > SEARCH_STABLITY_COEFFICIENT * (this->hdr.last_index + 1)) {
+        int current_level = this->hdr.level;
+        double coefficient = (current_level < MAX_LEVEL) ? 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+        if(this->hdr.coveredNodes == 0)
+            return true;
+        if(this->hdr.coveredNodes > coefficient * (this->hdr.last_index + 1)) {
             return true;
         }
         return false;
@@ -321,10 +327,10 @@ public:
         if(pos <= hdr.last_index) {
             shift(pos);
         }
-        hdr.last_index++;
         gps[pos].key = key;
         gps[pos].value = value;
         hdr.coveredNodes++;
+        hdr.last_index++;
         return true;
     }
 

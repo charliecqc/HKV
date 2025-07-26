@@ -131,6 +131,14 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 
     // target should not be nullptr, because the smallest key is always in the header
     assert(target_inode != nullptr);
+    
+    Inode *temp_inode = new Inode(*target_inode); // create a copy of the target inode
+    Inode *next_temp_inode = new Inode (*dramInodePool->at(temp_inode->hdr.next));
+    if(temp_inode->getMaxKey() > next_temp_inode->getMinKey()) {
+        cout << "id: " << target_inode->getId() << " idx: " << idx << " coveredNodes: " << target_inode->hdr.coveredNodes <<" last_index: " << target_inode->hdr.last_index << " min: "<< target_inode->getMinKey() << " max: " << target_inode->getMaxKey()<< endl;
+        cout << "next id: " << next_temp_inode->getId() << " coveredNodes: " << next_temp_inode->hdr.coveredNodes <<" last_index: " << next_temp_inode->hdr.last_index << " min: " <<next_temp_inode->getMinKey() << " max: " << next_temp_inode->getMaxKey()<< endl;
+    }
+    
     int vnode_id = target_inode->gps[idx].value;
     target_vnode = valueList->pmemVnodePool->at(vnode_id);
     if(target_vnode == nullptr) {
@@ -139,24 +147,27 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     }
     BloomFilter *bloom = &valueList->bf[target_vnode->getId()];
     std::unique_lock<std::shared_mutex> vnode_lock(bloom->vnode_mtx);
-    header_lock.unlock();
 
+    int current_idx = target_inode->hdr.last_index;
+    int coveredNodes = target_inode->hdr.coveredNodes;
+
+    header_lock.unlock();
     //target_vnode: start of the target vnode chain. 
     //vnode_lock: lock for the target vnode's bloom filter, will be changed inside
-    ret = insertInVnodeChain(target_vnode, bloom, vnode_lock, key, value, target_inode, idx);
+    ret = insertInVnodeChain(target_vnode, bloom, vnode_lock, key, value, idx);
     if(!ret) {
         // ret == false ==> vnode is full, need to split
         Vnode *newVnode = nullptr;
-#ifdef DBG
+#if 0
         {
             std::lock_guard<std::mutex> lock(printMutex);
             cout << "Vnode is full, need to split. Current target_vnode: " << target_vnode->hdr.id << " key: " << key << " tid: " << syscall(SYS_gettid) << endl;
         }
 #endif
-        ret = handleNodeFullAndSplit(target_vnode, bloom, vnode_lock, key, value, target_inode, newVnode);
+        ret = handleNodeFullAndSplit(target_vnode, bloom, vnode_lock, key, value, newVnode);
         if(ret) {
             // update the parent inode after split
-            ret = updateParentInodeAfterSplit(target_inode, newVnode, updates);
+            ret = updateParentInodeAfterSplit(target_inode, newVnode, updates, current_idx, coveredNodes);
             if(!ret) {
                 std::cout << "Failed to update the parent inode after split." << std::endl;
                 return false;
@@ -199,7 +210,7 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
     return true;
 }
 
-bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock, Key_t key, Val_t value, Inode* &parent_inode, int idx)
+bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock, Key_t key, Val_t value, int idx)
 {
     // To verify the lock is held, you can use an assertion.
     // This will cause the program to terminate if the lock is not owned
@@ -273,10 +284,10 @@ bool TandemIndex::moveToNextVnodeForInsert(Vnode *&vnode, BloomFilter *&bloom, s
 
 bool TandemIndex::handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom, 
                                          std::unique_lock<std::shared_mutex> &vnode_lock, 
-                                         Key_t key, Val_t value, Inode* &parent_inode, Vnode* &next_node)
+                                         Key_t key, Val_t value, Vnode* &next_node)
 {
     //vnode_lock: obtained, lock of vnode.
-     //get new vnode from the pool
+    //get new vnode from the pool
     Vnode* nextVnode = valueList->pmemVnodePool->getNextNode();
     if (!nextVnode) {
         return false;
@@ -315,30 +326,35 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom,
     return true;
 }
 
-bool TandemIndex::updateParentInodeAfterSplit(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates)
+bool TandemIndex::updateParentInodeAfterSplit(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &idx, int &coveredNodes)
 {
-    const int inode_id = inode->getId();
-    std::unique_lock<std::shared_mutex> inode_wlock(mainIndex->inode_locks[inode_id]);
+    std::unique_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[inode->getId()]);
+    if(inode->hdr.last_index != idx) {
+#if 0
+        std::cout << "Inode last_index or coveredNodes mismatch after split." << " id: "  << inode->getId() << std::endl;
+#endif
+        return true;
+    }
 
     BloomFilter* target_bloom = &valueList->bf[targetVnode->getId()];
     std::shared_lock<std::shared_mutex> target_lock(target_bloom->vnode_mtx);
-
     Key_t targetKey = targetVnode->getMinKey();
-
-    
     // 更新覆盖节点数
-    inode->hdr.coveredNodes++;
     
     // 检查是否需要激活GP
     if (!inode->checkForActivateGP()) {
+        inode->hdr.coveredNodes++;
         return true; // 不需要激活，插入完成
     }
     
     int pos = -1;
     if (inode->activateGP(targetKey, targetVnode->getId(), pos)) {
-        // 成功激活GP
-        //bool link_success = mainIndex->linkVnodeToInode(*inode, pos, *targetVnode);
-            //inode->gps[pos].key = targetKey;
+#if 1
+        if(!mainIndex->isTail(inode->hdr.next)) {
+            Inode *next = dramInodePool->at(inode->hdr.next);
+            assert(inode->getMaxKey() <= next->getMinKey());
+        }
+#endif
         target_lock.unlock(); // 释放targetVnode的锁
         dram_log_entry_t *entry = new dram_log_entry_t(inode->getId(), inode->hdr.coveredNodes, inode->hdr.last_index, inode->hdr.next, inode->hdr.level);
         for (int i = 0; i <= inode->hdr.last_index; i++) {
@@ -355,7 +371,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *inode, Vnode *targetVnode, 
             mainIndex->recordInodeRelation(updates[i], updates[i-1]);
         }
         // 将需要重平衡的节点及其父节点信息添加到重平衡任务中
-        assert(inode->hdr.last_index ==13);
+        assert(inode->hdr.last_index == fanout / 2 -1);
         addToRebalanceQueue(inode);
         return true;
     }
@@ -530,7 +546,7 @@ void TandemIndex::rebalanceThreadExec(int id)
             assert(inode->hdr.last_index >= 0);
             int ret = mainIndex->fastRebalance(inode, parent_inode);
             if(ret == 2) {
-                assert(parent_inode->hdr.last_index == 13);
+                assert(parent_inode->hdr.last_index == fanout / 2 - 1);
                 addToRebalanceQueue(parent_inode); // 如果需要重平衡，重新加入队列
             }
             
@@ -695,45 +711,7 @@ void TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
     }
 }
 
-
-
 #if 0
-bool TandemIndex::insertWithoutIndex(Key_t key, Val_t value)
-{
-    // 与lookup中处理null情况的逻辑保持一致
-    Vnode *headVnode = valueList->getHeader();
-    if (!headVnode) {
-        return false;
-    }
-    
-    BloomFilter *head_bloom = &valueList->bf[headVnode->getId()];
-    std::shared_lock<std::shared_mutex> head_lock(head_bloom->vnode_mtx);
-    
-    Vnode *targetVnode = nullptr;
-    
-    // 检查第一个实际节点
-    if (headVnode->hdr.next != -1) {
-        targetVnode = valueList->pmemVnodePool->at(headVnode->hdr.next);
-        if (targetVnode && !targetVnode->isFull()) {
-            BloomFilter* target_bloom = &valueList->bf[targetVnode->getId()];
-            std::unique_lock<std::shared_mutex> target_lock(target_bloom->vnode_mtx);
-            
-            Key_t old_min_key = targetVnode->getMinKey();
-            
-            if (targetVnode->insert(key, value, target_bloom)) {
-                // 如果改变了最小键，更新主索引
-                Key_t new_min_key = targetVnode->getMinKey();
-                if (new_min_key != old_min_key) {
-                    return mainIndex->update(old_min_key, new_min_key, value);
-                }
-                return true;
-            }
-        }
-    }
-}
-
-
-
 void TandemIndex::remove(int key)
 {
     mainIndex->remove(key);
@@ -746,4 +724,5 @@ void TandemIndex::print()
     mainIndex->print();
 }
 #endif
+
 

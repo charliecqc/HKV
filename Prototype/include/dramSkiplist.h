@@ -28,6 +28,7 @@ public:
     // return the index in gps of the index node that poionts to the vnode
     Inode *lookup(Key_t key, int &idx);
     Inode *lookup(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx);
+    Inode *lookupForInsert(Key_t key, Inode *current, int currentHighestLevelIndex, std::unique_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates);
     Inode *lookupForInsert(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates);
     Inode *getHeader();
     Inode *getHeader(int level);
@@ -47,7 +48,9 @@ public:
     void recordInodeRelation(Inode* &child, Inode* &parent);
     Inode *getParentInode(Inode* &child);
     void removeInodeRelation(Inode* &child);
+    void acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<std::unique_lock<std::shared_mutex>>& locks);
     int fastRebalance(Inode* &inode, Inode* &parent_inode);
+    int fastRebalance1(Inode* &inode, Inode* &parent_inode);
     dram_log_entry_t *create_log_entry(Inode *inode);
     bool isTail(int16_t id) {
         return (id >= MAX_LEVEL && id < 2 * MAX_LEVEL);
