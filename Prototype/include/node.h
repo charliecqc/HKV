@@ -129,7 +129,7 @@ public:
 class header{
     public:
         int16_t id; //2 bytes
-        int16_t coveredNodes; // 1 byte
+        // int16_t coveredNodes; // 1 byte  <-- 移除这个全局计数器
         int16_t level; //1 byte
         int16_t next; //2 bytes 
         int16_t last_index; //2 bytes
@@ -137,7 +137,7 @@ class header{
     public:
         header() {
             id = 0;
-            coveredNodes = 0;
+            // coveredNodes = 0; // 移除
             level = 0;
             next = 0;
             last_index = -1;
@@ -150,12 +150,28 @@ class entry
 public:
     Key_t key; // 8bytes
     Val_t value;   // 8bytes
+    int16_t covered_nodes; // 2 bytes, 记录此GP覆盖的子节点数
+
     entry() {
         key = std::numeric_limits<Key_t>::max();
         value = std::numeric_limits<Val_t>::max();
+        covered_nodes = 0; // 初始化为0
     }
     friend class Inode;
     friend class Vnode;
+};
+
+class vnode_entry
+{
+public:
+    Key_t key; // 8bytes
+    Val_t value;   // 8bytes
+    vnode_entry() {
+        key = std::numeric_limits<Key_t>::max();
+        value = std::numeric_limits<Val_t>::max();
+    }
+    friend class Vnode;
+    friend class Inode;
 };
 
 class Inode
@@ -176,7 +192,6 @@ public:
         hdr.id = id;
         hdr.next = next;
         hdr.level = level;
-        hdr.coveredNodes = 0;
         for(int32_t i = 0; i < fanout/2; i++) {
             gps[i].key = std::numeric_limits<Key_t>::max();
             gps[i].value = std::numeric_limits<Val_t>::max();
@@ -205,7 +220,7 @@ public:
         return hdr.last_index == fanout/2 - 1;
     }
 
-    bool activateGP(Key_t targetKey, Val_t value, int &pos)
+    bool activateGP(Key_t targetKey, Val_t value, int &pos, int16_t initial_covered_nodes)
     {
         //check if there is enough space to insert the new GP
         int16_t cur_index = this->hdr.last_index;  
@@ -217,14 +232,15 @@ public:
                 std::cout << "Invalid position for inserting GP: " << pos << std::endl;
                 return false;
             }
-            this->insertAtPos(targetKey, value, pos);
-            //this->hdr.last_index = cur_index + 1;
+            // **将 initial_covered_nodes 传递下去**
+            this->insertAtPos(targetKey, value, pos, initial_covered_nodes);
             return true;
         }
     }
 
-    bool checkForActivateGP()
+    bool checkForActivateNextGP(int idx)
     {
+#if 0
         int current_level = this->hdr.level;
         double coefficient = (current_level < MAX_LEVEL) ? 
                              SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
@@ -235,6 +251,8 @@ public:
             return true;
         }
         return false;
+#endif
+        return isUnbalanced(idx);
     }
 
     int findInsertKeyPos(Key_t key)
@@ -308,19 +326,21 @@ public:
         int second_half_count = total_entries - first_half_count;
         int split_point_index = first_half_count;
 
+        // memmove 会将整个 entry 结构体（包括 key, value, 和 covered_nodes）一起移动
+        // 负载信息被正确地分区到新的节点，无需额外操作
         memmove(targetInode->gps, &gps[split_point_index], sizeof(entry) * second_half_count);
         
+        // 更新各自的 last_index
         hdr.last_index = first_half_count - 1;
         targetInode->hdr.last_index = second_half_count - 1;
         
-        hdr.coveredNodes = hdr.last_index + 1;
-        targetInode->hdr.coveredNodes = targetInode->hdr.last_index + 1;
         assert(this->getMaxKey() <= targetInode->getMinKey());
         
         return true;
     }
 
-    bool insertAtPos(Key_t key, Val_t value, int pos) {
+    // **修改签名，增加 initial_covered_nodes 参数**
+    bool insertAtPos(Key_t key, Val_t value, int pos, int16_t initial_covered_nodes) {
         if(isHeader()) {
             std::cout << "this is weird" << std::endl;
         }
@@ -329,7 +349,12 @@ public:
         }
         gps[pos].key = key;
         gps[pos].value = value;
-        hdr.coveredNodes++;
+        // **为新GP的 covered_nodes 赋初始值**
+        gps[pos].covered_nodes = initial_covered_nodes;
+        
+        // **移除对旧全局计数器的操作**
+        // hdr.coveredNodes++; 
+
         hdr.last_index++;
         return true;
     }
@@ -340,6 +365,35 @@ public:
         }
         gps[pos].key = newKey;
     }
+
+    bool isUnbalanced() {
+        int current_level = this->hdr.level;
+        double coefficient = (current_level < MAX_LEVEL) ? 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+        
+        // 检查是否有任何一个GP的负载过高
+        for (int i = 0; i <= this->hdr.last_index; ++i) {
+            // 每个GP至少应该覆盖1个节点，如果它覆盖的节点数远超这个基数，则认为不平衡
+            if (this->gps[i].covered_nodes > coefficient) {
+                 return true;
+            }
+        }
+        return false;
+    }
+
+    bool isUnbalanced(int idx) {
+        int current_level = this->hdr.level;
+        double coefficient = (current_level < MAX_LEVEL) ? 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+        
+        if (this->gps[idx].covered_nodes > coefficient) {
+            return true;
+        }
+        return false;
+    }
+
 };
 
 class vnodeHeader {
@@ -373,7 +427,7 @@ class Vnode
 {
 public:
     vnodeHeader hdr;
-    entry records[fanout];
+    vnode_entry records[fanout];
     //BloomFilter bloom;
     Vnode(int id, int next = 0)
     {

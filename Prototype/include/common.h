@@ -14,10 +14,10 @@ const int MAX_LEVEL = 20;
 // 建议：高层级系数小（更敏感），低层级系数大（更宽容）
 const double SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL] = {
     // Level 0-1: 较大的值，减少底层不必要的分裂
-    2.5, 2.0, 
+    3.0, 3.0, 
     // Level 2-4: 逐渐减小
     1.8, 1.5, 1.5,
-    // Level 5+: 较小的值，保持顶层稀疏和高效
+    //mLevel 5+: 较小的值，保持顶层稀疏和高效
     1.5, 1.5, 1.5, 1.5, 1.5, 
     1.2, 1.2, 1.2, 1.2, 1.2,
     1.2, 1.2, 1.2, 1.2, 1.2
@@ -29,7 +29,7 @@ const double SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL] = {
 #define RECLAIM_THRESHOLD 40000
 #define RECLAIM_RETRY_THRESHOLD 50000
 #define PERSISTENT_THRESHOLD 4096
-#define MAX_NODES 20000
+#define MAX_NODES 30000
 #define MAX_VALUE_NODES 10000000
 #define MAX_REBALANCE_THREADS 1
 

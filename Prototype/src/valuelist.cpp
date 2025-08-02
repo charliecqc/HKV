@@ -31,7 +31,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     assert(nextNode->isEmpty());
 
     // 1. 收集所有有效记录
-    std::vector<entry> valid_records;
+    std::vector<vnode_entry> valid_records;
     valid_records.reserve(fanout);
 
     for (uint32_t i = 0; i < fanout; ++i) {
@@ -44,7 +44,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
 
     // 2. 排序以满足 maxKey <= minKey 的要求
     std::sort(valid_records.begin(), valid_records.end(), 
-              [](const entry& a, const entry& b) { return a.key < b.key; });
+              [](const vnode_entry& a, const vnode_entry& b) { return a.key < b.key; });
 
     // 3. 确定分裂点
     size_t num_to_keep = valid_records.size() / 2;

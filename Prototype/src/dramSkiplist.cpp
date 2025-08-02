@@ -40,15 +40,16 @@ DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool, ValueList *val
         for(int i = 0; i < MAX_LEVEL; i++) {
             header[i]->hdr.next = tail[i]->getId();
 
-            dram_log_entry_t *header_entry = new dram_log_entry_t(header[i]->getId(), header[i]->hdr.coveredNodes, header[i]->hdr.last_index,header[i]->hdr.next, header[i]->hdr.level);
-            header_entry->setKeyVal(0, header[i]->gps[0].key, header[i]->gps[0].value);
-            header_entry->setCoveredNodes(header[i]->hdr.coveredNodes);
-            header_entry->setLastIndex(header[i]->hdr.last_index);
+            // **修改：使用新的构造函数，并正确设置初始 covered_nodes**
+            // header 的 GP 指向下一层，初始覆盖数为1（或0，如果它是最底层）
+            header[i]->gps[0].covered_nodes = (i > 0) ? 1 : 0;
+            dram_log_entry_t *header_entry = new dram_log_entry_t(header[i]->getId(), header[i]->hdr.last_index, header[i]->hdr.next, header[i]->hdr.level);
+            header_entry->setKeyVal(0, header[i]->gps[0].key, header[i]->gps[0].value, header[i]->gps[0].covered_nodes);
 
-            dram_log_entry_t *tail_entry = new dram_log_entry_t(tail[i]->getId(), tail[i]->hdr.coveredNodes,tail[i]->hdr.last_index,tail[i]->hdr.next, tail[i]->hdr.level);
-            tail_entry->setKeyVal(0, tail[i]->gps[0].key, tail[i]->gps[0].value);
-            tail_entry->setCoveredNodes(tail[i]->hdr.coveredNodes);
-            tail_entry->setLastIndex(tail[i]->hdr.last_index);
+            // tail 的 GP 不覆盖任何东西
+            tail[i]->gps[0].covered_nodes = 0;
+            dram_log_entry_t *tail_entry = new dram_log_entry_t(tail[i]->getId(), tail[i]->hdr.last_index, tail[i]->hdr.next, tail[i]->hdr.level);
+            tail_entry->setKeyVal(0, tail[i]->gps[0].key, tail[i]->gps[0].value, tail[i]->gps[0].covered_nodes);
 
             ckpt_log->enq(tail_entry);
             ckpt_log->enq(header_entry);
@@ -142,16 +143,14 @@ bool DramSkiplist::add(Vnode *targetVnode)
         next->hdr.level = current_update->hdr.level;
 
         if(i == 0) {
-            next->insertAtPos(targetKey, targetVnode->getId(), 0);
+            next->insertAtPos(targetKey, targetVnode->getId(), 0, 1);
         } else {
-            next->insertAtPos(targetKey, new_nodes[i-1]->getId(), 0);
+            next->insertAtPos(targetKey, new_nodes[i-1]->getId(), 0, 1);
         }
 
-        dram_log_entry_t *next_entry = new dram_log_entry_t(next->getId(), next->hdr.coveredNodes, next->hdr.last_index, next->hdr.next, next->hdr.level);
-        dram_log_entry_t *current_update_entry = new dram_log_entry_t(current_update->getId(), current_update->hdr.coveredNodes, current_update->hdr.last_index, current_update->hdr.next, current_update->hdr.level);
-        next_entry->setKeyVal(0, next->gps[0].key, next->gps[0].value);
-        next_entry->setCoveredNodes(next->hdr.coveredNodes);
-        next_entry->setLastIndex(next->hdr.last_index);
+        // **修改：使用 create_log_entry 辅助函数来创建正确的日志**
+        dram_log_entry_t *next_entry = create_log_entry(next);
+        dram_log_entry_t *current_update_entry = create_log_entry(current_update);
 
         ckpt_log->enq(next_entry);
         ckpt_log->enq(current_update_entry);
@@ -192,9 +191,9 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
             std::unique_lock<std::shared_mutex> lock3(inode_locks[target->getId()]);
             int idx = target->findKeyPos(oldKey);
             if(target->gps[idx].key == oldKey) {
-                dram_log_entry_t *entry = new dram_log_entry_t(target->getId(),target->hdr.coveredNodes, target->hdr.last_index, target->hdr.next, target->hdr.level);
+                // **修改：在节点更新后，使用辅助函数创建日志**
                 target->updateKeyVal(newKey,idx);
-                entry->setKeyVal(idx, target->gps[idx].key, target->gps[idx].value);
+                dram_log_entry_t *entry = create_log_entry(target);
                 ckpt_log->enq(entry);
             }   
             if(i != 0) {
@@ -477,12 +476,6 @@ Inode *DramSkiplist::getHeader(int level)
     return header[level];
 }
 
-bool DramSkiplist::linkVnodeToInode(Inode &inode, int idx, Vnode &vnode)
-{
-    inode.gps[idx].value = vnode.getId();
-    return true;
-}
-
 //return 0 if no rebalance is needed, return 1 if the target node is split, return 2 if the parent node is split
 int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint) 
 {
@@ -585,7 +578,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                     verified_parent->hdr.level = inode->hdr.level + 1;
                     verified_parent->hdr.next = header_above->hdr.next;
                     header_above->hdr.next = verified_parent->getId();
-                    verified_parent->insertAtPos(inode->getMinKey(), inode->getId(), 0);
+                    verified_parent->insertAtPos(inode->getMinKey(), inode->getId(), 0, 1);
 
                     increaseLevel();
 
@@ -641,23 +634,37 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
 #ifdef RB_DEBUG
                     cout << "Parent chain changed beyond locked scope. Retrying..." << endl;
 #endif
-                    continue; // 重试整个 fastRebalance 操作
+                    continue; 
                 }
 
                 // 在已找到的、正确的父节点上插入对 next_node 的引用
-                if (verified_parent->checkForActivateGP()) {
-                    int pos = -1;
-                    if (verified_parent->activateGP(new_min_key, next_node->getId(), pos)) {
-                        log_entries.emplace_back(create_log_entry(verified_parent));
+                // **核心修改：在这里调用 isUnbalanced()**
+                
+                // 检查父节点是否已满，如果满了就不能再激活GP，必须分裂父节点
+                if (verified_parent->isFull()) {
+                    ret = 2; // 标记父节点需要重平衡
+                    // 注意：这里可能需要将 verified_parent 加入重平衡队列的逻辑
+                }else {
+                    int pos = verified_parent->findKeyPos(inode->getMinKey());
+                    if(verified_parent->isUnbalanced(pos)) {
+                        int temp_pos = -1;
+                        if(verified_parent->activateGP(new_min_key, next_node->getId(), temp_pos, 1)) {
+                            // 成功激活GP，更新日志和关系
+                            log_entries.emplace_back(create_log_entry(verified_parent));
+                            recordInodeRelation(next_node, verified_parent);
+                            ret = 1; // 分裂成功
+                        } else {
+                            // activateGP 理论上不应失败，因为我们已经检查过 isFull()
+                            // 但为健壮性考虑，如果失败，则标记父节点需要重平衡
+                            ret = 2;
+                        }
+                    }else {
+                        // 父节点未满且未达到不平衡阈值
+                        // 只增加对应GP的覆盖计数
+                        verified_parent->gps[pos].covered_nodes++;
                         recordInodeRelation(next_node, verified_parent);
-                        ret = 1;
-                    } else {
-                        ret = 2;
+                        ret = 1; // 分裂成功
                     }
-                } else {
-                    verified_parent->hdr.coveredNodes++;
-                    recordInodeRelation(next_node, verified_parent);
-                    ret = 1;
                 }
             } else {
                 ret = 1; // 最高层分裂
@@ -684,126 +691,6 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
 #ifdef RB_DEBUG
     cout << "fastRebalance completed with result: " << ret << endl;
 #endif
-    return ret;
-}
-
-int DramSkiplist::fastRebalance1(Inode* &inode, Inode* &parent_inode) 
-{
-    int ret = 0;
-    std::vector<std::unique_ptr<dram_log_entry_t>> log_entries;
-    log_entries.reserve(4); // 可能需要为 header, parent, inode, next_node 记录日志
-
-    cout << "fastRebalance called for inode: " << inode->getId() << endl;
-    if(parent_inode) {
-        cout << "Parent inode: " << parent_inode->getId() << endl;
-    }
-    else {
-        cout << "No parent inode." << endl;
-    }
-
-    // 1. 准备阶段：获取新节点，但先不操作
-    Inode *next_node = dramInodePool->getNextNode();
-    if (!next_node) return 0; // 分配失败
-    next_node->hdr.level = inode->hdr.level;
-
-    // 2. 识别阶段：确定所有需要参与本次事务的节点
-    std::vector<Inode*> nodes_to_lock;
-    nodes_to_lock.push_back(inode);
-    nodes_to_lock.push_back(next_node);
-
-    Inode* header_above = nullptr;
-    // 如果需要创建新的父节点，那么上一层的头节点也需要被锁定
-    if (parent_inode == nullptr && inode->hdr.level < MAX_LEVEL - 1) {
-        header_above = getHeader(inode->hdr.level + 1);
-        nodes_to_lock.push_back(header_above);
-    } else if (parent_inode != nullptr) {
-        nodes_to_lock.push_back(parent_inode);
-    }
-
-    // 3. 加锁阶段：使用辅助函数，以正确的顺序原子性地获取所有锁
-    std::vector<std::unique_lock<std::shared_mutex>> acquired_locks;
-    acquireLocksInOrder(nodes_to_lock, acquired_locks);
-
-    // 4. 事务操作阶段：在所有锁都已持有的情况下，安全地执行所有操作
-    try {
-        // 4.1 双重检查：在持有锁后，再次验证操作的前提条件是否仍然成立
-        // 例如，检查 inode 是否真的需要分裂
-        if (inode->hdr.last_index < fanout / 2 - 1) {
-            // 其他线程可能已经处理过这个节点了，直接返回
-            return 0; 
-        }
-
-        // 4.2 处理父节点创建（如果需要）
-        if (parent_inode == nullptr && header_above != nullptr) {
-            // 因为 header_above 已被锁定，这里的检查是线程安全的
-            if (isTail(header_above->hdr.next)) {
-                parent_inode = dramInodePool->getNextNode();
-                parent_inode->hdr.level = inode->hdr.level + 1;
-                parent_inode->hdr.next = header_above->hdr.next;
-                header_above->hdr.next = parent_inode->getId();
-                Key_t min_key = inode->getMinKey();
-                parent_inode->insertAtPos(min_key, inode->getId(), 0);
-                increaseLevel();
-                // 将新创建的父节点也加入日志
-                log_entries.emplace_back(create_log_entry(parent_inode));
-                log_entries.emplace_back(create_log_entry(header_above));
-            } else {
-                // 其他线程在我们等待锁的时候创建了父节点，我们需要找到它
-                // 注意：这是一个简化逻辑，完整的逻辑需要遍历查找
-                parent_inode = dramInodePool->at(header_above->hdr.next);
-            }
-        }
-
-        // 4.3 执行节点分裂
-        next_node->hdr.next = inode->hdr.next;
-        inode->hdr.next = next_node->getId();
-        inode->split(next_node);
-        Key_t new_min_key = next_node->getMinKey();
-
-        // 4.4 更新父节点
-        if (parent_inode) {
-            if(parent_inode->checkForActivateGP()) {
-                int pos = -1;
-                cout << "Activated GP for parent inode: " << parent_inode->getId() <<" min: " << parent_inode->getMinKey() << " max " <<parent_inode->getMaxKey() << " new_key: " << new_min_key << endl;
-                if(!isTail(parent_inode->hdr.next)) {
-                    Inode *next_parent_node = dramInodePool->at(parent_inode->hdr.next);
-                    cout << "Next parent node: " << next_parent_node->getId() << " min: " << next_parent_node->getMinKey() << " max " << next_parent_node->getMaxKey() << endl;
-                }
-                if(parent_inode->activateGP(new_min_key, next_node->getId(), pos)) {
-                    log_entries.emplace_back(create_log_entry(parent_inode));
-                    recordInodeRelation(next_node, parent_inode);
-                    ret = 1; // 分裂成功
-                } else {
-                    ret = 2;
-                }
-            }else {
-                parent_inode->hdr.coveredNodes++;
-                recordInodeRelation(next_node, parent_inode);
-                ret = 1; // 分裂成功，但没有激活 GP
-            }
-        } else {
-            // 没有父节点（分裂的是最高层），也算成功
-            ret = 1;
-        }
-
-        // 4.5 记录子节点日志
-        log_entries.emplace_back(create_log_entry(inode));
-        log_entries.emplace_back(create_log_entry(next_node));
-
-    } catch (const std::exception& e) {
-        // 异常处理，确保锁被释放
-        // acquired_locks 会在栈展开时自动解锁
-        std::cerr << "Exception during fastRebalance: " << e.what() << std::endl;
-        return 0; // 返回失败
-    }
-
-    // 5. 解锁阶段：函数返回时，acquired_locks 的析构函数会自动以获取锁的相反顺序释放所有锁。
-
-    // 6. 日志提交阶段：在所有锁都已释放后，执行耗时的日志写入操作
-    for (auto &entry : log_entries) {
-        ckpt_log->enq(entry.release());
-    }
-
     return ret;
 }
 
@@ -924,27 +811,22 @@ int DramSkiplist::rebalanceIdx(Vnode &targetVnode, Key_t targetKey)
 
        pos = current_update->findInsertKeyPos(targetKey);
        if (i == 0) {
-            current_update->insertAtPos(targetKey, targetVnode.getId(), pos);
+            // **修改：为 insertAtPos 提供第四个参数 (initial_covered_nodes)**
+            current_update->insertAtPos(targetKey, targetVnode.getId(), pos, 1);
             target_lock.unlock();
        } else {
-            current_update->insertAtPos(prev_update->getMinKey(), prev_update->getId(), pos);
+            // **修改：为 insertAtPos 提供第四个参数**
+            // 新GP指向一个Inode，其初始负载是该Inode的大小
+            current_update->insertAtPos(prev_update->getMinKey(), prev_update->getId(), pos, prev_update->hdr.last_index + 1);
        }
 
-       //log the state of the modified nodes
-       auto create_log_entry = [](Inode *node) {
-            auto entry = std::make_unique<dram_log_entry_t>(node->getId(), node->hdr.coveredNodes, node->hdr.last_index, node->hdr.next, node->hdr.level);
-            for(int j = 0; j <= node->hdr.last_index; j++) {
-                entry->setKeyVal(j, node->gps[j].key, node->gps[j].value);
-            }
-            return entry;
-        };
-
-        if(need_spilt) {
-            log_entries.push_back(create_log_entry(prev));
-            log_entries.push_back(create_log_entry(next_node));
-        } else {
-            log_entries.push_back(create_log_entry(prev));
-        }
+       // **修改：移除错误的 lambda，直接调用 this->create_log_entry**
+       if(need_spilt) {
+            log_entries.push_back(std::unique_ptr<dram_log_entry_t>(this->create_log_entry(prev)));
+            log_entries.push_back(std::unique_ptr<dram_log_entry_t>(this->create_log_entry(next_node)));
+       } else {
+            log_entries.push_back(std::unique_ptr<dram_log_entry_t>(this->create_log_entry(prev)));
+       }
 
        auto it = node_to_lock_index.find(prev_update);
        if(it != node_to_lock_index.end()) {
@@ -978,12 +860,11 @@ int DramSkiplist::getLevel()
 
 dram_log_entry_t *DramSkiplist::create_log_entry(Inode *inode)
 {
-    auto entry = new dram_log_entry_t(inode->getId(), inode->hdr.coveredNodes, inode->hdr.last_index, inode->hdr.next, inode->hdr.level);
-    for(int i = 0; i <= inode->hdr.last_index; i++) {
-        entry->setKeyVal(i, inode->gps[i].key, inode->gps[i].value);
+    // **修改：使用新的构造函数，并遍历所有GP来记录它们的状态**
+    auto entry = new dram_log_entry_t(inode->getId(), inode->hdr.last_index, inode->hdr.next, inode->hdr.level);
+    for(int j = 0; j <= inode->hdr.last_index; j++) {
+        entry->setKeyVal(j, inode->gps[j].key, inode->gps[j].value, inode->gps[j].covered_nodes);
     }
-    entry->setCoveredNodes(inode->hdr.coveredNodes);
-    entry->setLastIndex(inode->hdr.last_index);
     return entry;
 }
 

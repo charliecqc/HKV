@@ -88,6 +88,9 @@ log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
         log_entry->gp_idx = entry->gp_idx[i];
         log_entry->key = entry->key[i];
         log_entry->value = entry->value[i];
+        // **新增：将 per-GP 覆盖数写入持久化日志**
+        log_entry->covered_nodes = entry->covered_nodes[i];
+
         char *temp = reinterpret_cast<char *>(log_entry);
         temp += sizeof(nvm_log_entry_t);
         log_entry = reinterpret_cast<nvm_log_entry_t *>(temp);
@@ -219,6 +222,9 @@ void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
             int32_t idx = entry->gp_idx;
             inode->gps[idx].key = entry->key;
             inode->gps[idx].value = entry->value;
+            // **新增：从持久化日志中恢复 per-GP 覆盖数**
+            inode->gps[idx].covered_nodes = entry->covered_nodes;
+
             char *temp = reinterpret_cast<char *>(entry);
             temp += sizeof(nvm_log_entry_t);
             entry = reinterpret_cast<nvm_log_entry_t *>(temp);
@@ -278,6 +284,9 @@ void CkptLog::reclaim(PmemInodePool *pmemInodePool)
                 int32_t idx = entry->gp_idx;
                 inode->gps[idx].key = entry->key;
                 inode->gps[idx].value = entry->value;
+                // **新增：从持久化日志中恢复 per-GP 覆盖数**
+                inode->gps[idx].covered_nodes = entry->covered_nodes;
+
                 char *temp = reinterpret_cast<char *>(entry);
                 temp += sizeof(nvm_log_entry_t);
                 entry = reinterpret_cast<nvm_log_entry_t *>(temp);
