@@ -575,8 +575,10 @@ bool TandemIndex::getFromRebalanceQueue(Inode* &inode)
     return true;
 }
 
+
 void TandemIndex::update(Key_t key, Val_t value)
 {
+#if 0
     int idx = -1;
     Key_t targetKey;
     Vnode *targetVnode = nullptr; // new vnode to be inserted
@@ -662,10 +664,12 @@ void TandemIndex::update(Key_t key, Val_t value)
         }
     } 
     // 重平衡现在通过队列异步处理
+#endif
 }
 
 void TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &result)
 {
+#if 0
     int idx = -1;
     Inode *inode = mainIndex->lookup(key, idx);
     Vnode *vnode = nullptr;
@@ -692,7 +696,9 @@ void TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
             return;
         }
     }
+#endif
 }
+
 
 #if 0
 void TandemIndex::remove(int key)

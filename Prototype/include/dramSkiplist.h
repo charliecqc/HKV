@@ -5,6 +5,8 @@
 #include "ckpt_log.h"
 #include "common.h"
 #include "valuelist.h"
+#include <map>
+#include <shared_mutex>
 #pragma once// SkipList class
 class DramSkiplist  {
 private:
@@ -15,6 +17,19 @@ private:
     ValueList *valueList;
     int level; //level is the current max level of the skiplist
     std::shared_mutex level_lock;
+
+    std::mutex inodeRelationMutex;
+    std::unordered_map<Inode*, Inode*> childToParentMap; // map to store child-parent relationships for rebalancing
+
+    // **新增：为查找操作设计的快速路径缓存**
+    std::map<Key_t, Inode*> lookup_cache;
+    std::shared_mutex cache_mutex;
+
+    // **新增：私有辅助函数**
+    Inode* find_start_node_from_cache(Key_t key, int& start_level);
+    void populate_cache(Key_t key, Inode* node);
+    void populate_cache(Key_t key, Inode* node, int current_total_level);
+
 public:
     std::shared_mutex inode_locks[MAX_NODES];
     std::shared_mutex rebalance_lock;
@@ -28,8 +43,7 @@ public:
     // return the index in gps of the index node that poionts to the vnode
     Inode *lookup(Key_t key, int &idx);
     Inode *lookup(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx);
-    Inode *lookupForInsert(Key_t key, Inode *current, int currentHighestLevelIndex, std::unique_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates);
-    Inode *lookupForInsert(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates);
+    Inode *lookupForInsert(Key_t key, Inode * &current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates);
     Inode *getHeader();
     Inode *getHeader(int level);
     void getPivotNodesForInsert(Key_t key, Inode* updates[]);
@@ -65,7 +79,4 @@ public:
         return false;
     }
     void printStats();
-
-    std::mutex inodeRelationMutex;
-    std::unordered_map<Inode *, Inode*> childToParentMap; // map to store child-parent relationships for rebalancing
 };
