@@ -4,8 +4,13 @@
 #include <mutex>
 #include <optional>
 #include <map>
+#include <shared_mutex>
 
 #define numNodesInPool 10000000
+
+// 线程本地路标定义
+thread_local Key_t  DramSkiplist::tls_pivot_key_  = std::numeric_limits<Key_t>::min();
+thread_local Inode* DramSkiplist::tls_pivot_node_ = nullptr;
 
 DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool, ValueList *valuelist)
 {
@@ -260,7 +265,7 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
     int current_total_level = 0; // 用于缓存填充
 
     // **步骤 1: 尝试从缓存获取起点**
-    current = find_start_node_from_cache(key, start_level);
+    current = find_start_node_from_cache_shards(key, start_level);
 
     // **步骤 2: 如果缓存未命中，则执行完整查找**
     if (current == nullptr) {
@@ -300,7 +305,7 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
 
     // **步骤 4: 填充缓存并返回结果**
     // 此时, 'current' 是在最底层找到的目标 Inode
-    populate_cache(key, current, current_total_level);
+    populate_cache_shards(key, current, current_total_level);
 
     std::shared_lock<std::shared_mutex> lock_current(inode_locks[current->getId()]);
     if(current->isHeader()) {
@@ -379,12 +384,11 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current, int currentHig
     //cout << "start header is : " << temp_start->getId() << " for key : " << key << endl;
 
     // **步骤 1: 尝试从缓存获取起点**
-    Inode *start_node = find_start_node_from_cache(key, start_level);
+    Inode *start_node = find_start_node_from_cache_shards(key, start_level);
 
     // **步骤 2: 如果缓存命中，验证并返回结果
     if (start_node != nullptr) {
         std::shared_lock<std::shared_mutex> lock_start(inode_locks[start_node->getId()]);
-        // 修正：用 start_node 校验
         int temp_idx = start_node->findKeyPos(key);
         if (key >= start_node->gps[0].key && key <= start_node->gps[start_node->hdr.last_index].key) {
             idx = temp_idx;
@@ -392,10 +396,10 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current, int currentHig
             current = start_node;
             current_lock.unlock();
             current_lock = std::move(lock_start);
-        }else {
-            //cout << "Cache miss for key: " << key << " in node: " << start_node->getId() << endl;
-            // 如果缓存未命中，继续使用当前节点
-            current = temp_start;
+        } else {
+            // 验证失败：使 TLS 路标失效，避免同一线程重复误命中
+            invalidate_tls_pivot();
+            current = temp_start; // 回退到调用方提供的起点
         }
     }
 
@@ -444,8 +448,8 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current, int currentHig
 
         //lock passing for the next level node
         std::shared_lock<std::shared_mutex> next_vertical_lock(inode_locks[temp->getId()]);
-        current = temp;
         updates.push_back(current);
+        current = temp;
         current_lock.unlock();
         current_lock = std::move(next_vertical_lock);
     }
@@ -457,7 +461,7 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current, int currentHig
     }
 
     // **步骤 5: 返回结果并填充缓存**
-    populate_cache(key, current, current_total_level);
+    populate_cache_shards(key, current, current_total_level);
 
     assert(current->hdr.last_index >= 0);
     idx = current->findKeyPos(key);
@@ -471,7 +475,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
     int current_total_level = currentHighestLevelIndex + 1; // 保存总层数
 
     // **步骤 1: 尝试从缓存获取起点**
-    Inode *start_node = find_start_node_from_cache(key, start_level);
+    Inode *start_node = find_start_node_from_cache_shards(key, start_level);
 
     // **步骤 2: 如果缓存命中，验证并返回结果
     if (start_node != nullptr) {
@@ -542,7 +546,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
 
     // **步骤 5: 填充缓存并返回结果**
     // **修改：传递当前总层数给 populate_cache**
-    populate_cache(key, current, current_total_level);
+    populate_cache_shards(key, current, current_total_level);
 
     assert(current->hdr.last_index >= 0);
     idx = current->findKeyPos(key);
@@ -951,7 +955,7 @@ int DramSkiplist::getLevel()
 
 dram_log_entry_t *DramSkiplist::create_log_entry(Inode *inode)
 {
-    // **修改：使用新的构造函数，并遍历所有GP来记录它们的状态**
+   
     auto entry = new dram_log_entry_t(inode->getId(), inode->hdr.last_index, inode->hdr.next, inode->hdr.level);
     for(int j = 0; j <= inode->hdr.last_index; j++) {
         entry->setKeyVal(j, inode->gps[j].key, inode->gps[j].value, inode->gps[j].covered_nodes);
@@ -991,7 +995,8 @@ void DramSkiplist::printStats()
     }
 }
 
-void DramSkiplist::acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<std::unique_lock<std::shared_mutex>>& locks) {
+void DramSkiplist::acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<std::unique_lock<std::shared_mutex>>& locks) 
+{
     // 1. 按 level 从大到小排序，level 相同 先锁定前驱节点 
     std::sort(nodes.begin(), nodes.end(), [](Inode* a, Inode* b) {
         if (a == nullptr || b == nullptr) {
@@ -1019,10 +1024,39 @@ void DramSkiplist::acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<s
     }
 }
 
+Inode *DramSkiplist::find_start_node_from_cache_shards(Key_t key, int& start_level) 
+{
+#if 1
+    if (tls_pivot_node_ && key >= tls_pivot_key_) {
+        start_level = tls_pivot_node_->hdr.level;
+        return tls_pivot_node_;
+    }
+#endif
+
+    size_t s = shard_of(key);
+    CacheShard& shard = cache_shards[s];
+    std::shared_lock<std::shared_mutex> r(shard.mtx);
+    if(shard.table.empty()) return nullptr;
+
+    auto it = shard.table.upper_bound(key);
+    if (it == shard.table.begin()) {
+        return nullptr; // 没有可用的起点
+    }
+    
+    --it; // 回退到第一个键值 <= key 的元素
+
+    Inode* start_node = it->second;
+    if(start_node) {
+        start_level = start_node->hdr.level;
+        update_tls_pivot(it->first, start_node);
+        return start_node;
+    }
+    return nullptr;
+}
+
 // **新增实现：从缓存中查找起点**
 Inode* DramSkiplist::find_start_node_from_cache(Key_t key, int& start_level) {
 
-#if 0
     static thread_local Key_t   tl_pivot_key  = std::numeric_limits<Key_t>::min();
     static thread_local Inode*  tl_pivot_node = nullptr;
 
@@ -1030,7 +1064,6 @@ Inode* DramSkiplist::find_start_node_from_cache(Key_t key, int& start_level) {
         start_level = tl_pivot_node->hdr.level;
         return tl_pivot_node;
     }
-#endif
 
     std::shared_lock<std::shared_mutex> lock(cache_mutex);
     if (lookup_cache.empty()) {
@@ -1054,8 +1087,8 @@ Inode* DramSkiplist::find_start_node_from_cache(Key_t key, int& start_level) {
     Inode* start_node = it->second;
     if (start_node) {
         start_level = start_node->hdr.level;
-//        tl_pivot_key = it->first;
- //       tl_pivot_node = start_node; // 更新线程局部变量
+        tl_pivot_key = it->first;
+        tl_pivot_node = start_node; // 更新线程局部变量
         return start_node;
     }
 
@@ -1068,57 +1101,102 @@ void DramSkiplist::populate_cache(Key_t key, Inode* leaf_node, int current_total
         return;
     }
 
-    // **自适应策略：选择一个中间层的节点进行缓存**
+    // 采样：把写缓存频率降到约 1/64，显著降低争用
+    static thread_local uint32_t pc_counter = 0;
+    if ((++pc_counter & 63) != 0) {
+        return;
+    }
+
     int target_cache_level = std::max(1, current_total_level / 2);
 
     Inode* ancestor = leaf_node;
     Inode* node_to_cache = nullptr;
 
-    // 向上追溯，直到找到目标层级的祖先
+    // 向上追溯，尽量靠近目标层；找不到就取能到达的最高祖先
     while (ancestor != nullptr) {
         Inode* parent = getParentInode(ancestor);
         if (parent == nullptr) {
-            // 到达根节点，没有更高层了
+            node_to_cache = ancestor;
             break;
         }
-        
-        if (parent->hdr.level == target_cache_level) {
+        if (parent->hdr.level >= target_cache_level) {
             node_to_cache = parent;
-            break;
-        }
-        // 我们可以选择缓存当前找到的最高层祖先作为近似最优解。
-        if (parent->hdr.level > target_cache_level) {
-            node_to_cache = parent; 
             break;
         }
         ancestor = parent;
     }
 
-    if (node_to_cache != nullptr) {
+    if (node_to_cache == nullptr) return;
 
-        std::unique_lock<std::shared_mutex> lock(cache_mutex);
-        if(!lock.owns_lock()) {
-            return;
-        }
-        // 使用祖先节点的 minKey 作为缓存键，祖先节点本身作为缓存值
+    // 非阻塞获取祖先最小键（失败就放弃本次写入）
+    Key_t cache_key;
+    {
         std::shared_lock<std::shared_mutex> ancestor_lock(inode_locks[node_to_cache->getId()], std::try_to_lock);
-        if (!ancestor_lock.owns_lock()) {
-            // 获取锁失败，可能与自顶向下的操作（如 insert）存在锁竞争。
-            // 为避免死锁，直接放弃本次缓存操作。
-            return;
-        }
-        Key_t cache_key = node_to_cache->getMinKey();
-        ancestor_lock.unlock();
-
-        auto it = lookup_cache.find(cache_key);
-        // 只有当缓存中不存在这个“路标”，或者已存的路标层级更低时，才更新
-        if (it == lookup_cache.end() || it->second->hdr.level < node_to_cache->hdr.level) {
-            lookup_cache[cache_key] = node_to_cache;
-#if 1
-            cout << "Cache updated for key: " << cache_key 
-                 << " with node ID: " << node_to_cache->getId() 
-                 << " at level: " << node_to_cache->hdr.level << endl;
-#endif
-        }
+        if (!ancestor_lock.owns_lock()) return;
+        cache_key = node_to_cache->getMinKey();
     }
+
+    // 非阻塞写缓存：抢不到锁就放弃，避免阻塞其他线程
+    std::unique_lock<std::shared_mutex> lock(cache_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+
+    auto it = lookup_cache.find(cache_key);
+    if (it == lookup_cache.end() || it->second->hdr.level < node_to_cache->hdr.level) {
+        lookup_cache[cache_key] = node_to_cache;
+    }
+}
+
+
+void DramSkiplist::populate_cache_shards(Key_t key, Inode* leaf_node, int current_total_level) {
+    if (!leaf_node || leaf_node->hdr.level != 0 || leaf_node->isHeader() || current_total_level <= 1) {
+        return;
+    }
+    // 采样：约 1/64 次写，降低争用
+    static thread_local uint32_t pc_counter = 0;
+    if ((++pc_counter & 31) != 0) return;
+
+    int target_cache_level = std::max(1, current_total_level / 2);
+
+    Inode * ancestor = leaf_node;
+    Inode * node_to_cache = nullptr;
+
+    while(ancestor != nullptr) {
+        Inode *parent = getParentInode(ancestor);
+        if(parent == nullptr) {
+            node_to_cache = ancestor;
+            break;
+        }
+        if(parent->hdr.level >= target_cache_level) {
+            node_to_cache = parent;
+            break;
+        }
+        ancestor = parent;
+    }
+    if(node_to_cache == nullptr) return;
+
+    Key_t cache_key;
+    {
+        std::shared_lock<std::shared_mutex> ancestor_lock(inode_locks[node_to_cache->getId()], std::try_to_lock);
+        if(!ancestor_lock.owns_lock()) return; // 非阻塞获取祖先最小键
+        cache_key = node_to_cache->getMinKey();
+    }
+
+    size_t s = shard_of(cache_key);
+    CacheShard &shard = cache_shards[s];
+    std::unique_lock<std::shared_mutex> lock(shard.mtx, std::try_to_lock);
+    if(!lock.owns_lock()) return; // 非阻塞写缓存
+    auto it = shard.table.find(cache_key);
+    if(it == shard.table.end() || it->second->hdr.level < node_to_cache->hdr.level) {
+        shard.table[cache_key] = node_to_cache; 
+    }
+}
+
+void DramSkiplist::invalidate_tls_pivot() {
+    tls_pivot_node_ = nullptr;
+    tls_pivot_key_  = std::numeric_limits<Key_t>::min();
+}
+
+void DramSkiplist::update_tls_pivot(Key_t key, Inode* node) {
+    tls_pivot_key_  = key;
+    tls_pivot_node_ = node;
 }

@@ -8,8 +8,15 @@
 #include <map>
 #include <shared_mutex>
 #pragma once// SkipList class
-class DramSkiplist  {
-private:
+
+class CacheShard {
+public:
+    std::map<Key_t, Inode*> table;
+    mutable std::shared_mutex mtx; // 共享互斥锁，允许多个
+};
+
+class DramSkiplist {
+public:
     Inode* header[MAX_LEVEL];
     Inode* tail[MAX_LEVEL];
     DramInodePool *dramInodePool;
@@ -25,10 +32,30 @@ private:
     std::map<Key_t, Inode*> lookup_cache;
     std::shared_mutex cache_mutex;
 
+    static constexpr size_t kNumShards = 32;
+
+    std::array<CacheShard, kNumShards> cache_shards;
+    std::hash<Key_t> key_hasher;
+
     // **新增：私有辅助函数**
+    inline size_t shard_of(const Key_t key) {
+        return key_hasher(key) % kNumShards;
+    }
     Inode* find_start_node_from_cache(Key_t key, int& start_level);
+    Inode* find_start_node_from_cache_shards(Key_t key, int& start_level);
     void populate_cache(Key_t key, Inode* node);
     void populate_cache(Key_t key, Inode* node, int current_total_level);
+    void populate_cache_shards(Key_t key, Inode* node, int current_total_level);
+
+
+private:
+    // 线程本地路标（跨函数共享）
+    static thread_local Key_t  tls_pivot_key_;
+    static thread_local Inode* tls_pivot_node_;
+
+    // 维护接口
+    void invalidate_tls_pivot();
+    void update_tls_pivot(Key_t key, Inode* node);
 
 public:
     std::shared_mutex inode_locks[MAX_NODES];
