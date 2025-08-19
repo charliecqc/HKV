@@ -16,6 +16,27 @@ public:
 };
 
 class DramSkiplist {
+private:
+    // 全局结构版本（split / rebalance 后 bump）
+    std::atomic<uint32_t> global_epoch{0};
+
+    struct TlsPivot {
+        Inode*  node{nullptr};
+        Key_t   min_key{0};
+        Key_t   upper_key{0};
+        uint32_t epoch{0};
+        uint8_t fail_cnt{0};
+    };
+    static thread_local struct {
+        TlsPivot pivots[3];
+        int used;
+    } tls_pivot_set_;
+
+    Inode* tls_try_match(Key_t key, int& start_level);
+    void   tls_record_pivot(Inode* node);
+    void   tls_mark_fail(Key_t min_key);
+    void   bump_epoch(); // 在 split / rebalance 成功后调用
+
 public:
     Inode* header[MAX_LEVEL];
     Inode* tail[MAX_LEVEL];
@@ -56,6 +77,8 @@ private:
     // 维护接口
     void invalidate_tls_pivot();
     void update_tls_pivot(Key_t key, Inode* node);
+
+    Key_t get_node_upper_bound(Inode* node);
 
 public:
     std::shared_mutex inode_locks[MAX_NODES];

@@ -11,6 +11,85 @@
 // 线程本地路标定义
 thread_local Key_t  DramSkiplist::tls_pivot_key_  = std::numeric_limits<Key_t>::min();
 thread_local Inode* DramSkiplist::tls_pivot_node_ = nullptr;
+thread_local decltype(DramSkiplist::tls_pivot_set_) DramSkiplist::tls_pivot_set_{ {}, 0 };
+
+namespace {
+    std::atomic<uint64_t> g_lfi_start_node_verify_failures{0};
+
+    struct LfiCounterPrinter {
+        ~LfiCounterPrinter() {
+            std::cout << "[统计] lookupForInsert start_node 验证失败次数: "
+                      << g_lfi_start_node_verify_failures.load() << std::endl;
+        }
+    } g_lfi_counter_printer; // 程序结束时自动打印
+}
+
+
+void DramSkiplist::bump_epoch() {
+    global_epoch.fetch_add(1, std::memory_order_relaxed);
+}
+
+Inode* DramSkiplist::tls_try_match(Key_t key, int& start_level) {
+    auto cur_epoch = global_epoch.load(std::memory_order_relaxed);
+    for (int i = 0; i < tls_pivot_set_.used; ++i) {
+        auto &e = tls_pivot_set_.pivots[i];
+        if (!e.node) continue;
+        if (e.epoch != cur_epoch || e.fail_cnt >= 3) { e.node = nullptr; continue; }
+        if (key >= e.min_key && key < e.upper_key) {
+            start_level = e.node->hdr.level;
+            return e.node;
+        }
+    }
+    return nullptr;
+}
+
+void DramSkiplist::tls_record_pivot(Inode* node) {
+    if (!node || node->isHeader()) return;
+    Key_t min_k = node->getMinKey();
+    Key_t upper = std::numeric_limits<Key_t>::max();
+    Inode* nxt = dramInodePool->at(node->hdr.next);
+    if (nxt && !nxt->isTail()) upper = nxt->getMinKey();
+
+    // 已存在 → 刷新
+    for (int i = 0; i < tls_pivot_set_.used; ++i) {
+        auto &e = tls_pivot_set_.pivots[i];
+        if (e.node && e.min_key == min_k) {
+            e.upper_key = upper;
+            e.fail_cnt = 0;
+            e.epoch = global_epoch.load(std::memory_order_relaxed);
+            e.node = node;
+            return;
+        }
+    }
+    // 未满
+    if (tls_pivot_set_.used < 3) {
+        auto &e = tls_pivot_set_.pivots[tls_pivot_set_.used++];
+        e = { node, min_k, upper, global_epoch.load(std::memory_order_relaxed), 0 };
+        return;
+    }
+    // 选择 victim：fail_cnt 最大，其次区间更宽
+    int victim = 0;
+    auto span = [&](int i){ return (uint64_t)tls_pivot_set_.pivots[i].upper_key - tls_pivot_set_.pivots[i].min_key; };
+    for (int i = 1; i < 3; ++i) {
+        auto &best = tls_pivot_set_.pivots[victim];
+        auto &cand = tls_pivot_set_.pivots[i];
+        if (cand.fail_cnt > best.fail_cnt ||
+           (cand.fail_cnt == best.fail_cnt && span(i) > span(victim))) {
+            victim = i;
+        }
+    }
+    tls_pivot_set_.pivots[victim] = { node, min_k, upper, global_epoch.load(std::memory_order_relaxed), 0 };
+}
+
+void DramSkiplist::tls_mark_fail(Key_t min_key) {
+    for (int i = 0; i < tls_pivot_set_.used; ++i) {
+        auto &e = tls_pivot_set_.pivots[i];
+        if (e.node && e.min_key == min_key) {
+            if (++e.fail_cnt >= 3) e.node = nullptr;
+            return;
+        }
+    }
+}
 
 DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool, ValueList *valuelist)
 {
@@ -86,84 +165,69 @@ bool DramSkiplist::add(Vnode *targetVnode)
     Key_t targetKey = std::numeric_limits<Key_t>::max();
     Inode* updates[MAX_LEVEL];
     {
-        //std::shared_lock<std::shared_mutex> lock(reinterpret_cast<Vnode *>(targetVnode)->hdr.mtx);
         BloomFilter *bloom = &valueList->bf[targetVnode->hdr.id];
         std::shared_lock<std::shared_mutex> lock(bloom->vnode_mtx);
         targetKey = reinterpret_cast<Vnode *>(targetVnode)->getMinKey();
     }
     int newlevel = generateRandomLevel();
+    bool level_grew = false;          // 新增：记录是否提升层数
     {
         std::shared_lock<std::shared_mutex> read_lock(level_lock);
-        if (newlevel <= level) {
-            // if there is no need to increase the level, we can proceed with the existing level
-        } else {
+        if (newlevel > level) {
             read_lock.unlock();
             std::unique_lock<std::shared_mutex> write_lock(level_lock);
-            // double check the level after acquiring the write lock
             if (newlevel > level) {
                 level = newlevel;
+                level_grew = true;
+                bump_epoch();         // 1) 层数增长立即推进 epoch（全局拓扑变化）
             }
         }
     }
 
-    //collecting all the predecessors of inserting value
+    // collecting predecessors...
     std::vector<Inode *> predecessors;
-
-    for(int i = 0; i < newlevel; i++) {
+    for (int i = 0; i < newlevel; i++) {
         predecessors.push_back(header[i]);
         updates[i] = header[i];
     }
-    // sort the predecessors based on their level
-    std::sort(predecessors.begin(), predecessors.end(), [](Inode *a, Inode *b) {
-        return a->hdr.level > b->hdr.level;
-    });
+    std::sort(predecessors.begin(), predecessors.end(),
+              [](Inode *a, Inode *b){ return a->hdr.level > b->hdr.level; });
 
     std::map<Inode *, size_t> node_to_lock_index;
-    for(size_t k = 0; k < predecessors.size(); k++) {
+    for (size_t k = 0; k < predecessors.size(); k++) {
         node_to_lock_index[predecessors[k]] = k;
     }
 
-    std::vector<std::unique_lock<std::shared_mutex> > acquired_locks;
-    // acuqire lock for all predecessors according to their level
-    for(Inode *update: predecessors) {
+    std::vector<std::unique_lock<std::shared_mutex>> acquired_locks;
+    for (Inode *update: predecessors) {
         acquired_locks.emplace_back(inode_locks[update->getId()]);
         Inode *next = dramInodePool->at(update->hdr.next);
-        if(targetKey >= next->getMinKey()) {
-            //if the target key is greater than or equal to the next node's min key, we can skip this update
-            return false;
+        if (targetKey >= next->getMinKey()) {
+            return false; // 失败路径：未完成结构修改，不推进 epoch
         }
     }
 
     std::vector<Inode *> new_nodes(newlevel);
-    for(int i = 0; i < newlevel; i ++) {
-        new_nodes[i] = dramInodePool->getNextNode();
-    }
+    for (int i = 0; i < newlevel; i++) new_nodes[i] = dramInodePool->getNextNode();
 
-    Inode *current_update = nullptr; // the update node in the previous round
-    Inode *next = nullptr;
-    for(int i = 0; i < newlevel; i++) {
-        current_update = updates[i];
-        next = new_nodes[i];
+    bool tower_linked = false; // 新增：标记整塔是否成功链接
+    for (int i = 0; i < newlevel; i++) {
+        Inode *current_update = updates[i];
+        Inode *next = new_nodes[i];
 
-        //link the new node to the current update node
         next->hdr.next = current_update->hdr.next;
         current_update->hdr.next = next->getId();
         next->hdr.level = current_update->hdr.level;
-        assert(current_update->hdr.next != 0);
-        assert(next->hdr.next != 0);
 
-        if(i == 0) {
+        if (i == 0) 
             next->insertAtPos(targetKey, targetVnode->getId(), 0, 1);
-        } else {
+        else        
             next->insertAtPos(targetKey, new_nodes[i-1]->getId(), 0, 1);
-        }
 
-        // **修改：使用 create_log_entry 辅助函数来创建正确的日志**
         dram_log_entry_t *next_entry = create_log_entry(next);
-        dram_log_entry_t *current_update_entry = create_log_entry(current_update);
-
+        dram_log_entry_t *cur_entry  = create_log_entry(current_update);
         ckpt_log->enq(next_entry);
-        ckpt_log->enq(current_update_entry);
+        ckpt_log->enq(cur_entry);
 
         auto it = node_to_lock_index.find(current_update);
         if (it != node_to_lock_index.end()) {
@@ -172,6 +236,13 @@ bool DramSkiplist::add(Vnode *targetVnode)
                 acquired_locks[index].unlock();
             }
         }
+    }
+    tower_linked = true;
+
+    // 2) 塔成功插入（无论是否提升层数）再推进一次 epoch
+    if (tower_linked && !level_grew) {
+        // 若上面因层数提升已 bump_epoch，这里可选择跳过；保持条件可避免双重推进
+        bump_epoch();
     }
     return true;
 }
@@ -317,64 +388,6 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
     return current;
 }
 
-#if 0
-Inode *DramSkiplist::lookupForInsert(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates)
-{
-    for(int i = currentHighestLevelIndex; i >= 0; i--) {
-        // no real index nodes between header and tail
-        //search among the nodes in the current level
-        while(true) {
-            assert(current != nullptr);
-            {
-                Inode *next = dramInodePool->at(current->hdr.next);
-                std::shared_lock<std::shared_mutex> next_horizental_lock(inode_locks[next->getId()]);
-                if(!next->isTail() && key >= next->getMinKey()) {
-                    assert(current->getMaxKey() <= next->getMinKey());
-                    current = next;
-                    current_lock.unlock();
-                    current_lock = std::move(next_horizental_lock);
-                } else {
-                    // found the node in this level, escape the look and go to the next level
-                    break;
-                }
-            }
-        }
-        //if already on the last level, return the current node
-        if(i ==0) {
-            break;
-        }
-
-        uint32_t next_level_node_id;
-        if(current->isHeader()) {
-            next_level_node_id = current->gps[0].value;            
-        }else {
-            int temp_idx = current->findKeyPos(key);
-            next_level_node_id = current->gps[temp_idx].value;
-        }
-
-        Inode *temp = dramInodePool->at(next_level_node_id);
-        assert(temp != nullptr);
-
-        //lock passing for the next level node
-        std::shared_lock<std::shared_mutex> next_vertical_lock(inode_locks[temp->getId()]);
-        current = temp;
-        updates.push_back(current);
-        current_lock.unlock();
-        current_lock = std::move(next_vertical_lock);
-    }
-
-    // at this point, current is the node in the last level
-    if(current->isHeader()) { //if the current node is a header node, it means no valid data exists
-        idx = -1;
-        return nullptr;
-    }
-
-    assert(current->hdr.last_index >= 0);
-    idx = current->findKeyPos(key);
-    return current;
-}
-#endif
-
 Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates)
 {
     int start_level = -1;
@@ -386,20 +399,29 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current, int currentHig
     // **步骤 1: 尝试从缓存获取起点**
     Inode *start_node = find_start_node_from_cache_shards(key, start_level);
 
-    // **步骤 2: 如果缓存命中，验证并返回结果
     if (start_node != nullptr) {
         std::shared_lock<std::shared_mutex> lock_start(inode_locks[start_node->getId()]);
-        int temp_idx = start_node->findKeyPos(key);
-        if (key >= start_node->gps[0].key && key <= start_node->gps[start_node->hdr.last_index].key) {
-            idx = temp_idx;
+        
+        // === 修改开始 ===
+        Key_t lower_bound = start_node->getMinKey();
+        Key_t upper_bound = get_node_upper_bound(start_node);
+
+        if (key >= lower_bound && key < upper_bound) {
+            // 验证成功！
+            idx = start_node->findKeyPos(key); // findKeyPos 内部会处理边界
             cache_hit_and_verified = true;
             current = start_node;
+            start_level = start_node->hdr.level;
+            // 在验证成功后，也应该记录/刷新 pivot，因为它是一个高质量的缓存项
+            tls_record_pivot(start_node); 
             current_lock.unlock();
             current_lock = std::move(lock_start);
         } else {
-            // 验证失败：使 TLS 路标失效，避免同一线程重复误命中
-            invalidate_tls_pivot();
-            current = temp_start; // 回退到调用方提供的起点
+        // === 修改结束 ===
+            // 验证失败：统计 + 使 TLS 标记失效
+            g_lfi_start_node_verify_failures.fetch_add(1, std::memory_order_relaxed);
+            tls_mark_fail(start_node->getMinKey());
+            current = temp_start;
         }
     }
 
@@ -574,32 +596,22 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
     std::vector<std::unique_ptr<dram_log_entry_t>> log_entries;
     log_entries.reserve(4);
 
-#ifdef RB_DEBUG
-    cout << "fastRebalance called for inode: " << inode->getId() << endl;
-    if(parent_inode_hint) {
-        cout << "Parent inode hint: " << parent_inode_hint->getId() << endl;
-    } else {
-        cout << "No parent inode hint." << endl;
-    }
-#endif
-
-    // 1. 准备阶段：获取一个空的新节点
     Inode *next_node = dramInodePool->getNextNode();
-    if (!next_node) return 0; // 分配失败
+    if (!next_node) return 0;
     next_node->hdr.level = inode->hdr.level;
 
-    // 主要的重试循环，处理乐观查找验证失败的情况
+    bool did_split_child   = false; // 新增：记录子节点是否分裂
+    bool created_parent    = false; // 新增：上层是否创建新父节点
+    bool parent_gp_changed = false; // 新增：父节点是否插入/激活了新 GP（结构变化）
+
     while (true) {
-        // 2. 乐观查找阶段 (无锁) - 基于原始 inode 的 minKey 寻找候选父节点
         Inode* candidate_parent = nullptr;
         Inode* candidate_next = nullptr;
         Inode* header_above = nullptr;
-        
+
         if (parent_inode_hint != nullptr) {
             Key_t child_min_key = inode->getMinKey();
             Inode* current_parent = parent_inode_hint;
-            
-            // 无锁地从父节点提示开始向右查找
             while (true) {
                 Inode* next_parent = dramInodePool->at(current_parent->hdr.next);
                 if (isTail(next_parent->getId()) || child_min_key < next_parent->getMinKey()) {
@@ -609,183 +621,120 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                 }
                 current_parent = next_parent;
             }
-#ifdef RB_DEBUG
-            cout << "Optimistic search found candidate parent: " << candidate_parent->getId() << endl;
-#endif
         } else if (inode->hdr.level < MAX_LEVEL - 1) {
             header_above = getHeader(inode->hdr.level + 1);
         }
 
-        // 3. 识别阶段：确定所有需要参与本次事务的节点
         std::vector<Inode*> nodes_to_lock;
         nodes_to_lock.push_back(inode);
-        nodes_to_lock.push_back(next_node); // next_node 此时是空的，但需要锁定以备写入
-
-        if (candidate_parent != nullptr) {
+        nodes_to_lock.push_back(next_node);
+        if (candidate_parent) {
             nodes_to_lock.push_back(candidate_parent);
-            if (candidate_next != nullptr && !isTail(candidate_next->getId())) {
+            if (candidate_next && !isTail(candidate_next->getId()))
                 nodes_to_lock.push_back(candidate_next);
-            }
         }
-        if (header_above != nullptr) {
-            nodes_to_lock.push_back(header_above);
-        }
+        if (header_above) nodes_to_lock.push_back(header_above);
 
-        // 4. 加锁阶段：原子性地获取所有锁
         std::vector<std::unique_lock<std::shared_mutex>> acquired_locks;
         acquireLocksInOrder(nodes_to_lock, acquired_locks);
 
-        // 5. 验证与事务操作阶段 (持有所有锁)
         try {
-            // 5.1 基本前提条件检查
             if (inode->hdr.last_index < fanout / 2 - 1) {
-#ifdef RB_DEBUG
-                cout << "Node no longer needs rebalancing. Aborting." << endl;
-#endif
-                return 0; 
+                return 0; // 无需重平衡：未改变结构，不 bump_epoch
             }
 
-            // 5.2 验证父节点查找结果
             Inode* verified_parent = nullptr;
-            if (candidate_parent != nullptr) {
-                // 验证链表结构是否改变
+            if (candidate_parent) {
                 if (dramInodePool->at(candidate_parent->hdr.next) != candidate_next) {
-                    cout << "Parent validation failed: next pointer changed. Retrying..." << endl;
-                    continue; // 验证失败，释放锁并重试
+                    continue; // 重试，不 bump
                 }
                 verified_parent = candidate_parent;
             }
 
-            // 5.3 处理父节点创建（如果需要）
-            if (verified_parent == nullptr && header_above != nullptr) {
-                // 因为 header_above 已被锁定，这里的检查是线程安全的
+            if (!verified_parent && header_above) {
                 if (isTail(header_above->hdr.next)) {
-                    // 创建新父节点
                     verified_parent = dramInodePool->getNextNode();
-                    if (!verified_parent) {
-                        cout << "Failed to allocate parent node" << endl;
-                        return 0;
-                    }
+                    if (!verified_parent) return 0;
                     verified_parent->hdr.level = inode->hdr.level + 1;
-                    verified_parent->hdr.next = header_above->hdr.next;
-                    assert(verified_parent->hdr.next != 0);
-                    header_above->hdr.next = verified_parent->getId();
-                    assert(header_above->hdr.next != 0);
+                    verified_parent->hdr.next  = header_above->hdr.next;
+                    header_above->hdr.next     = verified_parent->getId();
                     verified_parent->insertAtPos(inode->getMinKey(), inode->getId(), 0, 1);
 
-                    increaseLevel();
-
+                    increaseLevel();          // 提升全局层数
+                    created_parent = true;     // 标记结构变化
                     log_entries.emplace_back(create_log_entry(verified_parent));
                     log_entries.emplace_back(create_log_entry(header_above));
-#ifdef RB_DEBUG
-                    cout << "Created new parent node: " << verified_parent->getId() << endl;
-#endif
                 } else {
-                    // 其他线程已创建父节点，需要找到它。
                     verified_parent = dramInodePool->at(header_above->hdr.next);
                 }
             }
 
-            // 5.4 执行分裂（核心修改）
+            // 子节点分裂
             next_node->hdr.next = inode->hdr.next;
             inode->hdr.next = next_node->getId();
             inode->split(next_node);
-            assert(next_node->hdr.next != 0);
-            assert(inode->hdr.next != 0);
-            Key_t new_min_key = next_node->getMinKey();
-#ifdef RB_DEBUG       
-            cout << "Split completed under lock. New node: " << next_node->getId() 
-                 << " with min_key: " << new_min_key << endl;
-#endif
+            did_split_child = true;
 
-            // 5.5 更新父节点
+            Key_t new_min_key = next_node->getMinKey();
+
             if (verified_parent) {
-                // 父节点可能分裂多次，需要一个循环来找到 next_node 正确的父节点。
-                // 这个循环在已获取的锁的保护下安全地执行。
                 while (true) {
                     Inode* next_parent_node = dramInodePool->at(verified_parent->hdr.next);
-
-                    // 如果 new_min_key 小于下一个父节点的 minKey，说明当前的 verified_parent 就是正确的父节点。
                     if (isTail(next_parent_node->getId()) || new_min_key < next_parent_node->getMinKey()) {
-                        break; // 找到了正确的父节点，退出循环。
-                    }
-
-                    // 安全检查：如果要移动到下一个父节点，我们必须确保已经锁定了它。
-                    if (next_parent_node != candidate_next) {
-                        verified_parent = nullptr; // 标记为未找到
                         break;
                     }
-                    
-                    // 安全地移动到下一个父节点，因为我们已经确认锁定了它。
+                    if (next_parent_node != candidate_next) {
+                        verified_parent = nullptr;
+                        break;
+                    }
                     verified_parent = next_parent_node;
-                    candidate_next = dramInodePool->at(verified_parent->hdr.next); // 更新下一个节点以备下一次循环
-#ifdef RB_DEBUG
-                    cout << "Parent adjusted to the right under lock: " << verified_parent->getId() << endl;
-#endif
+                    candidate_next  = dramInodePool->at(verified_parent->hdr.next);
+                }
+                if (!verified_parent) {
+                    continue; // 父链验证失败重试
                 }
 
-                if (verified_parent == nullptr) {
-                    // 上面的循环因为遇到了未锁定的节点而中止
-#ifdef RB_DEBUG
-                    cout << "Parent chain changed beyond locked scope. Retrying..." << endl;
-#endif
-                    continue; 
-                }
-
-                // 在已找到的、正确的父节点上插入对 next_node 的引用
-                // **核心修改：在这里调用 isUnbalanced()**
-                
-                // 检查父节点是否已满，如果满了就不能再激活GP，必须分裂父节点
                 if (verified_parent->isFull()) {
-                    ret = 2; // 标记父节点需要重平衡
-                    // 注意：这里可能需要将 verified_parent 加入重平衡队列的逻辑
-                }else {
+                    ret = 2;
+                } else {
                     int pos = verified_parent->findKeyPos(inode->getMinKey());
-                    if(verified_parent->isUnbalanced(pos)) {
+                    if (verified_parent->isUnbalanced(pos)) {
                         int temp_pos = -1;
-                        if(verified_parent->activateGP(new_min_key, next_node->getId(), temp_pos, 1)) {
-                            // 成功激活GP，更新日志和关系
+                        if (verified_parent->activateGP(new_min_key, next_node->getId(), temp_pos, 1)) {
                             log_entries.emplace_back(create_log_entry(verified_parent));
                             recordInodeRelation(next_node, verified_parent);
-                            ret = 1; // 分裂成功
+                            parent_gp_changed = true;
+                            ret = 1;
                         } else {
-                            // activateGP 理论上不应失败，因为我们已经检查过 isFull()
-                            // 但为健壮性考虑，如果失败，则标记父节点需要重平衡
                             ret = 2;
                         }
-                    }else {
-                        // 父节点未满且未达到不平衡阈值
-                        // 只增加对应GP的覆盖计数
+                    } else {
                         verified_parent->gps[pos].covered_nodes++;
                         recordInodeRelation(next_node, verified_parent);
-                        ret = 1; // 分裂成功
+                        parent_gp_changed = true; // 覆盖数变化也改变区间边界
+                        ret = 1;
                     }
                 }
             } else {
-                ret = 1; // 最高层分裂
+                ret = 1;
             }
 
-            // 5.6 记录日志并更新父节点提示
             log_entries.emplace_back(create_log_entry(inode));
             log_entries.emplace_back(create_log_entry(next_node));
             parent_inode_hint = verified_parent;
-
-            // 成功完成，退出重试循环
             break;
 
-        } catch (const std::exception& e) {
-            std::cerr << "Exception during fastRebalance: " << e.what() << std::endl;
+        } catch (...) {
             return 0;
         }
-    } // end of retry while loop
-
-    // 6. 日志提交阶段
-    for (auto &entry : log_entries) {
-        ckpt_log->enq(entry.release());
     }
-#ifdef RB_DEBUG
-    cout << "fastRebalance completed with result: " << ret << endl;
-#endif
+
+    for (auto &e : log_entries) ckpt_log->enq(e.release());
+
+    // 统一：只要发生任何结构性修改就 bump_epoch
+    if (created_parent) {
+        bump_epoch();
+    }
     return ret;
 }
 
@@ -1026,32 +975,23 @@ void DramSkiplist::acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<s
 
 Inode *DramSkiplist::find_start_node_from_cache_shards(Key_t key, int& start_level) 
 {
-#if 1
-    if (tls_pivot_node_ && key >= tls_pivot_key_) {
-        start_level = tls_pivot_node_->hdr.level;
-        return tls_pivot_node_;
-    }
-#endif
+    if (Inode* n = tls_try_match(key, start_level)) return n;
 
     size_t s = shard_of(key);
     CacheShard& shard = cache_shards[s];
     std::shared_lock<std::shared_mutex> r(shard.mtx);
-    if(shard.table.empty()) return nullptr;
+    if (shard.table.empty()) return nullptr;
 
     auto it = shard.table.upper_bound(key);
     if (it == shard.table.begin()) {
-        return nullptr; // 没有可用的起点
+        return nullptr;
     }
-    
-    --it; // 回退到第一个键值 <= key 的元素
-
+    -- it;
     Inode* start_node = it->second;
-    if(start_node) {
-        start_level = start_node->hdr.level;
-        update_tls_pivot(it->first, start_node);
-        return start_node;
-    }
-    return nullptr;
+    if (!start_node) return nullptr;
+    start_level = start_node->hdr.level;
+    tls_record_pivot(start_node);
+    return start_node;
 }
 
 // **新增实现：从缓存中查找起点**
@@ -1127,9 +1067,8 @@ void DramSkiplist::populate_cache(Key_t key, Inode* leaf_node, int current_total
     }
 
     if (node_to_cache == nullptr) return;
-
-    // 非阻塞获取祖先最小键（失败就放弃本次写入）
     Key_t cache_key;
+    // 非阻塞获取祖先最小键（失败就放弃本次写入）
     {
         std::shared_lock<std::shared_mutex> ancestor_lock(inode_locks[node_to_cache->getId()], std::try_to_lock);
         if (!ancestor_lock.owns_lock()) return;
@@ -1199,4 +1138,16 @@ void DramSkiplist::invalidate_tls_pivot() {
 void DramSkiplist::update_tls_pivot(Key_t key, Inode* node) {
     tls_pivot_key_  = key;
     tls_pivot_node_ = node;
+}
+
+// 新增辅助函数：获取节点的真实管辖上界
+Key_t DramSkiplist::get_node_upper_bound(Inode* node) {
+    if (!node || node->isTail()) {
+        return std::numeric_limits<Key_t>::max();
+    }
+    Inode* next_node = dramInodePool->at(node->hdr.next);
+    if (!next_node || next_node->isTail()) {
+        return std::numeric_limits<Key_t>::max();
+    }
+    return next_node->getMinKey();
 }
