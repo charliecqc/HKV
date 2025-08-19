@@ -976,7 +976,6 @@ void DramSkiplist::acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<s
 Inode *DramSkiplist::find_start_node_from_cache_shards(Key_t key, int& start_level) 
 {
     if (Inode* n = tls_try_match(key, start_level)) return n;
-
     size_t s = shard_of(key);
     CacheShard& shard = cache_shards[s];
     std::shared_lock<std::shared_mutex> r(shard.mtx);
@@ -988,10 +987,10 @@ Inode *DramSkiplist::find_start_node_from_cache_shards(Key_t key, int& start_lev
     }
     -- it;
     Inode* start_node = it->second;
-    if (!start_node) return nullptr;
-    start_level = start_node->hdr.level;
-    tls_record_pivot(start_node);
-    return start_node;
+    if (!start_node) 
+        return nullptr;
+    else
+        return start_node;
 }
 
 // **新增实现：从缓存中查找起点**
