@@ -6,6 +6,7 @@
 #include "workerThread.h"
 #include "checkpoint.h"
 #include "common.h"
+#include "statsampler.h"
 #include <sys/syscall.h>
 
 //std::queue<std::vector<wq_entry *>*> g_workQueue[WORKERQUEUE_NUM];
@@ -306,11 +307,13 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     std::unique_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[parent_inode->getId()]);
     
     // 这个检查仍然非常重要，用于防止在分裂和更新父节点之间发生其他并发修改
+    // This check is still critical: prevents proceeding if other concurrent modifications happened between split and parent update
     if(parent_inode->hdr.last_index != last_idx) {
 #if 0
         std::cout << "Inode last_index mismatch after split, likely a concurrent modification. id: "  << parent_inode->getId() << std::endl;
 #endif
         return true; // 操作被抢占，直接返回，让上层逻辑重试
+        // Operation was preempted; return and let upper logic retry
     }
 
     BloomFilter* target_bloom = &valueList->bf[targetVnode->getId()];
@@ -321,12 +324,19 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
         // **逻辑正确**: 父节点足够平衡，不需激活新GP。
         // 只需找到覆盖了原Vnode的那个GP，并将其覆盖计数加一。
+        // Correct logic: parent remains sufficiently balanced; no new GP needed
+        // Just increment the covered count of the existing GP that spans the original Vnode
+
         //int pos = parent_inode->findKeyPos(targetKey);
         //if (pos != -1) { // 确保找到了位置
         parent_inode->gps[idx_to_next_level].covered_nodes++;
+
+        // using the minimum key of the newly created vnode for sampling [tracking children for leaf nodes]
+        samplingTable.sampleInsert(parent_inode->getId(), targetKey);
+        
         //}
         
-        target_lock.unlock(); // 释放targetVnode的锁
+        target_lock.unlock(); // 释放targetVnode的锁 ---- Release target Vnode lock
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
         for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
             entry->setKeyVal(i, parent_inode->gps[i].key, parent_inode->gps[i].value, parent_inode->gps[i].covered_nodes);
@@ -338,6 +348,8 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     int pos = -1;
     // **逻辑正确**: 父节点不平衡，需要激活一个新GP来指向新分裂出的Vnode。
     // 新GP只覆盖这一个Vnode，所以初始覆盖数是1。
+    // Correct logic: parent is unbalanced; need to activate a new GP for the newly split Vnode
+    // New GP covers only this single Vnode initially, so covered_nodes starts at 1
     if (parent_inode->activateGP(targetKey, targetVnode->getId(), pos, 1)) {
         target_lock.unlock(); // 释放targetVnode的锁
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
@@ -349,12 +361,16 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     } else {
         // **逻辑正确**: 父节点不平衡，且已经满了，无法激活新GP。
         // 必须对父节点自身进行重平衡。
+        // Correct logic: parent is unbalanced and already full; cannot activate a new GP
+        // Must enqueue the parent for rebalancing
         
         // 记录从根到目标节点的路径上所有父子关系，为重平衡提供父节点指针
+        // Record all parent–child relationships along the path (root to target) to supply parents for rebalancing
         for (size_t i = 1; i < updates.size(); ++i) {
             mainIndex->recordInodeRelation(updates[i], updates[i-1]);
         }
         // 将需要重平衡的节点及其父节点信息添加到重平衡任务中
+        // Add the node (and its recorded ancestry) to the rebalance task queue
         assert(parent_inode->hdr.last_index == fanout / 2 - 1);
         addToRebalanceQueue(parent_inode);
         return true;
