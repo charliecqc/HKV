@@ -338,7 +338,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     int pos = -1;
     // **逻辑正确**: 父节点不平衡，需要激活一个新GP来指向新分裂出的Vnode。
     // 新GP只覆盖这一个Vnode，所以初始覆盖数是1。
-    if (parent_inode->activateGP(targetKey, targetVnode->getId(), pos, 1)) {
+    if (parent_inode->activateGPForVnode(targetKey, targetVnode->getId(), pos, 1)) {
         target_lock.unlock(); // 释放targetVnode的锁
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
         for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
@@ -558,6 +558,8 @@ void TandemIndex::addToRebalanceQueue(Inode *&inode)
         nodesInRebalanceProcess.find(inode) == nodesInRebalanceProcess.end()) {
         rebalanceQueue.push(inode);
         rebalancingInodes.insert(inode);
+    }else {
+        cout << "inode " << inode->getId() << " is already in the rebalance queue or being processed." << endl;
     }
 }
 

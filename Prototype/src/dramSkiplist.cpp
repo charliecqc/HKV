@@ -5,6 +5,8 @@
 #include <optional>
 #include <map>
 #include <shared_mutex>
+#include <atomic>
+#include <fstream>   // 新增
 
 #define numNodesInPool 10000000
 
@@ -22,6 +24,85 @@ namespace {
                       << g_lfi_start_node_verify_failures.load() << std::endl;
         }
     } g_lfi_counter_printer; // 程序结束时自动打印
+
+    // ==== 新增：横向移动超阈值事件统计 ====
+
+    struct HorizontalExcessEvent {
+        Key_t    key;
+        uint32_t level;
+        uint32_t steps; // 实际横移次数
+    };
+
+    // 事件缓冲容量（可根据需要调整，避免占用过多内存）
+    constexpr size_t HORIZONTAL_EVENT_CAPACITY = 1000000; // 最多记录50万条
+    alignas(64) static HorizontalExcessEvent g_horizontal_events[HORIZONTAL_EVENT_CAPACITY];
+
+    std::atomic<uint64_t> g_horizontal_event_write_idx{0};  // 已写入事件数(可能超过容量)
+    std::atomic<uint64_t> g_horizontal_event_overflow{0};   // 超出容量丢弃计数
+    alignas(64) std::atomic<uint64_t> g_horizontal_total{0}; // 总触发次数
+    alignas(64) std::atomic<uint64_t> g_horizontal_by_level[MAX_LEVEL]; // 分层计数
+    alignas(64) std::atomic<uint64_t> g_horizontal_steps_hist[64]; // 简单步数桶 (0..63, >=63 合并)
+
+    struct HorizontalEventDumper {
+        ~HorizontalEventDumper() {
+            uint64_t total = g_horizontal_total.load(std::memory_order_relaxed);
+            if (total == 0) {
+                std::cout << "[统计] 无横移超阈值事件\n";
+                return;
+            }
+            // 输出汇总
+            std::cout << "[统计] 横向超阈值事件总次数: " << total
+                      << " (记录上限=" << HORIZONTAL_EVENT_CAPACITY
+                      << ", 丢弃=" << g_horizontal_event_overflow.load() << ")\n";
+            for (int l = 0; l < MAX_LEVEL; ++l) {
+                uint64_t c = g_horizontal_by_level[l].load(std::memory_order_relaxed);
+                if (c)
+                    std::cout << "  Level " << l << ": " << c << " 次\n";
+            }
+            std::cout << "[统计] 步数分布(steps -> count): ";
+            for (int i = 0; i < 64; ++i) {
+                uint64_t c = g_horizontal_steps_hist[i].load(std::memory_order_relaxed);
+                if (c) {
+                    if (i < 63)
+                        std::cout << i << ":" << c << " ";
+                    else
+                        std::cout << ">=63:" << c << " ";
+                }
+            }
+            std::cout << "\n";
+
+            // 将事件写入文件
+            std::ofstream ofs("horizontal_travel_events.log");
+            if (ofs) {
+                uint64_t cap = std::min<uint64_t>(g_horizontal_event_write_idx.load(), HORIZONTAL_EVENT_CAPACITY);
+                ofs << "# key level steps\n";
+                for (uint64_t i = 0; i < cap; ++i) {
+                    const auto &e = g_horizontal_events[i];
+                    ofs << e.key << " " << e.level << " " << e.steps << "\n";
+                }
+                if (g_horizontal_event_overflow.load() > 0) {
+                    ofs << "# dropped " << g_horizontal_event_overflow.load()
+                        << " events due to capacity limit\n";
+                }
+            } else {
+                std::cout << "[警告] 无法写入 horizontal_travel_events.log\n";
+            }
+        }
+    } g_horizontal_event_dumper;
+
+    inline void record_horizontal_excess(Key_t key, int level, uint32_t steps) {
+        g_horizontal_total.fetch_add(1, std::memory_order_relaxed);
+        g_horizontal_by_level[level].fetch_add(1, std::memory_order_relaxed);
+        uint32_t bucket = steps < 63 ? steps : 63;
+        g_horizontal_steps_hist[bucket].fetch_add(1, std::memory_order_relaxed);
+
+        uint64_t idx = g_horizontal_event_write_idx.fetch_add(1, std::memory_order_relaxed);
+        if (idx < HORIZONTAL_EVENT_CAPACITY) {
+            g_horizontal_events[idx] = HorizontalExcessEvent{ key, static_cast<uint32_t>(level), steps };
+        } else {
+            g_horizontal_event_overflow.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 
@@ -36,7 +117,6 @@ Inode* DramSkiplist::tls_try_match(Key_t key, int& start_level) {
         if (!e.node) continue;
         if (e.epoch != cur_epoch || e.fail_cnt >= 3) { e.node = nullptr; continue; }
         if (key >= e.min_key && key < e.upper_key) {
-            start_level = e.node->hdr.level;
             return e.node;
         }
     }
@@ -429,46 +509,52 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current, int currentHig
     if (!cache_hit_and_verified) {
         start_level = currentHighestLevelIndex;
     }
-    //cout << "Starting lookup for key: " << key << " at level: " << start_level << endl;
+    //cout << "Starting lookup for key: " << key << " at level: " << start_level <<" node: " << current->getId()<< endl;
     for(int i = start_level; i >= 0; i--) {
-        // no real index nodes between header and tail
-        //search among the nodes in the current level
+        uint32_t horizontal_steps = 0; // 新增：本层横向移动次数
+
         while(true) {
             assert(current != nullptr);
             {
                 Inode *next = dramInodePool->at(current->hdr.next);
                 std::shared_lock<std::shared_mutex> next_horizental_lock(inode_locks[next->getId()]);
-                //cout << "current: " << current->getId() << ", next: " << next->getId() << " at level: " << i << " for key: "<< key << endl;
                 if(!next->isTail() && key >= next->getMinKey()) {
                     assert(current->getMaxKey() <= next->getMinKey());
                     current = next;
                     current_lock.unlock();
                     current_lock = std::move(next_horizental_lock);
+                    //cout << "  Moved to node ID: " << current->getId() << " at level: " << i << endl;
+                    ++horizontal_steps; // 计数
                 } else {
-                    // found the node in this level, escape the look and go to the next level
                     break;
                 }
             }
         }
-        //if already on the last level, return the current node
+
+        {
+            const int threshold = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[i] + 1.0;
+            if (horizontal_steps > (uint32_t)threshold) {
+                record_horizontal_excess(key, i, horizontal_steps);
+            }
+        }
+
         if(i ==0) {
             break;
         }
 
         uint32_t next_level_node_id;
         if(current->isHeader()) {
-            next_level_node_id = current->gps[0].value;            
-            //cout << "Header node, next level node ID: " << next_level_node_id << endl;
-        }else {
+            next_level_node_id = current->gps[0].value;
+            //cout << "current is header, next level node id is : " << next_level_node_id << endl;
+        } else {
             int temp_idx = current->findKeyPos(key);
             next_level_node_id = current->gps[temp_idx].value;
-            //cout << "Non-header node, next level node ID: " << next_level_node_id << endl;
+            //cout << "current is not header, next level node id is : " << next_level_node_id << endl;
         }
 
         Inode *temp = dramInodePool->at(next_level_node_id);
         assert(temp != nullptr);
 
-        //lock passing for the next level node
         std::shared_lock<std::shared_mutex> next_vertical_lock(inode_locks[temp->getId()]);
         updates.push_back(current);
         current = temp;
@@ -476,15 +562,12 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current, int currentHig
         current_lock = std::move(next_vertical_lock);
     }
 
-    // at this point, current is the node in the last level
-    if(current->isHeader()) { //if the current node is a header node, it means no valid data exists
+    if(current->isHeader()) {
         idx = -1;
         return nullptr;
     }
 
-    // **步骤 5: 返回结果并填充缓存**
     populate_cache_shards(key, current, current_total_level);
-
     assert(current->hdr.last_index >= 0);
     idx = current->findKeyPos(key);
     return current;
@@ -598,6 +681,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
 
     Inode *next_node = dramInodePool->getNextNode();
     if (!next_node) return 0;
+    cout << "Starting Rebalance node: " << inode->getId() <<  " get new node: " << next_node->getId() << "at level: " << inode->hdr.level << endl;
     next_node->hdr.level = inode->hdr.level;
 
     bool did_split_child   = false; // 新增：记录子节点是否分裂
@@ -608,6 +692,8 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
         Inode* candidate_parent = nullptr;
         Inode* candidate_next = nullptr;
         Inode* header_above = nullptr;
+        Inode* current_parent = nullptr;
+        Key_t child_min_key = inode->getMinKey();
 
         if (parent_inode_hint != nullptr) {
             Key_t child_min_key = inode->getMinKey();
@@ -623,6 +709,20 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
             }
         } else if (inode->hdr.level < MAX_LEVEL - 1) {
             header_above = getHeader(inode->hdr.level + 1);
+            current_parent = header_above;
+            while(true) {
+                Inode* next_parent = dramInodePool->at(current_parent->hdr.next);
+                if (isTail(next_parent->getId()) || child_min_key < next_parent->getMinKey()) {
+                    candidate_parent = current_parent;
+                    candidate_next = next_parent;
+                    break;
+                }
+                current_parent = next_parent;
+            }
+            if(current_parent->getId() == header_above->getId()) {
+                candidate_parent = nullptr;
+                candidate_next = nullptr;
+            }
         }
 
         std::vector<Inode*> nodes_to_lock;
@@ -640,13 +740,14 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
 
         try {
             if (inode->hdr.last_index < fanout / 2 - 1) {
-                return 0; // 无需重平衡：未改变结构，不 bump_epoch
+                return 0; //no need to rebalance, inode has been rebalanced in the other rounds.
             }
 
             Inode* verified_parent = nullptr;
             if (candidate_parent) {
+                //check if the candidate parent's next is still candidate_next
                 if (dramInodePool->at(candidate_parent->hdr.next) != candidate_next) {
-                    continue; // 重试，不 bump
+                    continue; 
                 }
                 verified_parent = candidate_parent;
             }
@@ -654,6 +755,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
             if (!verified_parent && header_above) {
                 if (isTail(header_above->hdr.next)) {
                     verified_parent = dramInodePool->getNextNode();
+                    cout << "create new parent node: " << verified_parent->getId() << " first child node: " << inode->getId() << endl;
                     if (!verified_parent) return 0;
                     verified_parent->hdr.level = inode->hdr.level + 1;
                     verified_parent->hdr.next  = header_above->hdr.next;
@@ -668,15 +770,10 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                     verified_parent = dramInodePool->at(header_above->hdr.next);
                 }
             }
-
-            // 子节点分裂
-            next_node->hdr.next = inode->hdr.next;
-            inode->hdr.next = next_node->getId();
-            inode->split(next_node);
-            did_split_child = true;
-
-            Key_t new_min_key = next_node->getMinKey();
-
+            //did_split_child = true;
+            int first_half_count =  (inode->hdr.last_index + 1) / 2;
+            Key_t new_min_key = inode->gps[first_half_count].key;
+            Inode *print_parent = nullptr;
             if (verified_parent) {
                 while (true) {
                     Inode* next_parent_node = dramInodePool->at(verified_parent->hdr.next);
@@ -684,23 +781,191 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                         break;
                     }
                     if (next_parent_node != candidate_next) {
+                        print_parent = verified_parent;
                         verified_parent = nullptr;
                         break;
                     }
                     verified_parent = next_parent_node;
                     candidate_next  = dramInodePool->at(verified_parent->hdr.next);
                 }
+                
                 if (!verified_parent) {
+                    cout << "Parent changed during fastRebalance, retrying..., parent was: " << print_parent->getId()<< endl;
                     continue; // 父链验证失败重试
                 }
 
+                Inode *temp_inode = new Inode(*inode);
+                memcpy(temp_inode->gps, inode->gps, sizeof(entry) * (fanout / 2));
+                temp_inode->hdr.last_index = inode->hdr.last_index;
+                next_node->hdr.next = inode->hdr.next;
+                inode->hdr.next = next_node->getId();
+                inode->split(next_node);
+                bool need_to_print = false;
+                bool need_to_dump = false;
+                for(int i = 0; i <= inode->hdr.last_index; i++) {
+                    int count = 0;
+                    Inode *start_node_of_chain = nullptr;
+                    if(inode->hdr.level > 0) {
+                        need_to_print = true;
+                        cout << "1 Split node: " << inode->getId() << " GP at pos " << i << " covered_nodes: " << inode->gps[i].covered_nodes << endl;
+                        start_node_of_chain = dramInodePool->at(inode->gps[i].value);
+                        while(start_node_of_chain != nullptr && i != fanout / 2 -1 && start_node_of_chain->getMinKey() < inode->gps[i+1].key) {
+                            std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                            start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                            count++;
+                        }    
+                        if(i == fanout / 2 -1) {
+                            while(start_node_of_chain != nullptr && start_node_of_chain->getMinKey() < next_node->getMinKey()) {
+                                std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                                start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                                count++;
+                            }
+                        }
+                        if(count > 4)
+                            need_to_dump = true;
+                    }
+                }
+                for(int j = 0; j <= next_node->hdr.last_index; j++) {
+                    int count = 0;
+                    Inode *start_node_of_chain = nullptr;
+                    if((next_node->hdr.level > 0)) {
+                        cout << "2 Split node: " << next_node->getId() << " GP at pos " << j << " covered_nodes: " << next_node->gps[j].covered_nodes << endl;
+                        start_node_of_chain = dramInodePool->at(next_node->gps[j].value);
+                        while(start_node_of_chain != nullptr && j!= next_node->hdr.last_index && start_node_of_chain->getMinKey() < next_node->gps[j+1].key) {
+                            std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                            start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                            count++;
+                        }    
+                        if(j == next_node->hdr.last_index) {
+                            Inode *next_of_next = dramInodePool->at(next_node->hdr.next);
+                            while(start_node_of_chain != nullptr && start_node_of_chain->getMinKey() < next_of_next->getMinKey()) {
+                                std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                                start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                                count++;
+                            }
+                        }
+                        if (count > 4)
+                            need_to_dump = true;
+                    }
+                    need_to_print = false;
+                }
+                if(need_to_dump) {
+                    for(int i = 0; i <= temp_inode->hdr.last_index; i++) {
+                        cout << "Dumping old inode: " << temp_inode->getId() << " GP at pos " << i << " covered_nodes: " << temp_inode->gps[i].covered_nodes << endl;
+                        Inode *start_node_of_chain = nullptr;
+                        start_node_of_chain = dramInodePool->at(temp_inode->gps[i].value);
+                        while(start_node_of_chain != nullptr && i != fanout / 2 -1 && start_node_of_chain->getMinKey() < temp_inode->gps[i+1].key) {
+                            std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                            start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                        }
+                        if(i == fanout / 2 -1) {
+                            Inode *next_of_next = dramInodePool->at(temp_inode->hdr.next);
+                            while(start_node_of_chain != nullptr && start_node_of_chain->getMinKey() < next_of_next->getMinKey()) {
+                                std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                                start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                            }
+                        }
+                    }
+                }
+                need_to_dump = false;
+
+
+                int pos = verified_parent->findKeyPos(inode->getMinKey());
+
                 if (verified_parent->isFull()) {
+                    verified_parent->gps[pos].covered_nodes++;
+                    cout << "Parent full during fastRebalance, cannot insert GP, Parent id: " << verified_parent->getId()<< endl;
                     ret = 2;
+                    Inode *next_parent = dramInodePool->at(verified_parent->hdr.next);
+                    for(int i = 0; i <= verified_parent->hdr.last_index; i++) {
+                        cout << "Due to parent node full, Dumping parent inode: " << verified_parent->getId() << " GP at pos " << i << " covered_nodes: " << verified_parent->gps[i].covered_nodes << endl;
+                        Inode *start_node_of_chain = nullptr;
+                        start_node_of_chain = dramInodePool->at(verified_parent->gps[i].value);
+                        while(start_node_of_chain != nullptr && i != fanout/2 - 1 && start_node_of_chain->getMinKey() < verified_parent->gps[i+1].key) {
+                            std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                            start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                        }
+                        if(i == fanout/2 - 1) {
+                            while(start_node_of_chain != nullptr && start_node_of_chain->getMinKey() < next_parent->getMinKey()) {
+                                std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                                start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                            }
+                        }
+                    }
                 } else {
-                    int pos = verified_parent->findKeyPos(inode->getMinKey());
+                    verified_parent->gps[pos].covered_nodes++;
+                    cout << "get next node: " << next_node->getId() << " inode: " << inode->getId() << " verified_parent: " << verified_parent->getId() << " pos: " << pos << " covered_nodes: " << verified_parent->gps[pos].covered_nodes<< endl;
                     if (verified_parent->isUnbalanced(pos)) {
                         int temp_pos = -1;
-                        if (verified_parent->activateGP(new_min_key, next_node->getId(), temp_pos, 1)) {
+                         // ===== 新增逻辑：计算相对位置 =====
+                        int16_t relative_pos = 0; // 默认为-1（未知）
+                        Inode* start_node_of_chain = dramInodePool->at(verified_parent->gps[pos].value);
+                        // 遍历由 gps[pos] 指向的子链表
+                        Inode* current_in_chain = start_node_of_chain;
+                        int count = 0;
+                        Key_t upper_bound_key = 0;
+
+                        if(pos + 1 <= verified_parent->hdr.last_index)
+                            upper_bound_key = verified_parent->gps[pos + 1].key;
+                        else
+                            upper_bound_key = dramInodePool->at(verified_parent->hdr.next)->getMinKey();
+
+                        while (current_in_chain != nullptr && !isTail(current_in_chain->getId())) {
+                            // 我们要找的是分裂前的节点 inode
+                            if (current_in_chain->getId() == inode->getId()) {
+                                relative_pos = count;
+                                break;
+                            }
+                            // 确定链表的结束边界
+                            // 如果下一个GP存在，则链表在下一个GP的minKey之前结束
+                            if (current_in_chain->getMinKey() >= upper_bound_key) {
+                                break;
+                            }
+                            current_in_chain = dramInodePool->at(current_in_chain->hdr.next);
+                            count++;
+                        }
+                        if(verified_parent->gps[pos].covered_nodes >= 4) {
+                        //for(int i = 0; i <= verified_parent->hdr.last_index; i++) {
+                            cout << "Dumping verified_parent inode: " << verified_parent->getId() << " GP at pos " << pos << " covered_nodes: " << verified_parent->gps[pos].covered_nodes << endl;
+                            Inode *start_node_of_chain = nullptr;
+                            start_node_of_chain = dramInodePool->at(verified_parent->gps[pos].value);
+                            Key_t hdr_next_min_key = 0;
+                            if(pos != verified_parent->hdr.last_index)
+                                hdr_next_min_key = verified_parent->gps[pos+1].key;
+                            else
+                                hdr_next_min_key = dramInodePool->at(verified_parent->hdr.next)->getMinKey();
+
+                            while(start_node_of_chain != nullptr && start_node_of_chain->getMinKey() < hdr_next_min_key) {
+                                std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                                start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                            }
+                        //}        
+                        }
+                        //relative_pos is the position of the split node (inode) in the covered nodes chain
+                        if (verified_parent->activateGP(new_min_key, next_node->getId(), temp_pos, relative_pos)) {
+                            if(verified_parent->gps[temp_pos].covered_nodes >= 4) {
+                                cout << "Dumping after activteGP, covered node still 4 verified_parent inode: " << verified_parent->getId() << " GP at pos " << temp_pos << " covered_nodes: " << verified_parent->gps[temp_pos].covered_nodes << endl;
+                                Inode *start_node_of_chain = nullptr;
+                                start_node_of_chain = dramInodePool->at(verified_parent->gps[temp_pos].value);
+                                Key_t hdr_next_min_key = 0;
+                                if(pos != verified_parent->hdr.last_index)
+                                    hdr_next_min_key = verified_parent->gps[pos+1].key;
+                                else
+                                    hdr_next_min_key = dramInodePool->at(verified_parent->hdr.next)->getMinKey();
+                                while(start_node_of_chain != nullptr && start_node_of_chain->getMinKey() < hdr_next_min_key) {
+                                    std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                                    start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                                }
+                            }
+                            else if(verified_parent->gps[temp_pos - 1].covered_nodes == 0) {
+                                cout << "Dumping after activteGP, covered node still 4 verified_parent inode: " << verified_parent->getId() << " GP at pos " << temp_pos - 1<< " covered_nodes: " << verified_parent->gps[temp_pos - 1].covered_nodes << endl;
+                                Inode *start_node_of_chain = nullptr;
+                                start_node_of_chain = dramInodePool->at(verified_parent->gps[temp_pos - 1].value);
+                                while(start_node_of_chain != nullptr && start_node_of_chain->getMinKey() < verified_parent->gps[temp_pos].key) {
+                                    std::cout << "   -> covered node id: " << start_node_of_chain->getId() << " minKey: " << start_node_of_chain->getMinKey() << std::endl;
+                                    start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
+                                }
+                            }
                             log_entries.emplace_back(create_log_entry(verified_parent));
                             recordInodeRelation(next_node, verified_parent);
                             parent_gp_changed = true;
@@ -709,21 +974,23 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                             ret = 2;
                         }
                     } else {
-                        verified_parent->gps[pos].covered_nodes++;
+                       // verified_parent->gps[pos].covered_nodes++;
+                        cout << "Parent node: " << verified_parent->getId() << " GP at pos " << pos << " covered_nodes increased to " << verified_parent->gps[pos].covered_nodes <<" by adding node: " << next_node->getId() << endl;
                         recordInodeRelation(next_node, verified_parent);
                         parent_gp_changed = true; // 覆盖数变化也改变区间边界
                         ret = 1;
                     }
                 }
             } else {
+                cout << "Error: no parent found during fastRebalance" << endl;
                 ret = 1;
             }
-
+            // 子节点分裂
+            
             log_entries.emplace_back(create_log_entry(inode));
             log_entries.emplace_back(create_log_entry(next_node));
             parent_inode_hint = verified_parent;
             break;
-
         } catch (...) {
             return 0;
         }
