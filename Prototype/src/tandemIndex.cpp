@@ -559,7 +559,7 @@ void TandemIndex::addToRebalanceQueue(Inode *&inode)
         rebalanceQueue.push(inode);
         rebalancingInodes.insert(inode);
     }else {
-        cout << "inode " << inode->getId() << " is already in the rebalance queue or being processed." << endl;
+        //cout << "inode " << inode->getId() << " is already in the rebalance queue or being processed." << endl;
     }
 }
 

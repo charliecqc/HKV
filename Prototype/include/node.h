@@ -237,10 +237,11 @@ public:
             // **将 initial_covered_nodes 传递下去**
             this->insertAtPos(targetKey, value, pos, old_covered_nodes - relative_pos - 1);
             this->gps[pos-1].covered_nodes = relative_pos + 1; // 设置新GP的初始覆盖数
-            std::cout << "after activateGP, inode id: " << this->getId() << " pos: " << pos << " covered_nodes: "<<this->gps[pos].covered_nodes << " " << pos - 1 << " covered_nodes: "<< this->gps[pos-1].covered_nodes<< std::endl;
+#if 0
             if(this->gps[pos-1].covered_nodes == 4 || this->gps[pos].covered_nodes == 4) {
                 std::cout << "Warning: A GP has 4 covered nodes after activate anther GP, inode id: " << this->getId() << " pos: " << pos << " covered_nodes: "<<this->gps[pos].covered_nodes << " " << pos - 1 << " covered_nodes:" << this->gps[pos-1].covered_nodes<< std::endl;
             }
+#endif
             assert(this->gps[pos-1].covered_nodes >= 1);
             return true;
         }
@@ -421,10 +422,12 @@ public:
         double coefficient = (current_level < MAX_LEVEL) ? 
                              SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
                              SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+#if 0
         int16_t temp_covered_nodes = this->gps[idx].covered_nodes; 
         if(temp_covered_nodes == 4 && this->hdr.level == 1) {
             std::cout << "GP at index " << idx << " has exactly 4 covered nodes." << std::endl;
         }
+#endif
         if (this->gps[idx].covered_nodes > coefficient) {
             return true;
         }

@@ -681,7 +681,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
 
     Inode *next_node = dramInodePool->getNextNode();
     if (!next_node) return 0;
-    cout << "Starting Rebalance node: " << inode->getId() <<  " get new node: " << next_node->getId() << "at level: " << inode->hdr.level << endl;
+//    cout << "Starting Rebalance node: " << inode->getId() <<  " get new node: " << next_node->getId() << "at level: " << inode->hdr.level << endl;
     next_node->hdr.level = inode->hdr.level;
 
     bool did_split_child   = false; // 新增：记录子节点是否分裂
@@ -755,7 +755,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
             if (!verified_parent && header_above) {
                 if (isTail(header_above->hdr.next)) {
                     verified_parent = dramInodePool->getNextNode();
-                    cout << "create new parent node: " << verified_parent->getId() << " first child node: " << inode->getId() << endl;
+                    //cout << "create new parent node: " << verified_parent->getId() << " first child node: " << inode->getId() << endl;
                     if (!verified_parent) return 0;
                     verified_parent->hdr.level = inode->hdr.level + 1;
                     verified_parent->hdr.next  = header_above->hdr.next;
@@ -800,6 +800,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                 next_node->hdr.next = inode->hdr.next;
                 inode->hdr.next = next_node->getId();
                 inode->split(next_node);
+#if 0
                 bool need_to_print = false;
                 bool need_to_dump = false;
                 for(int i = 0; i <= inode->hdr.last_index; i++) {
@@ -868,14 +869,15 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                     }
                 }
                 need_to_dump = false;
-
+#endif
 
                 int pos = verified_parent->findKeyPos(inode->getMinKey());
 
                 if (verified_parent->isFull()) {
                     verified_parent->gps[pos].covered_nodes++;
-                    cout << "Parent full during fastRebalance, cannot insert GP, Parent id: " << verified_parent->getId()<< endl;
+//                    cout << "Parent full during fastRebalance, cannot insert GP, Parent id: " << verified_parent->getId()<< endl;
                     ret = 2;
+#if 0
                     Inode *next_parent = dramInodePool->at(verified_parent->hdr.next);
                     for(int i = 0; i <= verified_parent->hdr.last_index; i++) {
                         cout << "Due to parent node full, Dumping parent inode: " << verified_parent->getId() << " GP at pos " << i << " covered_nodes: " << verified_parent->gps[i].covered_nodes << endl;
@@ -892,9 +894,10 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                             }
                         }
                     }
+#endif
                 } else {
                     verified_parent->gps[pos].covered_nodes++;
-                    cout << "get next node: " << next_node->getId() << " inode: " << inode->getId() << " verified_parent: " << verified_parent->getId() << " pos: " << pos << " covered_nodes: " << verified_parent->gps[pos].covered_nodes<< endl;
+//                  cout << "get next node: " << next_node->getId() << " inode: " << inode->getId() << " verified_parent: " << verified_parent->getId() << " pos: " << pos << " covered_nodes: " << verified_parent->gps[pos].covered_nodes<< endl;
                     if (verified_parent->isUnbalanced(pos)) {
                         int temp_pos = -1;
                          // ===== 新增逻辑：计算相对位置 =====
@@ -902,7 +905,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                         Inode* start_node_of_chain = dramInodePool->at(verified_parent->gps[pos].value);
                         // 遍历由 gps[pos] 指向的子链表
                         Inode* current_in_chain = start_node_of_chain;
-                        int count = 0;
+                        int index = 0;
                         Key_t upper_bound_key = 0;
 
                         if(pos + 1 <= verified_parent->hdr.last_index)
@@ -913,7 +916,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                         while (current_in_chain != nullptr && !isTail(current_in_chain->getId())) {
                             // 我们要找的是分裂前的节点 inode
                             if (current_in_chain->getId() == inode->getId()) {
-                                relative_pos = count;
+                                relative_pos = index;
                                 break;
                             }
                             // 确定链表的结束边界
@@ -922,8 +925,9 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                                 break;
                             }
                             current_in_chain = dramInodePool->at(current_in_chain->hdr.next);
-                            count++;
+                            index++;
                         }
+#if 0
                         if(verified_parent->gps[pos].covered_nodes >= 4) {
                         //for(int i = 0; i <= verified_parent->hdr.last_index; i++) {
                             cout << "Dumping verified_parent inode: " << verified_parent->getId() << " GP at pos " << pos << " covered_nodes: " << verified_parent->gps[pos].covered_nodes << endl;
@@ -941,8 +945,10 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                             }
                         //}        
                         }
+#endif
                         //relative_pos is the position of the split node (inode) in the covered nodes chain
                         if (verified_parent->activateGP(new_min_key, next_node->getId(), temp_pos, relative_pos)) {
+#if 0
                             if(verified_parent->gps[temp_pos].covered_nodes >= 4) {
                                 cout << "Dumping after activteGP, covered node still 4 verified_parent inode: " << verified_parent->getId() << " GP at pos " << temp_pos << " covered_nodes: " << verified_parent->gps[temp_pos].covered_nodes << endl;
                                 Inode *start_node_of_chain = nullptr;
@@ -966,6 +972,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                                     start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
                                 }
                             }
+#endif
                             log_entries.emplace_back(create_log_entry(verified_parent));
                             recordInodeRelation(next_node, verified_parent);
                             parent_gp_changed = true;
@@ -975,7 +982,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                         }
                     } else {
                        // verified_parent->gps[pos].covered_nodes++;
-                        cout << "Parent node: " << verified_parent->getId() << " GP at pos " << pos << " covered_nodes increased to " << verified_parent->gps[pos].covered_nodes <<" by adding node: " << next_node->getId() << endl;
+    //                  cout << "Parent node: " << verified_parent->getId() << " GP at pos " << pos << " covered_nodes increased to " << verified_parent->gps[pos].covered_nodes <<" by adding node: " << next_node->getId() << endl;
                         recordInodeRelation(next_node, verified_parent);
                         parent_gp_changed = true; // 覆盖数变化也改变区间边界
                         ret = 1;
