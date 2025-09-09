@@ -234,14 +234,10 @@ public:
             }
             assert(pos != 0);
             int old_covered_nodes = gps[pos-1].covered_nodes;
-            // **将 initial_covered_nodes 传递下去**
+
             this->insertAtPos(targetKey, value, pos, old_covered_nodes - relative_pos - 1);
-            this->gps[pos-1].covered_nodes = relative_pos + 1; // 设置新GP的初始覆盖数
-#if 0
-            if(this->gps[pos-1].covered_nodes == 4 || this->gps[pos].covered_nodes == 4) {
-                std::cout << "Warning: A GP has 4 covered nodes after activate anther GP, inode id: " << this->getId() << " pos: " << pos << " covered_nodes: "<<this->gps[pos].covered_nodes << " " << pos - 1 << " covered_nodes:" << this->gps[pos-1].covered_nodes<< std::endl;
-            }
-#endif
+            this->gps[pos-1].covered_nodes = relative_pos + 1; // set new covered nodes for the previous GP
+
             assert(this->gps[pos-1].covered_nodes >= 1);
             return true;
         }
