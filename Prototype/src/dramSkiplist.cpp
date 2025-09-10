@@ -9,6 +9,7 @@
 #include <fstream>   // 新增
 
 #define numNodesInPool 10000000
+//#define DBG_SEARCH_STABILITY 1
 
 // 线程本地路标定义
 thread_local Key_t  DramSkiplist::tls_pivot_key_  = std::numeric_limits<Key_t>::min();
@@ -719,16 +720,14 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
 
     Inode *next_node = dramInodePool->getNextNode();
     if (!next_node) return 0;
-//    cout << "Starting Rebalance node: " << inode->getId() <<  " get new node: " << next_node->getId() << "at level: " << inode->hdr.level << endl;
     next_node->hdr.level = inode->hdr.level;
-    bool created_parent    = false; // 新增：上层是否创建新父节点
+    bool created_parent    = false;
 
     while (true) {
         Inode* candidate_parent = nullptr;
         Inode* candidate_next = nullptr;
         Inode* header_above = nullptr;
         
-        // 使用新的辅助函数替换原有的重复查找逻辑
         find_candidate_parent(inode, parent_inode_hint, candidate_parent, candidate_next, header_above);
 
         std::vector<Inode*> nodes_to_lock;
@@ -736,24 +735,24 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
         nodes_to_lock.push_back(next_node);
         if (candidate_parent) {
             nodes_to_lock.push_back(candidate_parent);
-            if (candidate_next && !isTail(candidate_next->getId()))
-                nodes_to_lock.push_back(candidate_next);
         }
-        if (header_above) nodes_to_lock.push_back(header_above);
+        if (header_above) {
+            nodes_to_lock.push_back(header_above);
+        }
 
         std::vector<std::unique_lock<std::shared_mutex>> acquired_locks;
         acquireLocksInOrder(nodes_to_lock, acquired_locks);
 
         try {
             if (inode->hdr.last_index < fanout / 2 - 1) {
-                return 0; //no need to rebalance, inode has been rebalanced in the other rounds.
+                return 0; // 已被其他线程平衡
             }
 
             Inode* verified_parent = nullptr;
             if (candidate_parent) {
-                //check if the candidate parent's next is still candidate_next
+                // 关键优化：只做一次性验证，如果失败则重试整个过程
                 if (dramInodePool->at(candidate_parent->hdr.next) != candidate_next) {
-                    continue; 
+                    continue; // 父节点的后继已改变，重试
                 }
                 verified_parent = candidate_parent;
             }
@@ -761,71 +760,49 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
             if (!verified_parent && header_above) {
                 if (isTail(header_above->hdr.next)) {
                     verified_parent = dramInodePool->getNextNode();
-                    if (!verified_parent) return 0;
+                    if (!verified_parent) { return 0; }
                     verified_parent->hdr.level = inode->hdr.level + 1;
                     verified_parent->hdr.next  = header_above->hdr.next;
                     header_above->hdr.next     = verified_parent->getId();
                     verified_parent->insertAtPos(inode->getMinKey(), inode->getId(), 0, 1);
 
-                    increaseLevel();          // 提升全局层数
-                    created_parent = true;     // 标记结构变化
+                    increaseLevel();
+                    created_parent = true;
                     log_entries.emplace_back(create_log_entry(verified_parent));
                     log_entries.emplace_back(create_log_entry(header_above));
                 } else {
-                    verified_parent = dramInodePool->at(header_above->hdr.next);
+                    continue; // 父链表已被其他线程修改，重试
                 }
             }
 
-            int first_half_count =  (inode->hdr.last_index + 1) / 2;
-            Key_t new_min_key = inode->gps[first_half_count].key;
-            Inode *print_parent = nullptr;
+            // --- 核心分裂逻辑 ---
+            next_node->hdr.next = inode->hdr.next;
+            inode->hdr.next = next_node->getId();
+            inode->split(next_node);
+            Key_t new_min_key = next_node->getMinKey();
+
             if (verified_parent) {
-                while (true) {
-                    Inode* next_parent_node = dramInodePool->at(verified_parent->hdr.next);
-                    if (isTail(next_parent_node->getId()) || new_min_key < next_parent_node->getMinKey()) {
-                        break;
-                    }
-                    if (next_parent_node != candidate_next) {
-                        print_parent = verified_parent;
-                        verified_parent = nullptr;
-                        break;
-                    }
-                    verified_parent = next_parent_node;
-                    candidate_next  = dramInodePool->at(verified_parent->hdr.next);
-                }
-                
-                if (!verified_parent) {
-                    cout << "Parent changed during fastRebalance, retrying..., parent was: " << print_parent->getId()<< endl;
-                    continue; // failed to verifify parent, retry
-                }
-
-                next_node->hdr.next = inode->hdr.next;
-                inode->hdr.next = next_node->getId();
-                inode->split(next_node);
-                
-
+                // --- 父节点更新逻辑 (已移除锁内父链表遍历) ---
                 int pos = verified_parent->findKeyPos(inode->getMinKey());
 
                 if (verified_parent->isFull()) {
                     verified_parent->gps[pos].covered_nodes++;
                     recordInodeRelation(inode, verified_parent);
                     recordInodeRelation(next_node, verified_parent);
-                    ret = 2;
+                    ret = 2; // 父节点已满，需要对父节点进行重平衡
                 } else {
                     recordInodeRelation(inode, verified_parent);
                     recordInodeRelation(next_node, verified_parent);
                     verified_parent->gps[pos].covered_nodes++;
                     if (verified_parent->isUnbalanced(pos)) {
                         int temp_pos = -1;
-                         //caulte the relative position of inode in the covered nodes chain
+                        // 保留原有的 relative_pos 计算逻辑
                         int16_t relative_pos = 0; 
                         Inode* start_node_of_chain = dramInodePool->at(verified_parent->gps[pos].value);
-                        //traverse the covered nodes chain to find the relative position of inode
                         Inode* current_in_chain = start_node_of_chain;
                         int index = 0;
                         Key_t upper_bound_key = 0;
                         
-                        //if next gp exists, use it as the upper bound key, otherwise use the next node of the parent as the upper bound key
                         if(pos + 1 <= verified_parent->hdr.last_index)
                             upper_bound_key = verified_parent->gps[pos + 1].key;
                         else
@@ -836,14 +813,13 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                                 relative_pos = index;
                                 break;
                             }
-                            // decide whether to stop traversing the chain
                             if (current_in_chain->getMinKey() >= upper_bound_key) {
                                 break;
                             }
                             current_in_chain = dramInodePool->at(current_in_chain->hdr.next);
                             index++;
                         }
-                        //relative_pos is the position of the split node (inode) in the covered nodes chain
+                        
                         if (verified_parent->activateGP(new_min_key, next_node->getId(), temp_pos, relative_pos)) {
                             log_entries.emplace_back(create_log_entry(verified_parent));
                             ret = 1;
@@ -855,14 +831,14 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                     }
                 }
             } else {
-                cout << "Error: no parent found during fastRebalance" << endl;
+                // 修复：正确处理顶层分裂（无父节点），分裂操作已在上方统一执行
                 ret = 1;
             }
             
             log_entries.emplace_back(create_log_entry(inode));
             log_entries.emplace_back(create_log_entry(next_node));
             parent_inode_hint = verified_parent;
-            break;
+            break; // 成功，跳出循环
         } catch (...) {
             return 0;
         }
@@ -870,7 +846,6 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
 
     for (auto &e : log_entries) ckpt_log->enq(e.release());
 
-    // 统一：只要发生任何结构性修改就 bump_epoch
     if (created_parent) {
         bump_epoch();
     }
