@@ -129,4 +129,9 @@ public:
         return false;
     }
     void printStats();
+
+    // 新增辅助函数声明
+    bool find_candidate_parent(Inode* inode, Inode* parent_hint, 
+                              Inode*& candidate_parent, Inode*& candidate_next, 
+                              Inode*& header_above);
 };

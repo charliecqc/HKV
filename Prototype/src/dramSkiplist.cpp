@@ -679,6 +679,37 @@ Inode *DramSkiplist::getHeader(int level)
     return header[level];
 }
 
+// 新增辅助函数：在无锁状态下寻找候选父节点
+bool DramSkiplist::find_candidate_parent(Inode* inode, Inode* parent_hint, 
+                                        Inode*& candidate_parent, Inode*& candidate_next, 
+                                        Inode*& header_above) {
+    Key_t key = inode->getMinKey();
+    Inode* current = nullptr;
+
+    if (parent_hint) {
+        current = parent_hint;
+    } else if (inode->hdr.level < MAX_LEVEL - 1) {
+        header_above = getHeader(inode->hdr.level + 1);
+        current = header_above;
+    } else {
+        return false; // 顶层或无效层级，没有父节点
+    }
+
+    while (true) {
+        Inode* next_node = dramInodePool->at(current->hdr.next);
+        if (isTail(next_node->getId()) || key < next_node->getMinKey()) {
+            candidate_parent = current;
+            candidate_next = next_node;
+            // 如果是从 header 开始找，且一步都没移动，说明父链表为空
+            if (header_above && current->getId() == header_above->getId()) {
+                 candidate_parent = nullptr; // 让上层逻辑去创建新父节点
+            }
+            return true;
+        }
+        current = next_node;
+    }
+}
+
 //return 0 if no rebalance is needed, return 1 if the target node is split, return 2 if the parent node is split
 int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint) 
 {
@@ -696,38 +727,9 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
         Inode* candidate_parent = nullptr;
         Inode* candidate_next = nullptr;
         Inode* header_above = nullptr;
-        Inode* current_parent = nullptr;
-        Key_t child_min_key = inode->getMinKey();
-
-        if (parent_inode_hint != nullptr) {
-            Key_t child_min_key = inode->getMinKey();
-            Inode* current_parent = parent_inode_hint;
-            while (true) {
-                Inode* next_parent = dramInodePool->at(current_parent->hdr.next);
-                if (isTail(next_parent->getId()) || child_min_key < next_parent->getMinKey()) {
-                    candidate_parent = current_parent;
-                    candidate_next = next_parent;
-                    break;
-                }
-                current_parent = next_parent;
-            }
-        } else if (inode->hdr.level < MAX_LEVEL - 1) {
-            header_above = getHeader(inode->hdr.level + 1);
-            current_parent = header_above;
-            while(true) {
-                Inode* next_parent = dramInodePool->at(current_parent->hdr.next);
-                if (isTail(next_parent->getId()) || child_min_key < next_parent->getMinKey()) {
-                    candidate_parent = current_parent;
-                    candidate_next = next_parent;
-                    break;
-                }
-                current_parent = next_parent;
-            }
-            if(current_parent->getId() == header_above->getId()) {
-                candidate_parent = nullptr;
-                candidate_next = nullptr;
-            }
-        }
+        
+        // 使用新的辅助函数替换原有的重复查找逻辑
+        find_candidate_parent(inode, parent_inode_hint, candidate_parent, candidate_next, header_above);
 
         std::vector<Inode*> nodes_to_lock;
         nodes_to_lock.push_back(inode);
