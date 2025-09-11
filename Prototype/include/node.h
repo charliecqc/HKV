@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include "common.h"
+#include <bitset>
 #ifdef __AVX2__
 #include <immintrin.h>
 #endif
@@ -133,6 +134,7 @@ class header{
         int16_t level; //1 byte
         int16_t next; //2 bytes 
         int16_t last_index; //2 bytes
+        int16_t last_sgp; //2 bytes
         //std::shared_mutex mtx; //8 bytes
     public:
         header() {
@@ -141,6 +143,7 @@ class header{
             level = 0;
             next = 0;
             last_index = -1;
+            last_sgp = -1;
         }
     friend class Inode;
 };
@@ -180,6 +183,7 @@ public:
     header hdr;
     entry gps[fanout/2];
     entry sgps[fanout/2];
+    std::bitset<fanout/2> sgpVisible; // 0 hidden, 1 visible
     
 
     Inode(uint32_t level)
@@ -195,8 +199,11 @@ public:
         for(int32_t i = 0; i < fanout/2; i++) {
             gps[i].key = std::numeric_limits<Key_t>::max();
             gps[i].value = std::numeric_limits<Val_t>::max();
+            gps[i].covered_nodes = 0; 
             sgps[i].key = std::numeric_limits<Key_t>::max();
             sgps[i].value = std::numeric_limits<Val_t>::max();
+            sgps[i].covered_nodes = 0;
+            sgpVisible.reset();
         }
     }
 
@@ -257,18 +264,25 @@ public:
 
     int findInsertKeyPos(Key_t key)
     {
-        //handle the boundary cases
-        if (hdr.last_index < 0) return 0;
-        if (key < gps[0].key) return 0;
-        if (key >= gps[hdr.last_index].key) return hdr.last_index + 1;
-        
+        // handle the boundary cases
+        if (hdr.last_index < 0)
+            return 0;
+        if (key < gps[0].key)
+            return 0;
+        if (key >= gps[hdr.last_index].key)
+            return hdr.last_index + 1;
+
         // binary search for the position
         int left = 0, right = hdr.last_index;
-        while (left < right) {
+        while (left < right)
+        {
             int mid = left + (right - left) / 2;
-            if (gps[mid].key <= key) {
+            if (gps[mid].key <= key)
+            {
                 left = mid + 1;
-            } else {
+            }
+            else
+            {
                 right = mid;
             }
         }
@@ -278,47 +292,60 @@ public:
     int findKeyPos(Key_t key)
     {
         // empty inode
-        if (hdr.last_index < 0) return 0;
-        
+        if (hdr.last_index < 0)
+            return 0;
+
         // handle the boundary cases
-        if (key < gps[0].key) return 0;
-        if (key >= gps[hdr.last_index].key) return hdr.last_index;
-        
+        if (key < gps[0].key)
+            return 0;
+        if (key >= gps[hdr.last_index].key)
+            return hdr.last_index;
+
         // binary search for the position
         int left = 0, right = hdr.last_index;
         int result = 0;
-        
-        while (left <= right) {
+
+        while (left <= right)
+        {
             int mid = left + (right - left) / 2;
-            if (gps[mid].key <= key) {
-                result = mid;  // record the last position where gps[mid].key <= key
+            if (gps[mid].key <= key)
+            {
+                result = mid; // record the last position where gps[mid].key <= key
                 left = mid + 1;
-            } else {
+            }
+            else
+            {
                 right = mid - 1;
             }
         }
-        return result; 
+        return result;
     }
 
-    bool shift(int oldIdx) { // shift data from oldIdx to newIdx
-        memmove(&gps[oldIdx+1], &gps[oldIdx], sizeof(entry) * (hdr.last_index - oldIdx + 1));
+    bool shift(int oldIdx)
+    { // shift data from oldIdx to newIdx
+        memmove(&gps[oldIdx + 1], &gps[oldIdx], sizeof(entry) * (hdr.last_index - oldIdx + 1));
         return true;
     }
 
-    Key_t getMaxKey() {
+    Key_t getMaxKey()
+    {
         return gps[hdr.last_index].key;
     }
 
-    Key_t getMinKey() {
+    Key_t getMinKey()
+    {
         return gps[0].key;
     }
 
-    Key_t getMidKey() {
+    Key_t getMidKey()
+    {
         return gps[hdr.last_index / 2].key;
     }
 
-    bool split(Inode *targetInode) {
-        if(isHeader() || targetInode->isHeader()) {
+    bool split(Inode *targetInode)
+    {
+        if (isHeader() || targetInode->isHeader())
+        {
             std::cout << " this is also weird" << std::endl;
         }
         int total_entries = hdr.last_index + 1;
@@ -329,71 +356,162 @@ public:
         // memmove 会将整个 entry 结构体（包括 key, value, 和 covered_nodes）一起移动
         // 负载信息被正确地分区到新的节点，无需额外操作
         memmove(targetInode->gps, &gps[split_point_index], sizeof(entry) * second_half_count);
-        
+
         // 更新各自的 last_index
         hdr.last_index = first_half_count - 1;
         targetInode->hdr.last_index = second_half_count - 1;
-        
+
         assert(this->getMaxKey() <= targetInode->getMinKey());
-        
+
         return true;
     }
 
     // **修改签名，增加 initial_covered_nodes 参数**
-    bool insertAtPos(Key_t key, Val_t value, int pos, int16_t initial_covered_nodes) {
-        if(isHeader()) {
+    bool insertAtPos(Key_t key, Val_t value, int pos, int16_t initial_covered_nodes)
+    {
+        if (isHeader())
+        {
             std::cout << "this is weird" << std::endl;
         }
-        if(pos <= hdr.last_index) {
+        if (pos <= hdr.last_index)
+        {
             shift(pos);
         }
         gps[pos].key = key;
         gps[pos].value = value;
         // **为新GP的 covered_nodes 赋初始值**
         gps[pos].covered_nodes = initial_covered_nodes;
-        
+
         // **移除对旧全局计数器的操作**
-        // hdr.coveredNodes++; 
+        // hdr.coveredNodes++;
 
         hdr.last_index++;
         return true;
     }
 
-    void updateKeyVal(Key_t newKey, int pos) {
-        if(isHeader()) {
+    void updateKeyVal(Key_t newKey, int pos)
+    {
+        if (isHeader())
+        {
             std::cout << " this is weird 2" << std::endl;
         }
         gps[pos].key = newKey;
     }
 
-    bool isUnbalanced() {
+    bool isUnbalanced()
+    {
         int current_level = this->hdr.level;
-        double coefficient = (current_level < MAX_LEVEL) ? 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
-        
+        double coefficient = (current_level < MAX_LEVEL) ? SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+
         // 检查是否有任何一个GP的负载过高
-        for (int i = 0; i <= this->hdr.last_index; ++i) {
+        for (int i = 0; i <= this->hdr.last_index; ++i)
+        {
             // 每个GP至少应该覆盖1个节点，如果它覆盖的节点数远超这个基数，则认为不平衡
-            if (this->gps[i].covered_nodes > coefficient) {
-                 return true;
+            if (this->gps[i].covered_nodes > coefficient)
+            {
+                return true;
             }
         }
         return false;
     }
 
-    bool isUnbalanced(int idx) {
+    bool isUnbalanced(int idx)
+    {
         int current_level = this->hdr.level;
-        double coefficient = (current_level < MAX_LEVEL) ? 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
-        
-        if (this->gps[idx].covered_nodes > coefficient) {
+        double coefficient = (current_level < MAX_LEVEL) ? SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+
+        if (this->gps[idx].covered_nodes > coefficient)
+        {
             return true;
         }
         return false;
     }
 
+    //==================================================================================
+    // check if we can link an existing SGP to this new Vnode or increment the covered_nodes of an existing SGP
+    //==================================================================================
+    bool findKeyPosSGP(Key_t key) // TODO [when in use - make sure that the key is in range of gp[pos]]
+    {
+        if (hdr.last_sgp < 0)
+            return -1;
+        if (key < sgps[0].key)
+            return -1;
+        if (key > sgps[hdr.last_sgp].key)
+            return hdr.last_sgp;
+
+        // binary search for the position
+        int left = 0, right = hdr.last_sgp;
+        int result = -1;
+
+        while (left <= right)
+        {
+            int mid = left + (right - left) / 2;
+            if (sgps[mid].key <= key)
+            {
+                result = mid;
+                left = mid + 1;
+            }
+            else
+            {
+                right = mid - 1;
+            }
+        }
+        return result;
+    }
+
+    bool isUnbalancedSGP(int idx)
+    {
+        int current_level = this->hdr.level;
+        double coefficient = (current_level < MAX_LEVEL) ? SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+
+        if (this->sgps[idx].covered_nodes > coefficient)
+        {
+            return true;
+        }
+        return false;
+    }
+
+    bool isSGPInGPRange(int pos, int sgp_pos)
+    {
+        Key_t sgp_key = sgps[sgp_pos].key;
+        Key_t lower = gps[pos].key;
+
+        if (pos == hdr.last_index)
+            return sgp_key > lower;
+
+        Key_t upper = gps[pos + 1].key;
+        return sgp_key > lower && sgp_key < upper;
+    }
+
+    bool utilizeSGP(Key_t targetKey, Val_t value, int &pos)
+    {
+        int sgp_pos = findKeyPosSGP(targetKey);
+
+        if (sgp_pos < 0 || sgp_pos > hdr.last_sgp)
+            return false;
+        if (!isSGPInGPRange(pos, sgp_pos))
+            return false;
+        if (isUnbalancedSGP(sgp_pos))
+            return false;
+
+        if (!sgpVisible.test(sgp_pos))
+        {
+            sgps[sgp_pos].value = value;
+            sgps[sgp_pos].covered_nodes = 1;
+            sgpVisible.set(sgp_pos);
+            return true;
+        }
+        else
+        {
+            if (value <= sgps[sgp_pos].value)
+            {
+                sgps[sgp_pos].value = value; // Update min if applicable
+            }
+            sgps[sgp_pos].covered_nodes++;
+            return true;
+        }
+    }
+    //==================================================================================
 };
 
 class vnodeHeader {

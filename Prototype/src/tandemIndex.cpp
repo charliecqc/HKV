@@ -377,6 +377,89 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     }
 }
 
+//parent_inode is the last level inode that contains the targetVnode
+bool TandemIndex::updateParentInodeAfterSplitWithSGP(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level)
+{
+    std::unique_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[parent_inode->getId()]);
+    // This check is still critical: prevents proceeding if other concurrent modifications happened between split and parent update
+    if(parent_inode->hdr.last_index != last_idx) {
+#if 0
+        std::cout << "Inode last_index mismatch after split, likely a concurrent modification. id: "  << parent_inode->getId() << std::endl;
+#endif
+        return true;
+        // Operation was preempted; return and let upper logic retry
+    }
+
+    BloomFilter* target_bloom = &valueList->bf[targetVnode->getId()];
+    std::shared_lock<std::shared_mutex> target_lock(target_bloom->vnode_mtx);
+    Key_t targetKey = targetVnode->getMinKey();
+    
+    // check if the gps[idx_to_next_level] 
+    if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
+        // Correct logic: parent remains sufficiently balanced; no new GP needed
+        // Just increment the covered count of the existing GP that spans the original Vnode
+
+        //int pos = parent_inode->findKeyPos(targetKey);
+        //if (pos != -1) { 
+        parent_inode->gps[idx_to_next_level].covered_nodes++;
+
+        // using the minimum key of the newly created vnode for sampling [tracking children for leaf nodes]
+        samplingTable.sampleInsert(parent_inode->getId(), targetKey);
+        
+        //}
+        
+        target_lock.unlock(); // Release target Vnode lock
+        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
+        for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
+            entry->setKeyVal(i, parent_inode->gps[i].key, parent_inode->gps[i].value, parent_inode->gps[i].covered_nodes);
+        }
+        ckptLog->enq(entry);
+        return true;
+    }
+    
+    // Correct logic: parent is unbalanced;
+    //======================================TODO========================================
+    //before activating a new GP, check if we can link an existing SGP to this new Vnode or increment the covered_nodes of an existing SGP
+    //==================================================================================
+    int pos = -1;
+
+    if (parent_inode->utilizeSGP(targetKey, targetVnode->getId(), pos)) {
+        target_lock.unlock(); // Release target Vnode lock
+
+        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
+        for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
+            entry->setKeyVal(i, parent_inode->sgps[i].key, parent_inode->sgps[i].value, parent_inode->sgps[i].covered_nodes);
+        }
+        ckptLog->enq(entry);
+        return true;
+
+    }
+
+    // Correct logic: parent is unbalanced; [no SGPS that we can utilize] need to activate a new GP for the newly split Vnode
+    // New GP covers only this single Vnode initially, so covered_nodes starts at 1
+    if (parent_inode->activateGP(targetKey, targetVnode->getId(), pos, 1)) {
+        target_lock.unlock(); 
+        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
+        for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
+            entry->setKeyVal(i, parent_inode->gps[i].key, parent_inode->gps[i].value, parent_inode->gps[i].covered_nodes);
+        }
+        ckptLog->enq(entry);
+        return true;
+    } else {
+        // Correct logic: parent is unbalanced and already full; cannot activate a new GP
+        // Must enqueue the parent for rebalancing
+
+        // Record all parent–child relationships along the path (root to target) to supply parents for rebalancing
+        for (size_t i = 1; i < updates.size(); ++i) {
+            mainIndex->recordInodeRelation(updates[i], updates[i-1]);
+        }
+        // Add the node (and its recorded ancestry) to the rebalance task queue
+        assert(parent_inode->hdr.last_index == fanout / 2 - 1);
+        addToRebalanceQueue(parent_inode);
+        return true;
+    }
+}
+
 
 
 Val_t TandemIndex::lookup(Key_t key)

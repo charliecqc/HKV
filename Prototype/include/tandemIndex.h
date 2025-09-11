@@ -39,6 +39,7 @@ class TandemIndex {
                                          Key_t key, Val_t value, Vnode* &newNode);
         //bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &idx, int &coveredNodes);
         bool updateParentInodeAfterSplit(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level);
+        bool updateParentInodeAfterSplitWithSGP(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level);
 
         //std::thread *workerThread;kk
         std::thread *checkpointThread = nullptr;
