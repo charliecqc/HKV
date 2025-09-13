@@ -9,6 +9,7 @@
 #include <fstream>   // 新增
 
 #define numNodesInPool 10000000
+#define DBG_CACHE 1 // 新增：启用缓存统计
 //#define DBG_SEARCH_STABILITY 1
 
 // 线程本地路标定义
@@ -17,12 +18,47 @@ thread_local Inode* DramSkiplist::tls_pivot_node_ = nullptr;
 thread_local decltype(DramSkiplist::tls_pivot_set_) DramSkiplist::tls_pivot_set_{ {}, 0 };
 
 namespace {
+#ifdef DBG_CACHE
+    // --- 新增：全面的缓存统计变量 ---
+    std::atomic<uint64_t> g_total_cache_lookups{0};
+    std::atomic<uint64_t> g_l1_hits{0};
+    std::atomic<uint64_t> g_l1_misses{0};
+    std::atomic<uint64_t> g_l2_hits{0};
+    std::atomic<uint64_t> g_l2_misses{0};
+#endif
+
     std::atomic<uint64_t> g_lfi_start_node_verify_failures{0};
 
     struct LfiCounterPrinter {
         ~LfiCounterPrinter() {
+#ifdef DBG_CACHE
+            uint64_t total_lookups = g_total_cache_lookups.load();
+            uint64_t l1_hits = g_l1_hits.load();
+            uint64_t l1_misses = g_l1_misses.load();
+            uint64_t l2_hits = g_l2_hits.load();
+            uint64_t l2_misses = g_l2_misses.load();
+            uint64_t verify_failures = g_lfi_start_node_verify_failures.load();
+
+            double l1_hit_rate = (total_lookups == 0) ? 0.0 : (double)l1_hits / total_lookups * 100.0;
+            // L2 的查询总数等于 L1 的未命中数
+            uint64_t l2_lookups = l1_misses;
+            double l2_hit_rate = (l2_lookups == 0) ? 0.0 : (double)l2_hits / l2_lookups * 100.0;
+
+            std::cout << "--- Cache & Verification Statistics ---" << std::endl;
+            std::cout << "[统计] Total Fast Path Entries (总缓存查询): " << total_lookups << std::endl;
+            std::cout << "-----------------------------------------" << std::endl;
+            std::cout << "[统计] L1 (TLS) Hits: " << l1_hits << ", Misses: " << l1_misses 
+                      << ", Hit Rate: " << l1_hit_rate << "%" << std::endl;
+            std::cout << "[统计] L2 (Shard) Hits: " << l2_hits << ", Misses: " << l2_misses 
+                      << ", Hit Rate: " << l2_hit_rate << "%" << std::endl;
+            std::cout << "-----------------------------------------" << std::endl;
+            std::cout << "[统计] Start Node Verification Failures: " << verify_failures << std::endl;
+            std::cout << "[统计] Total Cache Miss (start_node不存在): " << l2_misses << std::endl;
+            std::cout << "-----------------------------------------" << std::endl;
+#else
             std::cout << "[统计] lookupForInsert start_node 验证失败次数: "
                       << g_lfi_start_node_verify_failures.load() << std::endl;
+#endif
         }
     } g_lfi_counter_printer; // 程序结束时自动打印
 
@@ -122,6 +158,9 @@ Inode* DramSkiplist::tls_try_match(Key_t key, int& start_level) {
         if (!e.node) continue;
         if (e.epoch != cur_epoch || e.fail_cnt >= 3) { e.node = nullptr; continue; }
         if (key >= e.min_key && key < e.upper_key) {
+#ifdef DBG_CACHE
+            g_l1_hits.fetch_add(1, std::memory_order_relaxed);
+#endif
             return e.node;
         }
     }
@@ -1089,22 +1128,46 @@ void DramSkiplist::acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<s
 
 Inode *DramSkiplist::find_start_node_from_cache_shards(Key_t key, int& start_level) 
 {
+#ifdef DBG_CACHE
+    g_total_cache_lookups.fetch_add(1, std::memory_order_relaxed);
+#endif
     if (Inode* n = tls_try_match(key, start_level)) return n;
+
+#ifdef DBG_CACHE
+    g_l1_misses.fetch_add(1, std::memory_order_relaxed);
+#endif
+
     size_t s = shard_of(key);
     CacheShard& shard = cache_shards[s];
     std::shared_lock<std::shared_mutex> r(shard.mtx);
-    if (shard.table.empty()) return nullptr;
+    if (shard.table.empty()) {
+#ifdef DBG_CACHE
+        g_l2_misses.fetch_add(1, std::memory_order_relaxed);
+#endif
+        return nullptr;
+    }
 
     auto it = shard.table.upper_bound(key);
     if (it == shard.table.begin()) {
+#ifdef DBG_CACHE
+        g_l2_misses.fetch_add(1, std::memory_order_relaxed);
+#endif
         return nullptr;
     }
     -- it;
     Inode* start_node = it->second;
-    if (!start_node) 
+    if (!start_node) {
+#ifdef DBG_CACHE
+        g_l2_misses.fetch_add(1, std::memory_order_relaxed);
+#endif
         return nullptr;
-    else
+    }
+    else {
+#ifdef DBG_CACHE
+        g_l2_hits.fetch_add(1, std::memory_order_relaxed);
+#endif
         return start_node;
+    }
 }
 
 // **新增实现：从缓存中查找起点**
