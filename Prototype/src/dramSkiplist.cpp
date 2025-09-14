@@ -25,9 +25,8 @@ namespace {
     std::atomic<uint64_t> g_l1_misses{0};
     std::atomic<uint64_t> g_l2_hits{0};
     std::atomic<uint64_t> g_l2_misses{0};
-#endif
-
     std::atomic<uint64_t> g_lfi_start_node_verify_failures{0};
+#endif
 
     struct LfiCounterPrinter {
         ~LfiCounterPrinter() {
@@ -55,9 +54,6 @@ namespace {
             std::cout << "[统计] Start Node Verification Failures: " << verify_failures << std::endl;
             std::cout << "[统计] Total Cache Miss (start_node不存在): " << l2_misses << std::endl;
             std::cout << "-----------------------------------------" << std::endl;
-#else
-            std::cout << "[统计] lookupForInsert start_node 验证失败次数: "
-                      << g_lfi_start_node_verify_failures.load() << std::endl;
 #endif
         }
     } g_lfi_counter_printer; // 程序结束时自动打印
@@ -512,72 +508,106 @@ Inode* DramSkiplist::lookup(Key_t key, int &idx)
     return current;
 }
 
-Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates)
+Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current,
+                                     int currentHighestLevelIndex,
+                                     std::shared_lock<std::shared_mutex> &current_lock,
+                                     int &idx,
+                                     std::vector<Inode *> &updates)
 {
-    int start_level = -1;
+    int  start_level = -1;
     bool cache_hit_and_verified = false;
-    int current_total_level = currentHighestLevelIndex + 1; // 保存总层数
+    int  current_total_level = currentHighestLevelIndex + 1;
     Inode *temp_start = current;
-    //cout << "start header is : " << temp_start->getId() << " for key : " << key << endl;
 
-    // **步骤 1: 尝试从缓存获取起点**
+    // 步骤 1: 尝试从缓存获取起点
     Inode *start_node = find_start_node_from_cache_shards(key, start_level);
 
     if (start_node != nullptr) {
         std::shared_lock<std::shared_mutex> lock_start(inode_locks[start_node->getId()]);
-        
-        // === 修改开始 ===
         Key_t lower_bound = start_node->getMinKey();
         Key_t upper_bound = get_node_upper_bound(start_node);
 
-        if (key >= lower_bound && key < upper_bound) {
-            // 验证成功！
-            idx = start_node->findKeyPos(key); // findKeyPos 内部会处理边界
-            cache_hit_and_verified = true;
-            current = start_node;
-            start_level = start_node->hdr.level;
-            // 在验证成功后，也应该记录/刷新 pivot，因为它是一个高质量的缓存项
-            tls_record_pivot(start_node); 
-            current_lock.unlock();
-            current_lock = std::move(lock_start);
-        } else {
-        // === 修改结束 ===
-            // 验证失败：统计 + 使 TLS 标记失效
+        // 软前推允许的最大横移步数（固定 2，不做动态调整）
+        constexpr int SOFT_MAX_STEPS = 0;
+
+        if (key < lower_bound) {
+            // Hard fail：缓存起点在 key 右侧 -> 视为严重失效
+#ifdef DBG_CACHE
             g_lfi_start_node_verify_failures.fetch_add(1, std::memory_order_relaxed);
+#endif
             tls_mark_fail(start_node->getMinKey());
-            current = temp_start;
+            // 回退到原始 temp_start，不采用该缓存节点
+            // 不修改 current / current_lock（保持调用方已持有的 current_lock）
+        } else {
+            // key >= lower_bound：可以把 start_node 当作一个“候选起点”
+            // 如果 key 已经在区间内，直接接受；否则尝试向右最多 SOFT_MAX_STEPS 步
+            Inode *probe = start_node;
+            std::shared_lock<std::shared_mutex> probe_lock = std::move(lock_start);
+            if (key >= upper_bound) {
+                int soft_steps = 0;
+                while (soft_steps < SOFT_MAX_STEPS && key >= upper_bound) {
+                    Inode *next_node = dramInodePool->at(probe->hdr.next);
+                    if (!next_node || next_node->isTail()) break;
+
+                    // 预判：如果下一节点最小键仍大于 key，则无需再前推
+                    Key_t next_min = next_node->getMinKey();
+                    if (key < next_min) break;
+
+                    // 锁传递：先锁 next，再释放当前
+                    std::shared_lock<std::shared_mutex> next_lock(inode_locks[next_node->getId()]);
+                    probe_lock.unlock();
+                    probe = next_node;
+                    probe_lock = std::move(next_lock);
+                    upper_bound = get_node_upper_bound(probe);
+                    ++soft_steps;
+                }
+
+                // 若软前推后仍未覆盖 key，则放弃此次缓存使用（不记失败，不惩罚 pivot）
+                if (key >= upper_bound) {
+                    probe_lock.unlock();
+                    probe = nullptr;
+                }
+
+            }
+            if (probe) {
+                // 接受（无论是直接 exact 还是 soft 前推后）
+                current = probe;
+                start_level = probe->hdr.level;
+                cache_hit_and_verified = true;
+                tls_record_pivot(probe);  // 仅记录起点，不在此调用 findKeyPos
+                current_lock.unlock();
+                current_lock = std::move(probe_lock);
+            }
         }
     }
 
-    // **步骤 3: 如果缓存未命中，则执行完整查找**
+    // 步骤 2: 若缓存未命中或未被接受，则从最高层重新开始
     if (!cache_hit_and_verified) {
         start_level = currentHighestLevelIndex;
     }
-    //cout << "Starting lookup for key: " << key << " at level: " << start_level <<" node: " << current->getId()<< endl;
-    for(int i = start_level; i >= 0; i--) {
+
+    // 步骤 3: 正常自顶向下搜索（最终的 idx 在最底层统一计算）
+    for (int i = start_level; i >= 0; --i) {
 #ifdef DBG_SEARCH_STABILITY
-        uint32_t horizontal_steps = 0; // 新增：本层横向移动次数
+        uint32_t horizontal_steps = 0;
 #endif
-        while(true) {
+        while (true) {
             assert(current != nullptr);
-            {
-                Inode *next = dramInodePool->at(current->hdr.next);
-                std::shared_lock<std::shared_mutex> next_horizental_lock(inode_locks[next->getId()]);
-                if(!next->isTail() && key >= next->getMinKey()) {
-                    assert(current->getMaxKey() <= next->getMinKey());
-                    current = next;
-                    current_lock.unlock();
-                    current_lock = std::move(next_horizental_lock);
-                    //cout << "  Moved to node ID: " << current->getId() << " at level: " << i << endl;
+            Inode *next = dramInodePool->at(current->hdr.next);
+            std::shared_lock<std::shared_mutex> next_h_lock(inode_locks[next->getId()]);
+            if (!next->isTail() && key >= next->getMinKey()) {
+                assert(current->getMaxKey() <= next->getMinKey());
+                current = next;
+                current_lock.unlock();
+                current_lock = std::move(next_h_lock);
 #ifdef DBG_SEARCH_STABILITY
-                    ++horizontal_steps; // 计数
+                ++horizontal_steps;
 #endif
-                } else {
-                    break;
-                }
+            } else {
+                break;
             }
         }
-#ifdef DBG_SEARCH_STABILITY 
+#ifdef DBG_SEARCH_STABILITY
         {
             const int threshold = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[i] + 1.0;
             if (horizontal_steps > (uint32_t)threshold) {
@@ -585,36 +615,34 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current, int currentHig
             }
         }
 #endif
-        if(i ==0) {
-            break;
-        }
+        if (i == 0) break;
 
         uint32_t next_level_node_id;
-        if(current->isHeader()) {
+        if (current->isHeader()) {
             next_level_node_id = current->gps[0].value;
-            //cout << "current is header, next level node id is : " << next_level_node_id << endl;
         } else {
-            int temp_idx = current->findKeyPos(key);
-            next_level_node_id = current->gps[temp_idx].value;
-            //cout << "current is not header, next level node id is : " << next_level_node_id << endl;
+            int temp_pos = current->findKeyPos(key);
+            next_level_node_id = current->gps[temp_pos].value;
         }
-
-        Inode *temp = dramInodePool->at(next_level_node_id);
-        assert(temp != nullptr);
-
-        std::shared_lock<std::shared_mutex> next_vertical_lock(inode_locks[temp->getId()]);
+        Inode *down = dramInodePool->at(next_level_node_id);
+        assert(down != nullptr);
+        std::shared_lock<std::shared_mutex> next_v_lock(inode_locks[down->getId()]);
         updates.push_back(current);
-        current = temp;
+        current = down;
         current_lock.unlock();
-        current_lock = std::move(next_vertical_lock);
+        current_lock = std::move(next_v_lock);
     }
 
-    if(current->isHeader()) {
+    // 步骤 4: 底层判空
+    if (current->isHeader()) {
         idx = -1;
         return nullptr;
     }
 
+    // 步骤 5: 填充缓存（使用叶子 + 总层数信息）
     populate_cache_shards(key, current, current_total_level);
+
+    // 步骤 6: 最终定位 idx（只在此处调用 findKeyPos）
     assert(current->hdr.last_index >= 0);
     idx = current->findKeyPos(key);
     return current;
