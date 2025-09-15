@@ -152,11 +152,24 @@ Inode* DramSkiplist::tls_try_match(Key_t key, int& start_level) {
     for (int i = 0; i < tls_pivot_set_.used; ++i) {
         auto &e = tls_pivot_set_.pivots[i];
         if (!e.node) continue;
-        if (e.epoch != cur_epoch || e.fail_cnt >= 3) { e.node = nullptr; continue; }
+        if (e.epoch != cur_epoch || e.fail_cnt >= 5) { // 放宽寿命以便顺序场景更长复用
+            e.node = nullptr;
+            continue;
+        }
         if (key >= e.min_key && key < e.upper_key) {
 #ifdef DBG_CACHE
             g_l1_hits.fetch_add(1, std::memory_order_relaxed);
 #endif
+            e.hit_cnt++;
+            // 提供起始层（即便当前只关注 lookupForInsert，这里仍标准化）
+            start_level = e.node->hdr.level;
+            // 简单 MRU：命中项前移
+            if (i != 0) {
+                auto hit = e;
+                for (int k = i; k > 0; --k)
+                    tls_pivot_set_.pivots[k] = tls_pivot_set_.pivots[k-1];
+                tls_pivot_set_.pivots[0] = hit;
+            }
             return e.node;
         }
     }
@@ -166,39 +179,44 @@ Inode* DramSkiplist::tls_try_match(Key_t key, int& start_level) {
 void DramSkiplist::tls_record_pivot(Inode* node) {
     if (!node || node->isHeader()) return;
     Key_t min_k = node->getMinKey();
-    Key_t upper = std::numeric_limits<Key_t>::max();
-    Inode* nxt = dramInodePool->at(node->hdr.next);
-    if (nxt && !nxt->isTail()) upper = nxt->getMinKey();
+    Key_t upper = get_node_upper_bound(node); // 仍保持单跳上界，不引入其它修改
+    uint32_t ep = global_epoch.load(std::memory_order_relaxed);
 
-    // 已存在 → 刷新
+    // 刷新已有
     for (int i = 0; i < tls_pivot_set_.used; ++i) {
         auto &e = tls_pivot_set_.pivots[i];
         if (e.node && e.min_key == min_k) {
             e.upper_key = upper;
             e.fail_cnt = 0;
-            e.epoch = global_epoch.load(std::memory_order_relaxed);
-            e.node = node;
+            e.epoch = ep;
+            // 不重置 hit_cnt，保持历史热度
             return;
         }
     }
-    // 未满
-    if (tls_pivot_set_.used < 3) {
-        auto &e = tls_pivot_set_.pivots[tls_pivot_set_.used++];
-        e = { node, min_k, upper, global_epoch.load(std::memory_order_relaxed), 0 };
+
+    // 未满直接插入
+    if (tls_pivot_set_.used < 8) {
+        tls_pivot_set_.pivots[tls_pivot_set_.used++] =
+            TlsPivot{ node, min_k, upper, ep, 0, 1 };
         return;
     }
-    // 选择 victim：fail_cnt 最大，其次区间更宽
+
+    // victim 选择：fail_cnt 高 > hit_cnt 低 > span 小
+    auto span = [&](int i) {
+        const auto &p = tls_pivot_set_.pivots[i];
+        return (uint64_t)(p.upper_key - p.min_key);
+    };
     int victim = 0;
-    auto span = [&](int i){ return (uint64_t)tls_pivot_set_.pivots[i].upper_key - tls_pivot_set_.pivots[i].min_key; };
-    for (int i = 1; i < 3; ++i) {
-        auto &best = tls_pivot_set_.pivots[victim];
-        auto &cand = tls_pivot_set_.pivots[i];
-        if (cand.fail_cnt > best.fail_cnt ||
-           (cand.fail_cnt == best.fail_cnt && span(i) > span(victim))) {
+    for (int i = 1; i < 8; ++i) {
+        auto &v = tls_pivot_set_.pivots[victim];
+        auto &c = tls_pivot_set_.pivots[i];
+        if (c.fail_cnt > v.fail_cnt ||
+           (c.fail_cnt == v.fail_cnt && c.hit_cnt < v.hit_cnt) ||
+           (c.fail_cnt == v.fail_cnt && c.hit_cnt == v.hit_cnt && span(i) < span(victim))) {
             victim = i;
         }
     }
-    tls_pivot_set_.pivots[victim] = { node, min_k, upper, global_epoch.load(std::memory_order_relaxed), 0 };
+    tls_pivot_set_.pivots[victim] = TlsPivot{ node, min_k, upper, ep, 0, 1 };
 }
 
 void DramSkiplist::tls_mark_fail(Key_t min_key) {
@@ -528,7 +546,7 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current,
         Key_t upper_bound = get_node_upper_bound(start_node);
 
         // 软前推允许的最大横移步数（固定 2，不做动态调整）
-        constexpr int SOFT_MAX_STEPS = 0;
+        constexpr int SOFT_MAX_STEPS = 4;
 
         if (key < lower_bound) {
             // Hard fail：缓存起点在 key 右侧 -> 视为严重失效

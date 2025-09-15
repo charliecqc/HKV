@@ -21,14 +21,15 @@ private:
     std::atomic<uint32_t> global_epoch{0};
 
     struct TlsPivot {
-        Inode*  node{nullptr};
-        Key_t   min_key{0};
-        Key_t   upper_key{0};
+        Inode*   node{nullptr};
+        Key_t    min_key{0};
+        Key_t    upper_key{0};
         uint32_t epoch{0};
-        uint8_t fail_cnt{0};
+        uint8_t  fail_cnt{0};
+        uint16_t hit_cnt{0};          // 新增：命中次数
     };
     static thread_local struct {
-        TlsPivot pivots[3];
+        TlsPivot pivots[8];            // 扩容：3 -> 8
         int used;
     } tls_pivot_set_;
 
