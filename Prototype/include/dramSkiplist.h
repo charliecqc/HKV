@@ -93,7 +93,10 @@ public:
     // return the index in gps of the index node that poionts to the vnode
     Inode *lookup(Key_t key, int &idx);
     Inode *lookup(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx);
+    Inode *lookupWithSGP(Key_t key, int &idx, bool &sgp_used);
+    Inode *lookupWithSGP(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, bool &sgp_used);
     Inode *lookupForInsert(Key_t key, Inode * &current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates);
+    Inode *lookupForInsertWithSGP(Key_t key, Inode * &current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates, bool &sgp_used);
     Inode *getHeader();
     Inode *getHeader(int level);
     void getPivotNodesForInsert(Key_t key, Inode* updates[]);

@@ -21,11 +21,13 @@ class TandemIndex {
         ~TandemIndex();
 
         bool insert(Key_t key, Val_t value);
+        bool insertWithSGP(Key_t key, Val_t value);
         //void remove(int key);
         void update(Key_t key, Val_t value);
         void scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &result);
         //void print();
         Val_t lookup(Key_t key);
+        Val_t lookupWithSGP(Key_t key);
         void recover(Key_t key);
         bool moveToNextVnode(Vnode*& vnode, BloomFilter*& bloom, std::shared_lock<std::shared_mutex>& current_lock);
         bool insertWithNewInodes(Key_t key, Val_t value);
@@ -39,7 +41,7 @@ class TandemIndex {
                                          Key_t key, Val_t value, Vnode* &newNode);
         //bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &idx, int &coveredNodes);
         bool updateParentInodeAfterSplit(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level);
-        bool updateParentInodeAfterSplitWithSGP(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level);
+        bool updateParentInodeAfterSplitWithSGP(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level, bool &sgp_used);
 
         //std::thread *workerThread;kk
         std::thread *checkpointThread = nullptr;

@@ -71,6 +71,11 @@ public:
         hdr.count += 1;
     }
 
+    void setSGP(int32_t idx, Key_t key, Val_t value, int16_t covered) 
+    {
+        //TODO[implement]
+    }
+
     void initHeader(int16_t id, int16_t last_index, int16_t next, int16_t level) {
         this->hdr.id = id;
         //this->hdr.coveredNodes = coveredNodes;

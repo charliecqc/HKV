@@ -430,14 +430,14 @@ public:
     //==================================================================================
     // check if we can link an existing SGP to this new Vnode or increment the covered_nodes of an existing SGP
     //==================================================================================
-    bool findKeyPosSGP(Key_t key) // TODO [when in use - make sure that the key is in range of gp[pos]]
+    bool findKeyPosSGP(Key_t key) //fix - perform the range check here
     {
-        if (hdr.last_sgp < 0)
-            return -1;
-        if (key < sgps[0].key)
-            return -1;
+        
+        if (hdr.last_sgp < 0) return -1;
+        if (key < sgps[0].key) return -1;
+        
         if (key > sgps[hdr.last_sgp].key)
-            return hdr.last_sgp;
+            return hdr.last_sgp; //range check
 
         // binary search for the position
         int left = 0, right = hdr.last_sgp;
@@ -459,6 +459,49 @@ public:
         return result;
     }
 
+    bool findValidKeyPosSGP(Key_t key) //fix - perform the range check here
+    {
+        
+        if (hdr.last_sgp < 0) return -1;
+        if (key < sgps[0].key) return -1;
+        
+        if (key > sgps[hdr.last_sgp].key)
+            return (sgpVisible.test(hdr.last_sgp) ? hdr.last_sgp : -1);
+
+        // binary search for the position
+        int left = 0, right = hdr.last_sgp;
+        int result = -1;
+
+        while (left <= right)
+        {
+            int mid = left + (right - left) / 2;
+            if (sgps[mid].key <= key)
+            {   if(sgpVisible.test(mid)){
+                result = mid; }
+                left = mid + 1;
+            }
+            else
+            {
+                right = mid - 1;
+            }
+        }
+        return result;
+    }
+
+    bool isSGPInGPRange(int pos, int sgp_pos)
+    {
+        if (sgp_pos < 0 || sgp_pos > hdr.last_sgp) return false;
+
+        Key_t sgp_key = sgps[sgp_pos].key;
+        Key_t lower = gps[pos].key;
+
+        if (pos == hdr.last_index)
+            return sgp_key > lower;
+
+        Key_t upper = gps[pos + 1].key;
+        return sgp_key > lower && sgp_key < upper;
+    }
+
     bool isUnbalancedSGP(int idx)
     {
         int current_level = this->hdr.level;
@@ -471,46 +514,100 @@ public:
         return false;
     }
 
-    bool isSGPInGPRange(int pos, int sgp_pos)
-    {
-        Key_t sgp_key = sgps[sgp_pos].key;
-        Key_t lower = gps[pos].key;
-
-        if (pos == hdr.last_index)
-            return sgp_key > lower;
-
-        Key_t upper = gps[pos + 1].key;
-        return sgp_key > lower && sgp_key < upper;
-    }
-
     bool utilizeSGP(Key_t targetKey, Val_t value, int &pos)
     {
         int sgp_pos = findKeyPosSGP(targetKey);
 
-        if (sgp_pos < 0 || sgp_pos > hdr.last_sgp)
-            return false;
         if (!isSGPInGPRange(pos, sgp_pos))
-            return false;
+            return false; //also checks out of bound
         if (isUnbalancedSGP(sgp_pos))
             return false;
 
         if (!sgpVisible.test(sgp_pos))
         {
+            //fix: exact match activation[else prediction miss]
+            if (sgps[sgp_pos].key != targetKey) 
+                return false;
+    
             sgps[sgp_pos].value = value;
+            //TODO: make adjust the ranges of both gp and sgp
             sgps[sgp_pos].covered_nodes = 1;
             sgpVisible.set(sgp_pos);
             return true;
         }
         else
         {
-            if (value <= sgps[sgp_pos].value)
-            {
-                sgps[sgp_pos].value = value; // Update min if applicable
-            }
+            //fix: exact match activation only [no need to change value]
+            //if (value <= sgps[sgp_pos].value)
+            //  sgps[sgp_pos].value = value; // Update min if applicable
+
             sgps[sgp_pos].covered_nodes++;
             return true;
         }
     }
+
+    bool splitWithSGP(Inode *targetInode)
+    {
+        if (isHeader() || targetInode->isHeader())
+        {
+            std::cout << " this is also weird" << std::endl;
+            return false;
+        }
+
+        std::vector<entry> merged_entries;
+
+        //add existing gps
+        for (int i = 0; i <= hdr.last_index; i++)
+        {
+            merged_entries.push_back(gps[i]);
+        }
+
+        //add visible sgps 
+        for (int i = 0; i <= hdr.last_sgp; ++i) {
+            if (sgpVisible.test(i)) 
+            {
+                merged_entries.push_back(sgps[i]);
+            }
+
+        }
+        //add visible sgps 
+        /*for (int i = 0; i <= hdr.last_sgp; ++i) {
+            if (sgpVisible.test(i)) {
+                entry adjusted = sgps[i];
+
+                Vnode* child = getVnodeById(adjusted.value);  // Must be implemented elsewhere
+                if (child) {
+                    adjusted.key = child->getMinKey();  // Update to exact vnode min key [not implemented yet]
+                    merged_entries.push_back(adjusted);
+                }
+            }
+        }*/
+
+        // Sort merged entries by key
+        std::sort(merged_entries.begin(), merged_entries.end(), [](const entry &a, const entry &b) {
+            return a.key < b.key;
+        });
+
+        //determine split point and redistribute
+        int total_entries = static_cast<int>(merged_entries.size());
+        int first_half_count = total_entries / 2;
+        int second_half_count = total_entries - first_half_count;
+
+        memcpy(gps, merged_entries.data(), sizeof(entry) * first_half_count);
+        hdr.last_index = first_half_count - 1;
+
+        memcpy(targetInode->gps, merged_entries.data() + first_half_count, sizeof(entry) * second_half_count);
+        targetInode->hdr.last_index = second_half_count - 1;
+
+        //clear all speculative entries and metadata
+        memset(this->sgps, 0, sizeof(sgps));
+        this->sgpVisible.reset();
+        this->hdr.last_sgp = -1;
+
+        assert(this->getMaxKey() <= targetInode->getMinKey());
+        return true;
+    }
+
     //==================================================================================
 };
 

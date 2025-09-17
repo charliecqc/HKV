@@ -184,6 +184,99 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     return true;
 }
 
+bool TandemIndex::insertWithSGP(Key_t key, Val_t value)
+{
+    int idx = -1;
+    bool ret = false;
+    Vnode *target_vnode = nullptr;
+    std::vector<Inode *> updates;
+    updates.reserve(MAX_LEVEL);
+
+    int current_level = mainIndex->getLevel();
+    Inode *header = mainIndex->getHeader(current_level - 1);
+
+    std::shared_lock<std::shared_mutex> header_lock(mainIndex->inode_locks[header->getId()]);
+    bool sgp_used = false;
+    Inode *target_inode = mainIndex->lookupForInsertWithSGP(key, header, current_level - 1, header_lock, idx, updates, sgp_used);
+
+    if(target_inode == nullptr) {
+        //header_lock is still the shared lock for the header inode
+        header_lock.unlock();
+        ret = insertWithNewInodes(key, value, target_vnode);
+        if(!ret) {
+            std::cerr << "Failed to insert with new j knodes." << std::endl;
+            return false;
+        }
+        if(target_vnode != nullptr) {
+            ret = mainIndex->add(target_vnode);
+            if(ret == false)
+            {
+                cout << "There is smaller key already inserted in the index." << endl;
+            }
+        }
+        return true;
+    }   
+
+    // target should not be nullptr, because the smallest key is always in the header
+    assert(target_inode != nullptr);
+#ifdef RB_DEBUG
+    Inode *temp_inode = new Inode(*target_inode); // create a copy of the target inode
+    Inode *next_temp_inode = new Inode (*dramInodePool->at(temp_inode->hdr.next));
+    
+    if(temp_inode->getMaxKey() > next_temp_inode->getMinKey()) {
+        cout << "id: " << target_inode->getId() << " idx: " << idx << " last_index: " << target_inode->hdr.last_index << " min: "<< target_inode->getMinKey() << " max: " << target_inode->getMaxKey()<< endl;
+        cout << "next id: " << next_temp_inode->getId() <<" last_index: " << next_temp_inode->hdr.last_index << " min: " <<next_temp_inode->getMinKey() << " max: " << next_temp_inode->getMaxKey()<< endl;
+    }
+#endif
+
+    int vnode_id; 
+    if(sgp_used){
+        vnode_id = target_inode->sgps[idx].value;
+    } else {
+        vnode_id = target_inode->gps[idx].value;
+    }
+
+    target_vnode = valueList->pmemVnodePool->at(vnode_id);
+    if(target_vnode == nullptr) {
+        std::cout << "Failed to get the vnode from the pmemVnodePool." << std::endl;
+        return false;
+    }
+    BloomFilter *bloom = &valueList->bf[target_vnode->getId()];
+    std::unique_lock<std::shared_mutex> vnode_lock(bloom->vnode_mtx);
+
+    int current_last_idx = target_inode->hdr.last_index;
+    // **移除：不再需要获取旧的全局 coveredNodes**
+    // int coveredNodes = target_inode->hdr.coveredNodes;
+
+    header_lock.unlock();
+    //target_vnode: start of the target vnode chain. 
+    //vnode_lock: lock for the target vnode's bloom filter, will be changed inside
+    ret = insertInVnodeChain(target_vnode, bloom, vnode_lock, key, value);
+    if(!ret) {
+        // ret == false ==> vnode is full, need to split
+        Vnode *newVnode = nullptr;
+#if 0
+        {
+            std::lock_guard<std::mutex> lock(printMutex);
+            cout << "Vnode is full, need to split. Current target_vnode: " << target_vnode->hdr.id << " key: " << key << " tid: " << syscall(SYS_gettid) << endl;
+        }
+#endif
+        ret = handleNodeFullAndSplit(target_vnode, bloom, vnode_lock, key, value, newVnode);
+        if(ret) {
+            // update the parent inode after split
+            ret = updateParentInodeAfterSplitWithSGP(target_inode, newVnode, updates, current_last_idx, idx, sgp_used);
+            if(!ret) {
+                std::cout << "Failed to update the parent inode after split." << std::endl;
+                return false;
+            }
+        }else {
+            std::cout << "Failed to handle node full and split." << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vnode)
 {
     Vnode* headerVnode = valueList->getHeader();
@@ -378,7 +471,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
 }
 
 //parent_inode is the last level inode that contains the targetVnode
-bool TandemIndex::updateParentInodeAfterSplitWithSGP(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level)
+bool TandemIndex::updateParentInodeAfterSplitWithSGP(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level, bool &sgp_used)
 {
     std::unique_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[parent_inode->getId()]);
     // This check is still critical: prevents proceeding if other concurrent modifications happened between split and parent update
@@ -393,6 +486,7 @@ bool TandemIndex::updateParentInodeAfterSplitWithSGP(Inode *parent_inode, Vnode 
     BloomFilter* target_bloom = &valueList->bf[targetVnode->getId()];
     std::shared_lock<std::shared_mutex> target_lock(target_bloom->vnode_mtx);
     Key_t targetKey = targetVnode->getMinKey();
+    
     
     // check if the gps[idx_to_next_level] 
     if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
@@ -418,25 +512,26 @@ bool TandemIndex::updateParentInodeAfterSplitWithSGP(Inode *parent_inode, Vnode 
     }
     
     // Correct logic: parent is unbalanced;
-    //======================================TODO========================================
+    //==================================================================================
     //before activating a new GP, check if we can link an existing SGP to this new Vnode or increment the covered_nodes of an existing SGP
     //==================================================================================
-    int pos = -1;
-
-    if (parent_inode->utilizeSGP(targetKey, targetVnode->getId(), pos)) {
+    if (parent_inode->utilizeSGP(targetKey, targetVnode->getId(), idx_to_next_level)) {
         target_lock.unlock(); // Release target Vnode lock
-
+        //TODO [log contents]
+        /*
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
         for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
             entry->setKeyVal(i, parent_inode->sgps[i].key, parent_inode->sgps[i].value, parent_inode->sgps[i].covered_nodes);
         }
         ckptLog->enq(entry);
+        */
         return true;
-
     }
+    //==================================================================================
 
     // Correct logic: parent is unbalanced; [no SGPS that we can utilize] need to activate a new GP for the newly split Vnode
     // New GP covers only this single Vnode initially, so covered_nodes starts at 1
+    int pos = -1;
     if (parent_inode->activateGP(targetKey, targetVnode->getId(), pos, 1)) {
         target_lock.unlock(); 
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
@@ -490,6 +585,73 @@ Val_t TandemIndex::lookup(Key_t key)
     
     // now header_lock is still held, as lock of target
     int vnode_id = target->gps[idx].value;
+    header_lock.unlock();
+
+    vnode = valueList->pmemVnodePool->at(vnode_id);
+    if(vnode == nullptr) {
+        return -1;
+    }
+    
+    BloomFilter *bloom = &valueList->bf[vnode_id];
+    std::shared_lock<std::shared_mutex> vnode_lock(bloom->vnode_mtx);
+    // vnode链表遍历逻辑
+    while(true) {
+       //if bloom filter might contain the key, then lookup in the vnode 
+        bool mightContain = bloom->mightContain(key);
+        if(mightContain) {
+            if(vnode->lookupWithoutFilter(key, value, bloom)) {
+                return value;
+            }
+        }
+        //if cant find the key, then decide whether to move to the next vnode
+        //1. the next vnode exists
+        //2. and key is larger than the max key of the current vnode or the bloom filter decide key not exist in the current vnode
+        if(vnode->hdr.next != -1 && (key > vnode->getMaxKey() || !mightContain)) {
+            if(!moveToNextVnode(vnode, bloom, vnode_lock)) {
+                return -1; // no next vnode to move to
+            }
+            continue; // continue to check the next vnode
+        }
+        // if cant move to next vnode, also cant find the key, key does not exist in the index
+        return -1;
+    }
+}
+
+Val_t TandemIndex::lookupWithSGP(Key_t key)
+{
+    int idx = -1;
+    Vnode *vnode = nullptr;
+    Val_t value;
+    
+    // 获取起始层级和header节点
+    int current_level = mainIndex->getLevel();
+    if(current_level <= 0) {
+        return -1;
+    }
+    
+    Inode *header = mainIndex->getHeader(current_level - 1);
+    if(header == nullptr) {
+        return -1;
+    }
+    
+    // lock on the header
+    std::shared_lock<std::shared_mutex> header_lock(mainIndex->inode_locks[header->getId()]);
+    
+    // use mainIndex to lookup the key, header_lock is now locked
+    bool sgp_used = false;
+    Inode *target = mainIndex->lookupWithSGP(key, header, current_level - 1, header_lock, idx, sgp_used);
+    if(target == nullptr) {
+        return -1;
+    }
+    
+    // now header_lock is still held, as lock of target
+    int vnode_id;
+    if (sgp_used){
+        vnode_id = target->sgps[idx].value;
+    } else {
+        vnode_id = target->gps[idx].value;
+    }
+    //int vnode_id = target->gps[idx].value;
     header_lock.unlock();
 
     vnode = valueList->pmemVnodePool->at(vnode_id);
