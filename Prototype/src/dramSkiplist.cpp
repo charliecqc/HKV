@@ -1241,7 +1241,12 @@ void DramSkiplist::populate_cache(Key_t key, Inode* leaf_node, int current_total
 
     // 向上追溯，尽量靠近目标层；找不到就取能到达的最高祖先
     while (ancestor != nullptr) {
-        Inode* parent = getParentInode(ancestor);
+        Inode* parent =
+#if ENABLE_PARENT_RELATION
+            getParentInode(ancestor);
+#else
+            nullptr;
+#endif
         if (parent == nullptr) {
             node_to_cache = ancestor;
             break;
@@ -1361,7 +1366,12 @@ void DramSkiplist::populate_cache_shards(Key_t key, Inode* leaf_node, int curren
     Inode * node_to_cache = nullptr;
 
     while(ancestor != nullptr) {
-        Inode *parent = getParentInode(ancestor);
+        Inode *parent =
+#if ENABLE_PARENT_RELATION
+            getParentInode(ancestor);
+#else
+            nullptr;
+#endif
         if(parent == nullptr) {
             node_to_cache = ancestor;
             break;
