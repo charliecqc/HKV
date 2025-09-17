@@ -9,8 +9,13 @@
 #include <fstream>   // 新增
 
 #define numNodesInPool 10000000
-#define DBG_CACHE 1 // 新增：启用缓存统计
-//#define DBG_SEARCH_STABILITY 1
+#ifndef ENABLE_CACHE_STATS
+#define ENABLE_CACHE_STATS 1
+#endif
+
+#if ENABLE_CACHE_STATS
+#define DBG_CACHE 1
+#endif
 
 // 线程本地路标定义
 thread_local Key_t  DramSkiplist::tls_pivot_key_  = std::numeric_limits<Key_t>::min();
@@ -20,12 +25,12 @@ thread_local decltype(DramSkiplist::tls_pivot_set_) DramSkiplist::tls_pivot_set_
 namespace {
 #ifdef DBG_CACHE
     // --- 新增：全面的缓存统计变量 ---
-    std::atomic<uint64_t> g_total_cache_lookups{0};
-    std::atomic<uint64_t> g_l1_hits{0};
-    std::atomic<uint64_t> g_l1_misses{0};
-    std::atomic<uint64_t> g_l2_hits{0};
-    std::atomic<uint64_t> g_l2_misses{0};
-    std::atomic<uint64_t> g_lfi_start_node_verify_failures{0};
+    alignas(64) std::atomic<uint64_t> g_total_cache_lookups{0};
+    alignas(64) std::atomic<uint64_t> g_l1_hits{0};
+    alignas(64) std::atomic<uint64_t> g_l1_misses{0};
+    alignas(64) std::atomic<uint64_t> g_l2_hits{0};
+    alignas(64) std::atomic<uint64_t> g_l2_misses{0};
+    alignas(64) std::atomic<uint64_t> g_lfi_start_node_verify_failures{0};
 #endif
 
     struct LfiCounterPrinter {
@@ -60,7 +65,11 @@ namespace {
 
     // ==== 新增：横向移动超阈值事件统计 ====
 
-#ifdef DBG_SEARCH_STABILITY
+#ifndef ENABLE_SEARCH_STABILITY
+#define ENABLE_SEARCH_STABILITY 0
+#endif
+
+#if ENABLE_SEARCH_STABILITY
     struct HorizontalExcessEvent {
         Key_t    key;
         uint32_t level;
@@ -651,7 +660,7 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current,
         current_lock = std::move(next_v_lock);
     }
 
-    // 步骤 4: 底层判空
+    // **步骤 4: 底层判空**
     if (current->isHeader()) {
         idx = -1;
         return nullptr;
@@ -1172,50 +1181,6 @@ void DramSkiplist::acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<s
     }
 }
 
-Inode *DramSkiplist::find_start_node_from_cache_shards(Key_t key, int& start_level) 
-{
-#ifdef DBG_CACHE
-    g_total_cache_lookups.fetch_add(1, std::memory_order_relaxed);
-#endif
-    if (Inode* n = tls_try_match(key, start_level)) return n;
-
-#ifdef DBG_CACHE
-    g_l1_misses.fetch_add(1, std::memory_order_relaxed);
-#endif
-
-    size_t s = shard_of(key);
-    CacheShard& shard = cache_shards[s];
-    std::shared_lock<std::shared_mutex> r(shard.mtx);
-    if (shard.table.empty()) {
-#ifdef DBG_CACHE
-        g_l2_misses.fetch_add(1, std::memory_order_relaxed);
-#endif
-        return nullptr;
-    }
-
-    auto it = shard.table.upper_bound(key);
-    if (it == shard.table.begin()) {
-#ifdef DBG_CACHE
-        g_l2_misses.fetch_add(1, std::memory_order_relaxed);
-#endif
-        return nullptr;
-    }
-    -- it;
-    Inode* start_node = it->second;
-    if (!start_node) {
-#ifdef DBG_CACHE
-        g_l2_misses.fetch_add(1, std::memory_order_relaxed);
-#endif
-        return nullptr;
-    }
-    else {
-#ifdef DBG_CACHE
-        g_l2_hits.fetch_add(1, std::memory_order_relaxed);
-#endif
-        return start_node;
-    }
-}
-
 // **新增实现：从缓存中查找起点**
 Inode* DramSkiplist::find_start_node_from_cache(Key_t key, int& start_level) {
 
@@ -1307,7 +1272,81 @@ void DramSkiplist::populate_cache(Key_t key, Inode* leaf_node, int current_total
     }
 }
 
+void DramSkiplist::invalidate_tls_pivot() {
+    tls_pivot_node_ = nullptr;
+    tls_pivot_key_  = std::numeric_limits<Key_t>::min();
+}
 
+void DramSkiplist::update_tls_pivot(Key_t key, Inode* node) {
+    tls_pivot_key_  = key;
+    tls_pivot_node_ = node;
+}
+
+// 新增辅助函数：获取节点的真实管辖上界
+Key_t DramSkiplist::get_node_upper_bound(Inode* node) {
+    if (!node || node->isTail()) {
+        return std::numeric_limits<Key_t>::max();
+    }
+    Inode* next_node = dramInodePool->at(node->hdr.next);
+    if (!next_node || next_node->isTail()) {
+        return std::numeric_limits<Key_t>::max();
+    }
+    return next_node->getMinKey();
+}
+
+#ifndef ENABLE_L2_SHARD_CACHE
+#define ENABLE_L2_SHARD_CACHE 1
+#endif
+
+#if ENABLE_L2_SHARD_CACHE
+Inode *DramSkiplist::find_start_node_from_cache_shards(Key_t key, int& start_level) 
+{
+#ifdef DBG_CACHE
+    g_total_cache_lookups.fetch_add(1, std::memory_order_relaxed);
+#endif
+    if (Inode* n = tls_try_match(key, start_level)) return n;
+
+#ifdef DBG_CACHE
+    g_l1_misses.fetch_add(1, std::memory_order_relaxed);
+#endif
+
+    size_t s = shard_of(key);
+    CacheShard& shard = cache_shards[s];
+    std::shared_lock<std::shared_mutex> r(shard.mtx);
+    if (shard.table.empty()) {
+#ifdef DBG_CACHE
+        g_l2_misses.fetch_add(1, std::memory_order_relaxed);
+#endif
+        return nullptr;
+    }
+
+    auto it = shard.table.upper_bound(key);
+    if (it == shard.table.begin()) {
+#ifdef DBG_CACHE
+        g_l2_misses.fetch_add(1, std::memory_order_relaxed);
+#endif
+        return nullptr;
+    }
+    -- it;
+    Inode* start_node = it->second;
+    if (!start_node) {
+#ifdef DBG_CACHE
+        g_l2_misses.fetch_add(1, std::memory_order_relaxed);
+#endif
+        return nullptr;
+    }
+    else {
+#ifdef DBG_CACHE
+        g_l2_hits.fetch_add(1, std::memory_order_relaxed);
+#endif
+        return start_node;
+    }
+}
+#else
+Inode *DramSkiplist::find_start_node_from_cache_shards(Key_t, int&) { return nullptr; }
+#endif
+
+#if ENABLE_L2_SHARD_CACHE
 void DramSkiplist::populate_cache_shards(Key_t key, Inode* leaf_node, int current_total_level) {
     if (!leaf_node || leaf_node->hdr.level != 0 || leaf_node->isHeader() || current_total_level <= 1) {
         return;
@@ -1351,25 +1390,6 @@ void DramSkiplist::populate_cache_shards(Key_t key, Inode* leaf_node, int curren
         shard.table[cache_key] = node_to_cache; 
     }
 }
-
-void DramSkiplist::invalidate_tls_pivot() {
-    tls_pivot_node_ = nullptr;
-    tls_pivot_key_  = std::numeric_limits<Key_t>::min();
-}
-
-void DramSkiplist::update_tls_pivot(Key_t key, Inode* node) {
-    tls_pivot_key_  = key;
-    tls_pivot_node_ = node;
-}
-
-// 新增辅助函数：获取节点的真实管辖上界
-Key_t DramSkiplist::get_node_upper_bound(Inode* node) {
-    if (!node || node->isTail()) {
-        return std::numeric_limits<Key_t>::max();
-    }
-    Inode* next_node = dramInodePool->at(node->hdr.next);
-    if (!next_node || next_node->isTail()) {
-        return std::numeric_limits<Key_t>::max();
-    }
-    return next_node->getMinKey();
-}
+#else
+void DramSkiplist::populate_cache_shards(Key_t, Inode*, int) {}
+#endif
