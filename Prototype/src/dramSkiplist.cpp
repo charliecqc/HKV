@@ -1135,23 +1135,45 @@ dram_log_entry_t *DramSkiplist::create_log_entry(Inode *inode)
     return entry;
 }
 
+// 建议：可在类外增加微型统计（可选）
+static std::atomic<uint64_t> g_parent_rd{0}, g_parent_miss{0}, g_parent_tryfail{0}, g_parent_wr{0};
+
 void DramSkiplist::recordInodeRelation(Inode* &child, Inode* &parent) {
-    std::lock_guard<std::mutex> lock(inodeRelationMutex);
-    childToParentMap[child] = parent;
+    if (child == nullptr) return;
+    size_t s = parent_shard_of(child);
+    // 写可以阻塞，但临界区只做 map 写入，避免拿其它锁
+    std::unique_lock<std::shared_mutex> lk(parent_shards[s].mtx);
+    auto &m = parent_shards[s].map;
+    // 预留（可选）：首次膨胀时扩容，降低 rehash 次数
+    if (m.empty()) m.reserve(1024);
+    m[child] = parent;
+    g_parent_wr.fetch_add(1, std::memory_order_relaxed);
 }
 
 Inode* DramSkiplist::getParentInode(Inode* &child) {
-    std::lock_guard<std::mutex> lock(inodeRelationMutex);
-    auto it = childToParentMap.find(child);
-    if (it != childToParentMap.end()) {
-        return it->second;
+    if (child == nullptr) return nullptr;
+    size_t s = parent_shard_of(child);
+    // 读路径优先非阻塞：抢不到锁直接返回 nullptr，避免拖慢查询
+    std::shared_lock<std::shared_mutex> lk(parent_shards[s].mtx, std::try_to_lock);
+    if (!lk.owns_lock()) {
+        g_parent_tryfail.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
     }
-    return nullptr; // 未找到
+    g_parent_rd.fetch_add(1, std::memory_order_relaxed);
+    auto it = parent_shards[s].map.find(child);
+    if (it == parent_shards[s].map.end()) {
+        g_parent_miss.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    return it->second;
 }
 
 void DramSkiplist::removeInodeRelation(Inode* &child) {
-    std::lock_guard<std::mutex> lock(inodeRelationMutex);
-    childToParentMap.erase(child);
+    if (child == nullptr) return;
+    size_t s = parent_shard_of(child);
+    std::unique_lock<std::shared_mutex> lk(parent_shards[s].mtx, std::try_to_lock);
+    if (!lk.owns_lock()) return; // 非关键路径，拿不到锁直接放弃
+    parent_shards[s].map.erase(child);
 }
 
 void DramSkiplist::printStats()
