@@ -542,9 +542,21 @@ public:
     bool isUnbalancedSGP(int idx)
     {
         int current_level = this->hdr.level;
-        double coefficient = (current_level < MAX_LEVEL) ? SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+        double coefficient = (current_level < MAX_LEVEL) ? 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] :
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
 
         if (this->sgps[idx].covered_nodes > coefficient)
+        {
+            return true;
+        }
+        return false;
+    }
+
+    bool foundBetterSGP(Key_t targetKey, int &pos , int &sgp_pos)
+    {
+        sgp_pos = findKeyPosSGP(targetKey);
+        if (isSGPInGPRange(pos, sgp_pos))
         {
             return true;
         }

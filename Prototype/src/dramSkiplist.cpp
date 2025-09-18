@@ -575,20 +575,17 @@ Inode* DramSkiplist::lookupWithSGP(Key_t key, int &idx, bool &sgp_used)
         if (i > 0) {
             std::shared_lock<std::shared_mutex> lock_current(inode_locks[current->getId()]);
             int temp_idx = current->findKeyPos(key);
-            //======================================================
-            //check if more optimized sgp
-            int temp_sgp_idx = current->findValidKeyPosSGP(key);
-            if (current->isSGPInGPRange(temp_idx, temp_sgp_idx)) {
-                uint32_t next_level_node_id = current->sgps[temp_sgp_idx].value;
-                current = dramInodePool->at(next_level_node_id);
-                assert(current != nullptr);
+            int temp_sgp_idx;
+            uint32_t next_level_node_id;
+            if (current->foundBetterSGP(key, temp_idx, temp_sgp_idx)) {
+                sgp_used = true;
+                next_level_node_id = current->sgps[temp_sgp_idx].value;
+                
             } else {
-            //======================================================
-
-            uint32_t next_level_node_id = current->gps[temp_idx].value;
+                next_level_node_id = current->gps[temp_idx].value;
+            }
             current = dramInodePool->at(next_level_node_id);
             assert(current != nullptr);
-            }
         }
     }
 
@@ -603,11 +600,10 @@ Inode* DramSkiplist::lookupWithSGP(Key_t key, int &idx, bool &sgp_used)
     }
     assert(current->hdr.last_index >= 0);
     idx = current->findKeyPos(key);
-    int sgp_idx = current->findValidKeyPosSGP(key);
-    if (current->isSGPInGPRange(idx, sgp_idx)) {
-        //TODO: other checks on SGP?
-        idx = sgp_idx;
+    int sgp_idx;
+    if (current->foundBetterSGP(key, idx, sgp_idx)) {
         sgp_used = true;
+        idx = sgp_idx;
     } else {
         sgp_used = false;
     }
@@ -754,14 +750,160 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current,
     return current;
 }
 
-Inode *DramSkiplist::lookupForInsertWithSGP(Key_t key, Inode * &current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates, bool &sgp_used)
+Inode *DramSkiplist::lookupForInsertWithSGP(Key_t key, Inode * &current, 
+                                     int currentHighestLevelIndex, 
+                                     std::shared_lock<std::shared_mutex> &current_lock, 
+                                     int &idx, std::vector<Inode *> &updates, 
+                                     bool &sgp_used)
 {
+    int  start_level = -1;
+    bool cache_hit_and_verified = false;
+    int  current_total_level = currentHighestLevelIndex + 1;
+    Inode *temp_start = current;
 
+    // 步骤 1: 尝试从缓存获取起点
+    Inode *start_node = find_start_node_from_cache_shards(key, start_level);
+
+    if (start_node != nullptr) {
+        std::shared_lock<std::shared_mutex> lock_start(inode_locks[start_node->getId()]);
+        Key_t lower_bound = start_node->getMinKey();
+        Key_t upper_bound = get_node_upper_bound(start_node);
+
+        // 软前推允许的最大横移步数（固定 2，不做动态调整）
+        constexpr int SOFT_MAX_STEPS = 4;
+
+        if (key < lower_bound) {
+            // Hard fail：缓存起点在 key 右侧 -> 视为严重失效
+#ifdef DBG_CACHE
+            g_lfi_start_node_verify_failures.fetch_add(1, std::memory_order_relaxed);
+#endif
+            tls_mark_fail(start_node->getMinKey());
+            // 回退到原始 temp_start，不采用该缓存节点
+            // 不修改 current / current_lock（保持调用方已持有的 current_lock）
+        } else {
+            // key >= lower_bound：可以把 start_node 当作一个“候选起点”
+            // 如果 key 已经在区间内，直接接受；否则尝试向右最多 SOFT_MAX_STEPS 步
+            Inode *probe = start_node;
+            std::shared_lock<std::shared_mutex> probe_lock = std::move(lock_start);
+            if (key >= upper_bound) {
+                int soft_steps = 0;
+                while (soft_steps < SOFT_MAX_STEPS && key >= upper_bound) {
+                    Inode *next_node = dramInodePool->at(probe->hdr.next);
+                    if (!next_node || next_node->isTail()) break;
+
+                    // 预判：如果下一节点最小键仍大于 key，则无需再前推
+                    Key_t next_min = next_node->getMinKey();
+                    if (key < next_min) break;
+
+                    // 锁传递：先锁 next，再释放当前
+                    std::shared_lock<std::shared_mutex> next_lock(inode_locks[next_node->getId()]);
+                    probe_lock.unlock();
+                    probe = next_node;
+                    probe_lock = std::move(next_lock);
+                    upper_bound = get_node_upper_bound(probe);
+                    ++soft_steps;
+                }
+
+                // 若软前推后仍未覆盖 key，则放弃此次缓存使用（不记失败，不惩罚 pivot）
+                if (key >= upper_bound) {
+                    probe_lock.unlock();
+                    probe = nullptr;
+                }
+
+            }
+            if (probe) {
+                // 接受（无论是直接 exact 还是 soft 前推后）
+                current = probe;
+                start_level = probe->hdr.level;
+                cache_hit_and_verified = true;
+                tls_record_pivot(probe);  // 仅记录起点，不在此调用 findKeyPos
+                current_lock.unlock();
+                current_lock = std::move(probe_lock);
+            }
+        }
+    }
+
+    // 步骤 2: 若缓存未命中或未被接受，则从最高层重新开始
+    if (!cache_hit_and_verified) {
+        start_level = currentHighestLevelIndex;
+    }
+
+    // 步骤 3: 正常自顶向下搜索（最终的 idx 在最底层统一计算）
+    for (int i = start_level; i >= 0; --i) {
+#ifdef DBG_SEARCH_STABILITY
+        uint32_t horizontal_steps = 0;
+#endif
+        while (true) {
+            assert(current != nullptr);
+            Inode *next = dramInodePool->at(current->hdr.next);
+            std::shared_lock<std::shared_mutex> next_h_lock(inode_locks[next->getId()]);
+            if (!next->isTail() && key >= next->getMinKey()) {
+                assert(current->getMaxKey() <= next->getMinKey());
+                current = next;
+                current_lock.unlock();
+                current_lock = std::move(next_h_lock);
+#ifdef DBG_SEARCH_STABILITY
+                ++horizontal_steps;
+#endif
+            } else {
+                break;
+            }
+        }
+#ifdef DBG_SEARCH_STABILITY
+        {
+            const int threshold = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[i] + 1.0;
+            if (horizontal_steps > (uint32_t)threshold) {
+                record_horizontal_excess(key, i, horizontal_steps);
+            }
+        }
+#endif
+        if (i == 0) break;
+
+        uint32_t next_level_node_id;
+        if (current->isHeader()) {
+            next_level_node_id = current->gps[0].value;
+        } else {
+            int temp_pos = current->findKeyPos(key);
+            int temp_sgp_pos;
+            if (current->foundBetterSGP(key, temp_pos, temp_sgp_pos)) {
+                next_level_node_id = current->sgps[temp_sgp_pos].value;
+            } else {
+                next_level_node_id = current->gps[temp_pos].value;
+            }
+            next_level_node_id = current->gps[temp_pos].value;
+        }
+        Inode *down = dramInodePool->at(next_level_node_id);
+        assert(down != nullptr);
+        std::shared_lock<std::shared_mutex> next_v_lock(inode_locks[down->getId()]);
+        updates.push_back(current);
+        current = down;
+        current_lock.unlock();
+        current_lock = std::move(next_v_lock);
+    }
+
+    // **步骤 4: 底层判空**
+    if (current->isHeader()) {
+        idx = -1;
+        return nullptr;
+    }
+
+    // 步骤 5: 填充缓存（使用叶子 + 总层数信息）
+    populate_cache_shards(key, current, current_total_level);
+
+    // 步骤 6: 最终定位 idx（只在此处调用 findKeyPos）
+    assert(current->hdr.last_index >= 0);
+    idx = current->findKeyPos(key);
+    int sgp_idx;
+    if (current->foundBetterSGP(key, idx, sgp_idx)) {
+        idx = sgp_idx;
+        sgp_used = true;
+    } 
+    return current;
 }
 
 Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx)
 {
-     int start_level = -1;
+    int start_level = -1;
     bool cache_hit_and_verified = false;
     int current_total_level = currentHighestLevelIndex + 1; // 保存总层数
 
@@ -846,7 +988,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
 
 Inode *DramSkiplist::lookupWithSGP(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, bool &sgp_used)
 {
-     int start_level = -1;
+    int start_level = -1;
     bool cache_hit_and_verified = false;
     int current_total_level = currentHighestLevelIndex + 1; // 保存总层数
 
@@ -859,16 +1001,17 @@ Inode *DramSkiplist::lookupWithSGP(Key_t key, Inode *current, int currentHighest
         // 修正：用 start_node 校验
         int temp_idx = start_node->findKeyPos(key);
         if (key >= start_node->gps[0].key && key <= start_node->gps[start_node->hdr.last_index].key) {
-            int temp_sgp_idx = start_node->findValidKeyPosSGP(key);
-            if (start_node->isSGPInGPRange(temp_idx, temp_sgp_idx)) {
-                //TODO: other checks?
-                idx = temp_sgp_idx;
-                sgp_used = true;
-            } else {
-                idx = temp_idx;
-                sgp_used = false;
-            }
+            idx = temp_idx;
             cache_hit_and_verified = true;
+        }
+        int temp_sgp_idx;
+        if (start_node->foundBetterSGP(key, temp_idx, temp_sgp_idx)) {
+            idx = temp_sgp_idx;
+            sgp_used = true;
+        }
+         // 如果缓存命中但未验证成功，则从最高层重新开始
+        if (!cache_hit_and_verified) {
+            start_level = currentHighestLevelIndex;
         }
         current = start_node;
         current_lock.unlock();
@@ -908,20 +1051,15 @@ Inode *DramSkiplist::lookupWithSGP(Key_t key, Inode *current, int currentHighest
             next_level_node_id = current->gps[0].value;            
         }else {
             int temp_idx = current->findKeyPos(key);
-            int temp_sgp_idx = start_node->findValidKeyPosSGP(key);
-            if (start_node->isSGPInGPRange(temp_idx, temp_sgp_idx)) {
-                std::cout << "Using SGP at level " << i << " for key " << key << std::endl;
-                //TODO: other checks?
-                next_level_node_id = current->sgps[temp_sgp_idx].value; 
+            int temp_sgp_idx;
+            if (current->foundBetterSGP(key, temp_idx, temp_sgp_idx)) {
+                next_level_node_id = current->sgps[temp_sgp_idx].value;
             } else {
                 next_level_node_id = current->gps[temp_idx].value;
             }
         }
 
         Inode *temp = dramInodePool->at(next_level_node_id);
-        if (temp == nullptr) {
-            std::cout << "Error: next level node is null for key: " << key << std::endl;
-        }
         assert(temp != nullptr);
 
         //lock passing for the next level node
@@ -943,11 +1081,9 @@ Inode *DramSkiplist::lookupWithSGP(Key_t key, Inode *current, int currentHighest
     populate_cache_shards(key, current, current_total_level);
 
     assert(current->hdr.last_index >= 0);
-    
     idx = current->findKeyPos(key);
-    int sgp_idx = current->findValidKeyPosSGP(key);
-    if (current->isSGPInGPRange(idx, sgp_idx)) {
-        //TODO: other checks on SGP?
+    int sgp_idx;
+    if (current->foundBetterSGP(key, idx, sgp_idx)) {
         idx = sgp_idx;
         sgp_used = true;
     } else {
