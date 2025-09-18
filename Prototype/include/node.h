@@ -227,7 +227,7 @@ public:
         return hdr.last_index == fanout/2 - 1;
     }
 
-    bool activateGP(Key_t targetKey, Val_t value, int &pos, int16_t initial_covered_nodes)
+    bool activateGP(Key_t targetKey, Val_t value, int &pos, int16_t relative_pos)
     {
         //check if there is enough space to insert the new GP
         int16_t cur_index = this->hdr.last_index;  
@@ -239,8 +239,31 @@ public:
                 std::cout << "Invalid position for inserting GP: " << pos << std::endl;
                 return false;
             }
-            // **将 initial_covered_nodes 传递下去**
-            this->insertAtPos(targetKey, value, pos, initial_covered_nodes);
+            assert(pos != 0);
+            int old_covered_nodes = gps[pos-1].covered_nodes;
+
+            this->insertAtPos(targetKey, value, pos, old_covered_nodes - relative_pos - 1);
+            this->gps[pos-1].covered_nodes = relative_pos + 1; // set new covered nodes for the previous GP
+
+            assert(this->gps[pos-1].covered_nodes >= 1);
+            return true;
+        }
+    }
+
+    bool activateGPForVnode(Key_t targetKey, int vnode_id, int &pos, int16_t initial_covered_nodes)
+    {
+        //check if there is enough space to insert the new GP
+        int16_t cur_index = this->hdr.last_index;  
+        if(static_cast<int32_t>(cur_index + 1)>= fanout/2) {
+            return false;
+        }else {
+            pos = this->findInsertKeyPos(targetKey);
+            if(pos < 0 || pos > cur_index + 1) {
+                std::cout << "Invalid position for inserting GP: " << pos << std::endl;
+                return false;
+            }
+            assert(pos != 0);
+            this->insertAtPos(targetKey, vnode_id, pos, initial_covered_nodes);
             return true;
         }
     }
@@ -362,7 +385,14 @@ public:
         targetInode->hdr.last_index = second_half_count - 1;
 
         assert(this->getMaxKey() <= targetInode->getMinKey());
-
+    #if 0
+        for(int i = 0; i <= hdr.last_index; i++) {
+            std::cout << "After split, left inode id: " << this->getId() << " pos: " << i << " key: "<<this->gps[i].key << " covered_nodes: "<< this->gps[i].covered_nodes<< std::endl;
+        }
+        for(int i = 0; i <= targetInode->hdr.last_index; i++) {
+            std::cout << "After split, right inode id: " << targetInode->getId() << " pos: " << i << " key: "<<targetInode->gps[i].key << " covered_nodes: "<< targetInode->gps[i].covered_nodes<< std::endl;
+        }
+    #endif
         return true;
     }
 
@@ -381,7 +411,8 @@ public:
         gps[pos].value = value;
         // **为新GP的 covered_nodes 赋初始值**
         gps[pos].covered_nodes = initial_covered_nodes;
-
+        assert(gps[pos].covered_nodes >= 1);
+        
         // **移除对旧全局计数器的操作**
         // hdr.coveredNodes++;
 
@@ -418,10 +449,16 @@ public:
     bool isUnbalanced(int idx)
     {
         int current_level = this->hdr.level;
-        double coefficient = (current_level < MAX_LEVEL) ? SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
-
-        if (this->gps[idx].covered_nodes > coefficient)
-        {
+        double coefficient = (current_level < MAX_LEVEL) ? 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+#if 0
+        int16_t temp_covered_nodes = this->gps[idx].covered_nodes; 
+        if(temp_covered_nodes == 4 && this->hdr.level == 1) {
+            std::cout << "GP at index " << idx << " has exactly 4 covered nodes." << std::endl;
+        }
+#endif
+        if (this->gps[idx].covered_nodes > coefficient) {
             return true;
         }
         return false;
