@@ -7,12 +7,20 @@
 #include "valuelist.h"
 #include <map>
 #include <shared_mutex>
-#pragma once// SkipList class
+#include <unordered_map>   // 新增
+#pragma once
 
 class CacheShard {
 public:
     std::map<Key_t, Inode*> table;
-    mutable std::shared_mutex mtx; // 共享互斥锁，允许多个
+    mutable std::shared_mutex mtx;
+};
+
+// 新增：分片父关系表
+class ParentShard {
+public:
+    std::unordered_map<Inode*, Inode*> map;
+    mutable std::shared_mutex mtx; // 读多写少：读共享，写独占
 };
 
 class DramSkiplist {
@@ -112,8 +120,20 @@ public:
     bool activateGP(Inode &inode);
     void setLevel(int level);
     int getLevel();
+
+        // 新增：父关系表分片（2 的幂，便于位运算取模）
+    static constexpr size_t kNumParentShards = 64;
+    static_assert((kNumParentShards & (kNumParentShards - 1)) == 0, "kNumParentShards must be power of two");
+    ParentShard parent_shards[kNumParentShards];
+
+    // 快速分片函数：基于指针位做哈希，掐掉低位，避免邻近地址聚集
+    inline size_t parent_shard_of(const Inode* child) const {
+        uintptr_t x = reinterpret_cast<uintptr_t>(child);
+        return (x >> 6) & (kNumParentShards - 1); // 跳过低 6 位
+    }
+
     void recordInodeRelation(Inode* &child, Inode* &parent);
-    Inode *getParentInode(Inode* &child);
+    Inode* getParentInode(Inode* &child);
     void removeInodeRelation(Inode* &child);
     void acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<std::unique_lock<std::shared_mutex>>& locks);
     int fastRebalance(Inode* &inode, Inode* &parent_inode);
