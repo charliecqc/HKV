@@ -4,10 +4,13 @@ CXX = g++
 
 # Compiler flags
 #CXXFLAGS = -Wall -Iinclude -g --std=c++17 -fsanitize=thread -O0
-CXXFLAGS = -Wall -Iinclude -g --std=c++17 -O2 -DENABLE_CACHE_STATS -DENABLE_SEARCH_STABILITY
+#CXXFLAGS = -Wall -Iinclude -g --std=c++17 -O2 -DENABLE_CACHE_STATS -DENABLE_SEARCH_STABILITY
+#CXXFLAGS = -Wall -Iinclude -g --std=c++17 -O -DENABLE_PARENT_RELATION=0
+#CXXFLAGS = -Wall -Iinclude --std=c++17 -O3 -DENABLE_L2_SHARD_CACHE=0
 #CXXFLAGS = -Wall -Iinclude -mavx2 --std=c++17 -O3
 #CXXFLAGS = -Wall -Iinclude -g --std=c++17 -O0
-#CXXFLAGS = -Wall -Iinclude --std=c++17 -O3
+#CXXFLAGS = -Wall -Iinclude --std=c++17 -O3 -DENABLE_CACHE_STATS=0
+CXXFLAGS = -Wall -Iinclude --std=c++17 -O3
 #CXXFLAGS = -Wall -Iinclude --std=c++17 -O2
 #CXXFLAGS = -Wall -Iinclude -g --std=c++17 -mavx2 -fsanitize=thread -O1
 #CXXFLAGS = -Wall -Iinclude -g --std=c++17 -O0
