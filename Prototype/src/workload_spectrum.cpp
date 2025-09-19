@@ -311,10 +311,10 @@ inline void exec(int wl,
         // declare_periodic_count;
         for (size_t i = start_index; i < end_index; i++)
         {
-            idx->insertWithSGP(init_keys[i], values[i]);
+            idx->insert(init_keys[i], values[i]);
 #if 0
             //Val_t value = idx->lookup(init_keys[i]);
-            Val_t value = idx->lookupWithSGP(init_keys[i]);
+            Val_t value = idx->lookup(init_keys[i]);
             if(value != values[i])
             {
                 std::cout << "Failed to insert key: " << init_keys[i] << " get " << value << " expected value: " << values[i] << "\n";
@@ -364,7 +364,7 @@ inline void exec(int wl,
         {
             v.clear();
             //idx->lookup(init_keys[i]);
-            idx->lookupWithSGP(init_keys[i]);
+            idx->lookup(init_keys[i]);
         }
         return;
     };
@@ -418,13 +418,13 @@ inline void exec(int wl,
 
             if (op == OP_INSERT)
             { // INSERT
-                idx->insertWithSGP(keys[i], values[i]);
+                idx->insert(keys[i], values[i]);
             }
             else if (op == OP_READ)
             { // READ
                 v.clear();
                 //idx->lookup(keys[i]);
-                idx->lookupWithSGP(keys[i]);
+                idx->lookup(keys[i]);
             }
             else if (op == OP_UPSERT)
             { // UPDATE
