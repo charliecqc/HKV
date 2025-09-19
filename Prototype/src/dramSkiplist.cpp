@@ -695,6 +695,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
      int start_level = -1;
     bool cache_hit_and_verified = false;
     int current_total_level = currentHighestLevelIndex + 1; // 保存总层数
+    Inode *temp_start = current;
 
     // **步骤 1: 尝试从缓存获取起点**
     Inode *start_node = find_start_node_from_cache_shards(key, start_level);
@@ -702,15 +703,52 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
     // **步骤 2: 如果缓存命中，验证并返回结果
     if (start_node != nullptr) {
         std::shared_lock<std::shared_mutex> lock_start(inode_locks[start_node->getId()]);
-        // 修正：用 start_node 校验
-        int temp_idx = start_node->findKeyPos(key);
-        if (key >= start_node->gps[0].key && key <= start_node->gps[start_node->hdr.last_index].key) {
-            idx = temp_idx;
-            cache_hit_and_verified = true;
+
+        Key_t lower_bound = start_node->getMinKey();
+        Key_t upper_bound = get_node_upper_bound(start_node);
+
+        constexpr int SOFT_MAX_STEPS = 4; // max soft steps
+
+        if(key < lower_bound) {
+            // Hard fail: the cached start node is to the right of the key
+#ifdef DBG_CACHE
+            g_lfi_start_node_verify_failures.fetch_add(1, std::memory_order_relaxed);
+#endif
+            tls_mark_fail(start_node->getMinKey());
+        }else {
+            Inode *probe = start_node;
+            std::shared_lock<std::shared_mutex> probe_lock = std::move(lock_start);
+            if(key >= upper_bound) {
+                int soft_steps = 0;
+                while(soft_steps < SOFT_MAX_STEPS && key >= upper_bound) {
+                    Inode *next_node = dramInodePool->at(probe->hdr.next);
+                    if(!next_node || next_node->isTail()) break;
+
+                    Key_t next_min = next_node->getMinKey();
+                    if(key < next_min) break;
+
+                    std::shared_lock<std::shared_mutex> next_lock(inode_locks[next_node->getId()]);
+                    probe_lock.unlock();
+                    probe = next_node;
+                    probe_lock = std::move(next_lock);
+                    upper_bound = get_node_upper_bound(probe);
+                    ++soft_steps;
+                }
+
+                if(key >= upper_bound) {
+                    probe_lock.unlock();
+                    probe = nullptr;
+                }
+            }
+            if(probe) {
+                current = probe;
+                start_level = probe->hdr.level;
+                cache_hit_and_verified = true;
+                tls_record_pivot(probe); // only record the start node, do not call findKeyPos here
+                current_lock.unlock();
+                current_lock = std::move(probe_lock);
+            }
         }
-        current = start_node;
-        current_lock.unlock();
-        current_lock = std::move(lock_start);
     }
 
     // **步骤 3: 如果缓存未命中，则执行完整查找**
@@ -721,26 +759,39 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
     for(int i = start_level; i >= 0; i--) {
         // no real index nodes between header and tail
         //search among the nodes in the current level
+#ifdef DBG_SEARCH_STABILITY
+        uint32_t horizontal_steps = 0;
+#endif
         while(true) {
             assert(current != nullptr);
             {
                 Inode *next = dramInodePool->at(current->hdr.next);
                 std::shared_lock<std::shared_mutex> next_horizental_lock(inode_locks[next->getId()]);
                 if(!next->isTail() && key >= next->getMinKey()) {
+                    assert(current->getMaxKey() <= next->getMinKey());
                     current = next;
                     current_lock.unlock();
                     current_lock = std::move(next_horizental_lock);
+#ifdef DBG_SEARCH_STABILITY
+                    ++horizontal_steps;
+#endif
                 } else {
                     // found the node in this level, escape the look and go to the next level
                     break;
                 }
             }
         }
-        //if already on the last level, return the current node
-        if(i ==0) {
-            break;
+#ifdef DBG_SEARCH_STABILITY
+        {
+            const int threshold = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[i] + 1.0;
+            if (horizontal_steps > (uint32_t)threshold) {
+                record_horizontal_excess(key, i, horizontal_steps);     
+            }
         }
-
+#endif
+        //if already on the last level, return the current node
+        if(i == 0) break;
+        
         uint32_t next_level_node_id;
         if(current->isHeader()) {
             next_level_node_id = current->gps[0].value;            
@@ -749,12 +800,11 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
             next_level_node_id = current->gps[temp_idx].value;
         }
 
-        Inode *temp = dramInodePool->at(next_level_node_id);
-        assert(temp != nullptr);
-
+        Inode *down = dramInodePool->at(next_level_node_id);
+        assert(down != nullptr);
         //lock passing for the next level node
-        std::shared_lock<std::shared_mutex> next_vertical_lock(inode_locks[temp->getId()]);
-        current = temp;
+        std::shared_lock<std::shared_mutex> next_vertical_lock(inode_locks[down->getId()]);
+        current = down;
         current_lock.unlock();
         current_lock = std::move(next_vertical_lock);
     }
@@ -765,7 +815,6 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
         idx = -1;
         return nullptr;
     }
-
     // **步骤 5: 填充缓存并返回结果**
     // **修改：传递当前总层数给 populate_cache**
     populate_cache_shards(key, current, current_total_level);
