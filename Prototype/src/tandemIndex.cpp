@@ -21,7 +21,7 @@ volatile bool mgInitialized = false;
 std::atomic<bool> g_endTandem;
 SpinLock g_spinLock;
 
-#define LOG_SIZE 1UL*1024UL*1024UL*1024UL
+#define LOG_SIZE 2UL*1024UL*1024UL*1024UL
 
 TandemIndex::TandemIndex() {
     g_endTandem.store(false,std::memory_order_relaxed);

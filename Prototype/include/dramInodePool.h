@@ -11,8 +11,8 @@
 #include "node.h"
 
 
-
-#define NODE_POOL_SIZE ((30LL*1024*1024*1024))
+//dramInodePool size
+#define NODE_POOL_SIZE ((60LL*1024*1024*1024))
 
 class DramInodePool {
 private:

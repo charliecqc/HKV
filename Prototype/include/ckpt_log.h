@@ -7,10 +7,16 @@
 #include "spinLock.h"
 #include "common.h"
 #include "node.h"
+#include <atomic>
 
 #pragma once
 
 #define MAX_CKP_LOG_ENTR
+
+#ifndef MAX_CKP_LOG_ENTRIES
+// 默认日志大小：64MB，可按需调整
+#define MAX_CKP_LOG_ENTRIES (64UL * 1024 * 1024)
+#endif
 
 class nvm_log_entry_t {
 public:
@@ -129,15 +135,16 @@ public:
         end_persistent = 0;
         start_persistent = 0;
         log_size = maxSize;
-        mask = (~(log_size - 1));
+        // 要求 log_size 为 2 的幂
+        mask = log_size - 1;
     }
 
     int init(root_obj *root);
 
     ~CkptLogNVM() {
         // Deallocate memory blocks
-        delete _buf;
-        delete buf;
+        //delete _buf;
+        //delete buf;
     }
 
     bool isEmpty() {
@@ -163,51 +170,46 @@ public:
 };
 
 class CkptLog {
-    public:
-    SpinLock g_ckptlock;
+public:
     std::shared_mutex mtx;
     int retry_count;
     CkptLogNVM *ckptlog;
-    CkptLog(size_t maxSize) {
-        ckptlog = new CkptLogNVM(maxSize);
-        retry_count = 0;
-    }
-    ~CkptLog() {}
-    //void enq(Inode inode);
-    void initInodeFromLogEntry(Inode *inode, log_entry_hdr *entry_hdr) {
-        inode->hdr.id = entry_hdr->id;
-        // **移除：不再从日志头恢复全局覆盖数**
-        // inode->hdr.coveredNodes = entry_hdr->coveredNodes;
-        inode->hdr.last_index = entry_hdr->last_index;
-        inode->hdr.next = entry_hdr->next;
-    }
 
-    void initLogEntryHeaderFromDramLogEntry(log_entry_hdr *entry_hdr, dram_log_entry_t *entry) {
-        entry_hdr->id = entry->hdr.id;
-        entry_hdr->count = entry->hdr.count;
-        entry_hdr->next = entry->hdr.next;
-        // **移除：不再向日志头写入全局覆盖数**
-        // entry_hdr->coveredNodes = entry->hdr.coveredNodes;
-        entry_hdr->last_index = entry->hdr.last_index;
-    }
+    // 游标
+    std::atomic<size_t> a_consumed_start{0};
+    std::atomic<size_t> a_produced_end{0};
+    std::atomic<size_t> a_durable_end{0};
 
+    std::atomic_flag flush_busy = ATOMIC_FLAG_INIT;
+
+    // === 新增：构造 / 析构 ===
+    explicit CkptLog(size_t logSize = MAX_CKP_LOG_ENTRIES);
+    ~CkptLog();
+
+    // 便捷封装
     void enq(dram_log_entry_t *entry);
+
     log_entry_hdr *put_log_entry(dram_log_entry_t *entry);
-    log_entry_hdr *log_deq();
-    log_entry_hdr *nvm_log_at(size_t index);
-    log_entry_hdr *nvm_log_enq(size_t obj_size);
-    log_entry_hdr *log_peek_head();
-    unsigned int nvm_log_index(unsigned long index);
+    log_entry_hdr *nvm_log_enq(size_t entry_size);
+
+    bool flushOnce();
+    inline void backgroundFlushLoopStep() { flushOnce(); }
+
+    size_t reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes);
     void reclaim(PmemInodePool *pmemInodePool);
-    void forcePersist();
     void forceReclaim(PmemInodePool *pmemInodePool);
-    bool isLogEmpty() {
-        bool ret = ckptlog->isEmpty();
-        return ret;
-    }
-    size_t getLogQueueSize() {
-        return ckptlog->getLogQueueSize();
-    }
+
+    void waitDurable(size_t lsn);
+
+    bool isLogEmpty();
+    size_t getLogQueueSize();
+
+    unsigned int nvm_log_index(unsigned long idx);
+    log_entry_hdr *nvm_log_at(size_t index);
+
+    void forcePersist();
+
+    void initLogEntryHeaderFromDramLogEntry(log_entry_hdr *dst, const dram_log_entry_t *src);
 };
 
 
