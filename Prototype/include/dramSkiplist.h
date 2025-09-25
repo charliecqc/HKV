@@ -62,7 +62,7 @@ public:
     std::map<Key_t, Inode*> lookup_cache;
     std::shared_mutex cache_mutex;
 
-    static constexpr size_t kNumShards = 32;
+    static constexpr size_t kNumShards = 64;
 
     std::array<CacheShard, kNumShards> cache_shards;
     std::hash<Key_t> key_hasher;

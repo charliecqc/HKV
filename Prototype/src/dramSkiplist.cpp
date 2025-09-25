@@ -559,7 +559,6 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current,
     int  start_level = -1;
     bool cache_hit_and_verified = false;
     int  current_total_level = currentHighestLevelIndex + 1;
-    Inode *temp_start = current;
 
     // 步骤 1: 尝试从缓存获取起点
     Inode *start_node = find_start_node_from_cache_shards(key, start_level);
@@ -695,7 +694,6 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
      int start_level = -1;
     bool cache_hit_and_verified = false;
     int current_total_level = currentHighestLevelIndex + 1; // 保存总层数
-    Inode *temp_start = current;
 
     // **步骤 1: 尝试从缓存获取起点**
     Inode *start_node = find_start_node_from_cache_shards(key, start_level);
