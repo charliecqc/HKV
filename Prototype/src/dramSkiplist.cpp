@@ -275,6 +275,7 @@ DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool, ValueList *val
             assert(header[i]->hdr.next != 0);
             header[i]->hdr.last_index = 0;
             header[i]->hdr.level = i;
+            header[i]->setParent(header[i+1]->getId());
         }
 
         tail[MAX_LEVEL - 1] = dramInodePool->getNextNode();
@@ -287,6 +288,7 @@ DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool, ValueList *val
             tail[i]->hdr.next = std::numeric_limits<uint32_t>::max();
             assert(tail[i]->hdr.next != 0);
             tail[i]->hdr.level = i;
+            tail[i]->setParent(tail[i+1]->getId());
         }
         for(int i = 0; i < MAX_LEVEL; i++) {
             header[i]->hdr.next = tail[i]->getId();
@@ -386,8 +388,10 @@ bool DramSkiplist::add(Vnode *targetVnode)
 
         if (i == 0) 
             next->insertAtPos(targetKey, targetVnode->getId(), 0, 1);
-        else        
+        else {
             next->insertAtPos(targetKey, new_nodes[i-1]->getId(), 0, 1);
+            new_nodes[i-1]->setParent(next->getId());
+        }
 
         dram_log_entry_t *next_entry = create_log_entry(next);
         dram_log_entry_t *cur_entry  = create_log_entry(current_update);

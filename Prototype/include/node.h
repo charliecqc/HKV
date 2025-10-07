@@ -126,19 +126,15 @@ public:
 
 //extern BloomFilter bf[MAX_VALUE_NODES];
 
-class header{
-    public:
-        int32_t id; //2 bytes
-        int16_t level; //1 byte
-        int32_t next; //2 bytes 
-        int16_t last_index; //2 bytes
-    public:
-        header() {
-            id = 0;
-            level = 0;
-            next = 0;
-            last_index = -1;
-        }
+class header {
+public:
+    int32_t id;
+    int16_t level;
+    int32_t next;
+    int16_t last_index;
+    int32_t parent_id;              // 新增
+public:
+    header() : id(0), level(0), next(0), last_index(-1), parent_id(-1) {}
     friend class Inode;
 };
 
@@ -422,6 +418,24 @@ public:
             return true;
         }
         return false;
+    }
+
+    inline int32_t getParent() const {
+        return hdr.parent_id;
+    }
+
+    inline void setParent(int32_t parent_id) {
+        hdr.parent_id = parent_id;
+    }
+
+    static inline bool parentCoversChild(Inode* parent, Inode* parent_next, Inode* child) {
+        if (!parent || !child) return false;
+        Key_t low = parent->getMinKey();
+        Key_t high = (parent_next && !parent_next->isTail())
+                   ? parent_next->getMinKey()
+                   : std::numeric_limits<Key_t>::max();
+        Key_t cmk = child->getMinKey();
+        return (cmk >= low && cmk < high);
     }
 
 };
