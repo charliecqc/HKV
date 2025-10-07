@@ -32,19 +32,16 @@ public:
     void workerOperation();
 };
 
-class CheckpointThread {
+class LogFlushThread {
 private:
-    //std::queue<std::vector<ckp_entry *>*> *checkpointQueue;
-    CheckpointQueue *cptq;
-    CkptLogNVM *ckptLog;
+    CkptLog *ckptLog;
     PmemInodePool *pmemInodePool;
     DramSkiplist *index;
     int id;
 public:
-    CheckpointThread(int tid, CheckpointQueue *cq, CkptLogNVM *log, PmemInodePool *pmemInodePool, DramSkiplist *index);
-    ~CheckpointThread();
-    void checkpointOperation();
-    bool isCheckpointQueueEmpty();
+    LogFlushThread(int tid, CkptLog *cklog, PmemInodePool *pmemInodePool);
+    ~LogFlushThread();
+    void LogFlushOperation();
 };
 
 class LogMergeThread {
@@ -56,6 +53,6 @@ public:
     LogMergeThread(int tid, CkptLog *cklog, PmemInodePool *pmemInodePool);
     ~LogMergeThread();
     void logMergeOperation();
-    bool isCkptLogEmpty();
+    //bool isCkptLogEmpty();
 };
 

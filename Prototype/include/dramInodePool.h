@@ -54,6 +54,7 @@ public:
             return nullptr;
         }
         Inode *node = dramInodePool[idx];
+        assert(node->getId() >= 0);
 #ifdef DBG
         int id = node->getId();
         if (id == 35)

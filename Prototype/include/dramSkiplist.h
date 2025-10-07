@@ -136,7 +136,7 @@ public:
     int fastRebalance(Inode* &inode, Inode* &parent_inode);
     int fastRebalance1(Inode* &inode, Inode* &parent_inode);
     dram_log_entry_t *create_log_entry(Inode *inode);
-    bool isTail(int16_t id) {
+    bool isTail(uint32_t id) {
         return (id >= MAX_LEVEL && id < 2 * MAX_LEVEL);
     }
 
@@ -155,4 +155,9 @@ public:
     bool find_candidate_parent(Inode* inode, Inode* parent_hint, 
                               Inode*& candidate_parent, Inode*& candidate_next, 
                               Inode*& header_above);
+
+#if ENABLE_DELTA_LOG
+    void ckpt_log_single_slot_delta(CkptLog *log, Inode *inode, int16_t slot);
+    void ckpt_log_multi_slots_delta(CkptLog *log, Inode *inode, const std::vector<int16_t> &slots);
+#endif
 };

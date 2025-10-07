@@ -21,7 +21,7 @@ volatile bool mgInitialized = false;
 std::atomic<bool> g_endTandem;
 SpinLock g_spinLock;
 
-#define LOG_SIZE 2UL*1024UL*1024UL*1024UL
+#define LOG_SIZE 3UL*1024UL*1024UL*1024UL
 
 TandemIndex::TandemIndex() {
     g_endTandem.store(false,std::memory_order_relaxed);
@@ -34,6 +34,7 @@ TandemIndex::TandemIndex() {
     PmemManager::flushToNVM(3, reinterpret_cast<char *>(ckptLog), sizeof(ckptLog));
     mainIndex = new DramSkiplist(ckptLog, dramInodePool, valueList);
     mainIndex->setLevel(level);
+    createLogFlushThread();
     createLogMergeThread();
     createRebalanceThread();
     Inode *index_header = mainIndex->getHeader();
@@ -73,8 +74,13 @@ TandemIndex::~TandemIndex() {
         rebalancingInodes.clear();              // 清空集合
         nodesInRebalanceProcess.clear();        // 清空集合
     }
+
+    if(logFlushThread && logFlushThread->joinable()) {
+        logFlushThread->join();
+        delete logFlushThread;
+        logFlushThread = nullptr;
+    }
     
-    // 4. 等待日志合并线程结束
     if (logMergeThread && logMergeThread->joinable()) {
         logMergeThread->join();
         delete logMergeThread;
@@ -161,7 +167,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     if(!ret) {
         // ret == false ==> vnode is full, need to split
         Vnode *newVnode = nullptr;
-#if 0
+#ifdef DBG
         {
             std::lock_guard<std::mutex> lock(printMutex);
             cout << "Vnode is full, need to split. Current target_vnode: " << target_vnode->hdr.id << " key: " << key << " tid: " << syscall(SYS_gettid) << endl;
@@ -206,11 +212,12 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
     
     if (!newVnode->insert(key, value, bloom)) {
         std::cerr << "Failed to insert into new vnode" << std::endl;
-        return false;
+        ret = false;
+        return ret;
     }
     target_vnode = newVnode;    
     vnode_lock.unlock();
-    return true;
+    return ret;
 }
 
 bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock, Key_t key, Val_t value)
@@ -267,7 +274,7 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom,
         return false;
     }
     BloomFilter* target_bloom = &valueList->bf[nextVnode->getId()];
-    Key_t targetKey;
+    //Key_t targetKey = 0;
     //split vnode, lock of vnode is still held, targetVnode is unseen
     assert(vnode_lock.owns_lock());
 #ifdef DBG
@@ -286,11 +293,11 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom,
             return false;
         }
     //dont need to lock the targetVnode because its a new node and the predecessor is locked
-        targetKey = nextVnode->getMinKey();
+        //targetKey = nextVnode->getMinKey();
     } else {
     //dont need to lock the targetVnode because its a new node and the predecessor is locked
         insert_success = nextVnode->insert(key, value, target_bloom);
-        targetKey = nextVnode->getMinKey();
+        //targetKey = nextVnode->getMinKey();
         if (!insert_success) {
             return false;
         }
@@ -320,11 +327,10 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     // check if the gps[idx_to_next_level] 
     if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
         // **逻辑正确**: 父节点足够平衡，不需激活新GP。
-        // 只需找到覆盖了原Vnode的那个GP，并将其覆盖计数加一。
-        //int pos = parent_inode->findKeyPos(targetKey);
-        //if (pos != -1) { // 确保找到了位置
         parent_inode->gps[idx_to_next_level].covered_nodes++;
-        //}
+#if ENABLE_DELTA_LOG
+        mainIndex->ckpt_log_single_slot_delta(ckptLog, parent_inode, static_cast<int16_t>(idx_to_next_level));
+#endif
         
         target_lock.unlock(); // 释放targetVnode的锁
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
@@ -356,6 +362,12 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         }
         // 将需要重平衡的节点及其父节点信息添加到重平衡任务中
         assert(parent_inode->hdr.last_index == fanout / 2 - 1);
+        cout << " Parent inode needs rebalancing. id: " << parent_inode->getId()<< endl;
+#if 0
+        for(int i = 0; i < parent_inode->hdr.last_index; i++) {
+            cout << " gp " << i << " key: " << parent_inode->gps[i].key << " value: " << parent_inode->gps[i].value << " covered_nodes: " << parent_inode->gps[i].covered_nodes << endl;
+        }
+#endif
         addToRebalanceQueue(parent_inode);
         return true;
     }
@@ -453,6 +465,36 @@ bool TandemIndex::moveToNextVnode(Vnode*& vnode, BloomFilter*& bloom,
     return true;
 }
 
+void TandemIndex::createLogFlushThread()
+{
+    g_spinLock.lock();
+    logFlushThread = new std::thread(&TandemIndex::logFlushThreadExec, this, 0);
+    wtInitialized = true;
+    g_spinLock.unlock();
+}
+
+void TandemIndex::logFlushThreadExec(int id)
+{
+    LogFlushThread lft(id, this->ckptLog, this->pmemRecoveryArray);
+    while(true)
+    {
+        g_spinLock.lock();
+        if(!wtInitialized) {
+            g_spinLock.unlock();
+            usleep(500);
+            continue;
+        }else {
+            g_spinLock.unlock();
+            break;
+        }
+        g_spinLock.unlock();
+    }
+    while(!g_endTandem.load(std::memory_order_relaxed)) {
+        usleep(200);
+        lft.LogFlushOperation();
+    }
+}
+
 void TandemIndex::createLogMergeThread()
 {
     g_spinLock.lock();
@@ -531,6 +573,12 @@ void TandemIndex::rebalanceThreadExec(int id)
             int ret = mainIndex->fastRebalance(inode, parent_inode);
             if(ret == 2) {
                 assert(parent_inode->hdr.last_index == fanout / 2 - 1);
+                cout << " in Rebalance, Parent inode needs rebalancing. id: " << parent_inode->getId()<< endl;
+#if 0
+                for(int i = 0; i < parent_inode->hdr.last_index; i++) {
+                    cout << " gp " << i << " key: " << parent_inode->gps[i].key << " value: " << parent_inode->gps[i].value << " covered_nodes: " << parent_inode->gps[i].covered_nodes << endl;
+                }
+#endif
                 addToRebalanceQueue(parent_inode); // 如果需要重平衡，重新加入队列
             }
             

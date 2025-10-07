@@ -128,16 +128,13 @@ public:
 
 class header{
     public:
-        int16_t id; //2 bytes
-        // int16_t coveredNodes; // 1 byte  <-- 移除这个全局计数器
+        int32_t id; //2 bytes
         int16_t level; //1 byte
-        int16_t next; //2 bytes 
+        int32_t next; //2 bytes 
         int16_t last_index; //2 bytes
-        //std::shared_mutex mtx; //8 bytes
     public:
         header() {
             id = 0;
-            // coveredNodes = 0; // 移除
             level = 0;
             next = 0;
             last_index = -1;
@@ -187,7 +184,7 @@ public:
         hdr.level = level;
     }
 
-    Inode(int id, uint32_t level, int next = 0)
+    Inode(int32_t id, uint32_t level, int next = 0)
     {
         hdr.id = id;
         hdr.next = next;
@@ -234,10 +231,10 @@ public:
             }
             assert(pos != 0);
             int old_covered_nodes = gps[pos-1].covered_nodes;
-
+            assert(old_covered_nodes >= 1);
+            assert(old_covered_nodes - relative_pos - 1 >= 0);
             this->insertAtPos(targetKey, value, pos, old_covered_nodes - relative_pos - 1);
             this->gps[pos-1].covered_nodes = relative_pos + 1; // set new covered nodes for the previous GP
-
             assert(this->gps[pos-1].covered_nodes >= 1);
             return true;
         }
@@ -382,9 +379,6 @@ public:
         // **为新GP的 covered_nodes 赋初始值**
         gps[pos].covered_nodes = initial_covered_nodes;
         assert(gps[pos].covered_nodes >= 1);
-        
-        // **移除对旧全局计数器的操作**
-        // hdr.coveredNodes++; 
 
         hdr.last_index++;
         return true;

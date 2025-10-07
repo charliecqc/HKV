@@ -1,9 +1,13 @@
 #include "ckpt_log.h"
 #include "pmemManager.h"
-#include <unordered_map>
-#include <vector>
 #include <cstring>
+#include <vector>
+#include <unordered_map>
+
+#ifndef CKPLOGPOOL
 #define CKPLOGPOOL 3
+#endif
+
 using namespace std;
 
 int CkptLogNVM::init(root_obj *root) {
@@ -53,12 +57,131 @@ CkptLog::~CkptLog() {
 //get nvm_log_entry_t at inde
 void CkptLog::enq(dram_log_entry_t *entry)
 {
-    if(entry->hdr.id == -1)
+    if (!entry) return;
+
+    // 计算条目长度：2字节类型标记 + 头 + 负载，对齐到 cacheline
+    const size_t tag_sz   = sizeof(uint16_t); // WalLogType
+    const size_t hdr_sz   = sizeof(log_entry_hdr);
+    const size_t body_sz  = entry->getPayLoadSize(); // = sizeof(nvm_log_entry_t) * count
+    const size_t used     = tag_sz + hdr_sz + body_sz;
+    const size_t entry_sz = PmemManager::align_uint_to_cacheline(static_cast<unsigned int>(used));
+
+    log_entry_hdr *slot = nullptr;
     {
-        cout << "Log entry id is not set" << endl;
+        std::unique_lock<std::shared_mutex> lk(mtx);
+        slot = nvm_log_enq(entry_sz);
+        if (!slot) {
+            throw std::runtime_error("ckpt log full");
+        }
     }
-    [[maybe_unused]] log_entry_hdr *log_entry_hdr = put_log_entry(entry);
+
+    // 起始地址（可按字节写入）
+    auto *base = reinterpret_cast<unsigned char *>(slot);
+
+    // 1) 写类型标记：FULL
+    *reinterpret_cast<uint16_t *>(base) = WAL_LOG_TYPE_FULL;
+
+    // 2) 写 header（位于标记之后）
+    auto *hdr = reinterpret_cast<log_entry_hdr *>(base + tag_sz);
+    initLogEntryHeaderFromDramLogEntry(hdr, entry); // 复用现有函数初始化头部（包含 count 等）
+
+    // 3) 写 payload（nvm_log_entry_t[count]）
+    auto *out = reinterpret_cast<nvm_log_entry_t *>(reinterpret_cast<unsigned char *>(hdr) + sizeof(log_entry_hdr));
+    for (int i = 0; i < entry->hdr.count; ++i) {
+        out[i].gp_idx        = entry->gp_idx[i];
+        out[i].key           = entry->key[i];
+        out[i].value         = entry->value[i];
+        out[i].covered_nodes = entry->covered_nodes[i];
+    }
+
+    // 4) 尾部对齐填充
+    if (entry_sz > used) {
+        std::memset(base + used, 0, entry_sz - used);
+    }
+
+    // 5) 推进生产游标
+    a_produced_end.fetch_add(entry_sz, std::memory_order_release);
 }
+
+#ifndef ENABLE_DELTA_LOG
+#define ENABLE_DELTA_LOG 1
+#endif
+
+#if ENABLE_DELTA_LOG
+void CkptLog::enqDelta(int32_t inode_id,
+                       int32_t last_index,
+                       int32_t next,
+                       const WalDeltaEntry *entries,
+                       size_t entry_count)
+{
+    if (!appendDeltaLog(inode_id, last_index, next, entries, entry_count)) {
+        throw std::runtime_error("ckpt log full (delta)");
+    }
+}
+
+bool CkptLog::appendDeltaLog(int32_t inode_id,
+                             int32_t last_index,
+                             int32_t next,
+                             const WalDeltaEntry *entries,
+                             size_t entry_count)
+{
+    if (!entries || entry_count == 0) return true;
+
+    size_t payload_bytes = sizeof(WalDeltaHeader) + entry_count * sizeof(WalDeltaEntry);
+    size_t entry_size = PmemManager::align_uint_to_cacheline((unsigned)payload_bytes);
+
+    log_entry_hdr *slot = nullptr;
+    {
+        std::unique_lock<std::shared_mutex> lk(mtx);
+        slot = nvm_log_enq(entry_size);
+        if (!slot) return false;
+    }
+
+    auto *hdr = reinterpret_cast<WalDeltaHeader *>(slot);
+    hdr->type       = WAL_LOG_TYPE_DELTA;
+    hdr->count      = (uint16_t)entry_count;
+    hdr->inode_id   = inode_id;
+    hdr->last_index = last_index;
+    hdr->next       = next;
+
+    auto *delta_entries = reinterpret_cast<WalDeltaEntry *>(hdr + 1);
+    std::memcpy(delta_entries, entries, entry_count * sizeof(WalDeltaEntry));
+
+    size_t used = sizeof(WalDeltaHeader) + entry_count * sizeof(WalDeltaEntry);
+    if (entry_size > used) {
+        std::memset(reinterpret_cast<char *>(hdr) + used, 0, entry_size - used);
+    }
+
+    a_produced_end.fetch_add(entry_size, std::memory_order_release);
+    return true;
+}
+
+void CkptLog::applyDeltaEntries(Inode *inode,
+                                const WalDeltaEntry *entries,
+                                size_t entry_count,
+                                int32_t new_last_index,
+                                int32_t new_next)
+{
+    if (!inode || !entries) return;
+    for (size_t i = 0; i < entry_count; ++i) {
+        int16_t s = entries[i].slot;
+        if (s < 0 || s >= fanout) continue;
+        auto &gp = inode->gps[s];
+        gp.key = entries[i].key;
+        gp.value = entries[i].value;
+        gp.covered_nodes = entries[i].covered;
+        PmemManager::flushNoDrain(CKPLOGPOOL, &gp, sizeof(gp));
+    }
+    if (new_last_index != WAL_META_KEEP) {
+        inode->hdr.last_index = new_last_index;
+        PmemManager::flushNoDrain(CKPLOGPOOL, &inode->hdr.last_index, sizeof(inode->hdr.last_index));
+    }
+    if (new_next != WAL_META_KEEP) {
+        inode->hdr.next = new_next;
+        PmemManager::flushNoDrain(CKPLOGPOOL, &inode->hdr.next, sizeof(inode->hdr.next));
+    }
+}
+#endif // ENABLE_DELTA_LOG
 
 log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
 {
@@ -118,8 +241,9 @@ log_entry_hdr *CkptLog::nvm_log_enq(size_t entry_size)
     }
     log_entry_hdr = nvm_log_at(ckptlog->end);
     ckptlog->current_update = ckptlog->end;
-
+#ifdef LOG_DEBUG
     size_t old_end = ckptlog->end;
+#endif
     ckptlog->end = ckptlog->end + entry_size;
 #ifdef LOG_DEBUG
     cout << "Log enq, old_end: " << old_end << " ckptlog->start: " << ckptlog->start
@@ -199,9 +323,8 @@ size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
     size_t batch  = std::min(window, max_bytes);
     if (!batch) return 0;
 
-    // 读取（最多两段）
-    std::vector<char> buf(batch);
-    size_t idx = nvm_log_index(start);
+    std::vector<unsigned char> buf(batch);
+    size_t idx  = nvm_log_index(start);
     size_t tail = ckptlog->log_size - idx;
     if (batch <= tail) {
         std::memcpy(buf.data(), nvm_log_at(start), batch);
@@ -210,41 +333,78 @@ size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
         std::memcpy(buf.data() + tail, nvm_log_at(0), batch - tail);
     }
 
-    struct Upd { int32_t gp; Key_t k; Val_t v; int16_t cov; };
-    std::unordered_map<int16_t, std::vector<Upd>> upds;
     size_t consumed = 0;
 
-    while (consumed + sizeof(log_entry_hdr) <= batch) {
-        auto *hdr = reinterpret_cast<log_entry_hdr *>(buf.data() + consumed);
-        size_t raw = sizeof(log_entry_hdr) + (size_t)hdr->count * sizeof(nvm_log_entry_t);
-        size_t esz = PmemManager::align_uint_to_cacheline(raw);
-        if (esz == 0 || consumed + esz > batch) break; // 不完整，留待下批
+    while (consumed + sizeof(uint16_t) <= batch) {
+        auto *base = buf.data() + consumed;
+        uint16_t tag = *reinterpret_cast<uint16_t *>(base);
 
-        auto *entries = reinterpret_cast<nvm_log_entry_t *>(buf.data() + consumed + sizeof(log_entry_hdr));
-        for (int i = 0; i < hdr->count; ++i) {
-            upds[hdr->id].push_back({entries[i].gp_idx, entries[i].key, entries[i].value, entries[i].covered_nodes});
+        // 解析 DELTA
+#if ENABLE_DELTA_LOG
+        if (tag == WAL_LOG_TYPE_DELTA) {
+            if (consumed + sizeof(WalDeltaHeader) > batch) break;
+            auto *dh = reinterpret_cast<WalDeltaHeader *>(base);
+            if (dh->count == 0 || dh->count > fanout) break;
+
+            size_t raw_sz   = sizeof(WalDeltaHeader) + dh->count * sizeof(WalDeltaEntry);
+            size_t entry_sz = PmemManager::align_uint_to_cacheline(static_cast<unsigned int>(raw_sz));
+            if (entry_sz == 0 || consumed + entry_sz > batch) break;
+
+            auto *entries = reinterpret_cast<WalDeltaEntry *>(dh + 1);
+            Inode *inode = pmemInodePool->at(dh->inode_id);
+            applyDeltaEntries(inode, entries, dh->count, dh->last_index, dh->next);
+
+            consumed += entry_sz;
+            continue;
         }
-        consumed += esz;
+#endif
+
+        // 解析 FULL
+        if (tag == WAL_LOG_TYPE_FULL) {
+            // header 紧随 tag
+            if (consumed + sizeof(uint16_t) + sizeof(log_entry_hdr) > batch) break;
+            auto *fh = reinterpret_cast<log_entry_hdr *>(base + sizeof(uint16_t));
+            if (fh->count < 0 || fh->count > fanout) break;
+
+            size_t raw_sz   = sizeof(uint16_t) + sizeof(log_entry_hdr)
+                            + static_cast<size_t>(fh->count) * sizeof(nvm_log_entry_t);
+            size_t entry_sz = PmemManager::align_uint_to_cacheline(static_cast<unsigned int>(raw_sz));
+            if (entry_sz == 0 || consumed + entry_sz > batch) break;
+
+            auto *entries = reinterpret_cast<nvm_log_entry_t *>(
+                reinterpret_cast<unsigned char *>(fh) + sizeof(log_entry_hdr));
+
+            // 应用到 pmemInode
+            Inode *inode = pmemInodePool->at(fh->id);
+            inode->hdr.last_index = fh->last_index;
+            inode->hdr.next       = fh->next;
+            inode->hdr.level      = fh->level;   // 新增：回放 FULL 时同步 level
+
+            for (int i = 0; i < fh->count; ++i) {
+                int gi = entries[i].gp_idx;
+                inode->gps[gi].key           = entries[i].key;
+                inode->gps[gi].value         = entries[i].value;
+                inode->gps[gi].covered_nodes = entries[i].covered_nodes;
+            }
+
+            // flush（可按需改为更细粒度）
+            PmemManager::flushNoDrain(CKPLOGPOOL, inode, sizeof(Inode));
+
+            consumed += entry_sz;
+            continue;
+        }
+
+        // 非法/未知类型，停止本批（避免越界）
+        break;
     }
 
     if (consumed == 0) return 0;
 
-    // 应用并 flushNoDrain
-    for (auto &kv : upds) {
-        Inode *inode = pmemInodePool->at(kv.first);
-        for (auto &u : kv.second) {
-            inode->gps[u.gp].key = u.k;
-            inode->gps[u.gp].value = u.v;
-            inode->gps[u.gp].covered_nodes = u.cov;
-        }
-        PmemManager::flushNoDrain(CKPLOGPOOL, inode, sizeof(Inode));
-    }
+    // drain 一次，提交之前的 flushNoDrain
     PmemManager::drain(CKPLOGPOOL);
 
-    // 推进 consumed_start
-    size_t expected = start;
-    a_consumed_start.compare_exchange_strong(expected, start + consumed, std::memory_order_acq_rel);
-
+    // 推进消费游标
+    a_consumed_start.fetch_add(consumed, std::memory_order_acq_rel);
     return consumed;
 }
 
@@ -375,6 +535,48 @@ void CkptLog::initLogEntryHeaderFromDramLogEntry(log_entry_hdr *dst,
     dst->last_index = src->hdr.last_index;
     dst->next       = src->hdr.next;
     dst->level      = src->hdr.level;
-    // 若后续扩展 header（magic / flags 等），在这里一并设置
+    assert(dst->id >=0);
+}
+
+size_t CkptLog::getDurableGap() const
+{
+    size_t c = a_consumed_start.load(std::memory_order_acquire);
+    size_t d = a_durable_end.load(std::memory_order_acquire);
+    return d > c ? (d - c) : 0;
+}
+
+size_t CkptLog::getProducedGap() const
+{
+    size_t d = a_durable_end.load(std::memory_order_acquire);
+    size_t p = a_produced_end.load(std::memory_order_acquire);
+    return p > d ? (p - d) : 0;
+}
+
+size_t CkptLog::getBacklogGap() const
+{
+    size_t c = a_consumed_start.load(std::memory_order_acquire);
+    size_t p = a_produced_end.load(std::memory_order_acquire);
+    return p > c ? (p - c) : 0;
+}
+
+bool CkptLog::tryFlushOnce()
+{
+    // 封装内部 flushOnce()；按内部阈值决定是否执行
+    return flushOnce();
+}
+
+size_t CkptLog::suggestReclaimBatchBytes() const
+{
+#ifdef PERSISTENT_THRESHOLD
+    size_t a = PERSISTENT_THRESHOLD;
+#else
+    size_t a = 64 * 1024;
+#endif
+#ifdef RECLAIM_THRESHOLD
+    size_t b = RECLAIM_THRESHOLD;
+#else
+    size_t b = 64 * 1024;
+#endif
+    return a > b ? a : b;
 }
 

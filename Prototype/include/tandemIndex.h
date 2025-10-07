@@ -41,17 +41,17 @@ class TandemIndex {
         bool updateParentInodeAfterSplit(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level);
 
         //std::thread *workerThread;kk
-        std::thread *checkpointThread = nullptr;
+        std::thread *logFlushThread = nullptr;
         std::thread *logMergeThread = nullptr;
         std::thread *rebalanceThread[MAX_REBALANCE_THREADS] = {nullptr,};
 
 
         //void createWorkerThread();
-        void createCheckpointThread();
+        void createLogFlushThread();
         void createLogMergeThread();
         void createRebalanceThread();
         void rebalanceThreadExec(int id);
-        void checkpointThreadExec(int id);
+        void logFlushThreadExec(int id);
         void logMergeThreadExec(int id);
         //void workerThreadExec();
         
