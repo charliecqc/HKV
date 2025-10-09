@@ -358,12 +358,15 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         
         // 记录从根到目标节点的路径上所有父子关系，为重平衡提供父节点指针
         for (size_t i = 1; i < updates.size(); ++i) {
-            mainIndex->recordInodeRelation(updates[i], updates[i-1]);
+            //mainIndex->recordInodeRelation(updates[i], updates[i-1]);
+            updates[i]->setParent(updates[i-1]->getId());
+
         }
         // 将需要重平衡的节点及其父节点信息添加到重平衡任务中
         assert(parent_inode->hdr.last_index == fanout / 2 - 1);
-        cout << " Parent inode needs rebalancing. id: " << parent_inode->getId()<< endl;
 #if 0
+        cout << " Parent inode needs rebalancing. id: " << parent_inode->getId()<< endl;
+        
         for(int i = 0; i < parent_inode->hdr.last_index; i++) {
             cout << " gp " << i << " key: " << parent_inode->gps[i].key << " value: " << parent_inode->gps[i].value << " covered_nodes: " << parent_inode->gps[i].covered_nodes << endl;
         }
@@ -562,8 +565,6 @@ void TandemIndex::rebalanceThreadExec(int id)
         
         // 尝试从队列中获取重平衡任务，并将其标记为正在处理
         if(getFromRebalanceQueue(inode)) {
-            // 获取重平衡锁
-           // std::unique_lock<std::shared_mutex> rebalance_lock(mainIndex->rebalance_lock);
             
             Inode* parent_inode = mainIndex->getParentInode(inode);
             if(parent_inode != nullptr) {
@@ -573,18 +574,16 @@ void TandemIndex::rebalanceThreadExec(int id)
             int ret = mainIndex->fastRebalance(inode, parent_inode);
             if(ret == 2) {
                 assert(parent_inode->hdr.last_index == fanout / 2 - 1);
-                cout << " in Rebalance, Parent inode needs rebalancing. id: " << parent_inode->getId()<< endl;
 #if 0
+                cout << " in Rebalance, Parent inode needs rebalancing. id: " << parent_inode->getId()<< endl;
+                
                 for(int i = 0; i < parent_inode->hdr.last_index; i++) {
                     cout << " gp " << i << " key: " << parent_inode->gps[i].key << " value: " << parent_inode->gps[i].value << " covered_nodes: " << parent_inode->gps[i].covered_nodes << endl;
                 }
 #endif
-                addToRebalanceQueue(parent_inode); // 如果需要重平衡，重新加入队列
+                addToRebalanceQueue(parent_inode); // added to rebalance queue
             }
             
-            // TODO: 实现具体的 Inode 重平衡逻辑
-            // int ret = mainIndex->rebalanceInode(*inode);
-
             // 处理完成，移除标记
             {
                 std::lock_guard<std::mutex> lock(rebalanceQueueMutex);

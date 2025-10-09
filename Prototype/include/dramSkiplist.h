@@ -134,7 +134,6 @@ public:
     void removeInodeRelation(Inode* &child);
     void acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<std::unique_lock<std::shared_mutex>>& locks);
     int fastRebalance(Inode* &inode, Inode* &parent_inode);
-    int fastRebalance1(Inode* &inode, Inode* &parent_inode);
     dram_log_entry_t *create_log_entry(Inode *inode);
     bool isTail(uint32_t id) {
         return (id >= MAX_LEVEL && id < 2 * MAX_LEVEL);
@@ -153,6 +152,9 @@ public:
 
     // 新增辅助函数声明
     bool find_candidate_parent(Inode* inode, Inode* parent_hint, 
+                              Inode*& candidate_parent, Inode*& candidate_next, 
+                              Inode*& header_above);
+    bool find_and_verify_candidate_parent(Inode* inode, Inode* parent_hint, 
                               Inode*& candidate_parent, Inode*& candidate_next, 
                               Inode*& header_above);
 

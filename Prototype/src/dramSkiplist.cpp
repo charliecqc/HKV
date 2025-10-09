@@ -845,6 +845,54 @@ Inode *DramSkiplist::getHeader(int level)
 }
 
 // 新增辅助函数：在无锁状态下寻找候选父节点
+bool DramSkiplist::find_and_verify_candidate_parent(Inode* inode, Inode* parent_hint, 
+                                        Inode*& candidate_parent, Inode*& candidate_next, 
+                                        Inode*& header_above) {
+    Inode* current = nullptr;
+    int search_steps = 10;
+    if (parent_hint) {
+        Inode *current_parent = parent_hint;
+        while(true) {
+            Inode* next_parent = dramInodePool->at(current_parent->hdr.next);
+            if(Inode::parentCoversChild(current_parent, next_parent, inode)) {
+                candidate_parent = current_parent;
+                candidate_next = next_parent;
+                return true;
+            }
+            current_parent = next_parent;
+            if(--search_steps <= 0) break;
+        }
+    }
+    
+    if (inode->hdr.level < MAX_LEVEL - 1) {
+        header_above = getHeader(inode->hdr.level + 1);
+        current = header_above;
+    } else {
+        cout << " this is on the top level " << endl;
+        return false; 
+    }
+
+    while (true) {
+        Inode* next_node = dramInodePool->at(current->hdr.next);
+        Key_t key = inode->getMinKey();
+        cout << "Looking for key: " << key << " current node: "<< current->getId() << " current node minkey: " << current->getMinKey() <<" next node: " << next_node->getId() <<" next node minKey: " << next_node->getMinKey()<< endl;
+        
+        if (next_node->isTail() || key < next_node->getMinKey()) 
+        {
+            cout << " going to break the loop, next_node: " << next_node->getId() << " is tail: " << isTail(next_node->getId()) << " key < next_node->getMinKey() " << (key < next_node->getMinKey()) << endl;
+            candidate_parent = current;
+            candidate_next = next_node;
+            // 如果是从 header 开始找，且一步都没移动，说明父链表为空
+            if (header_above && current->getId() == header_above->getId()) {
+                 candidate_parent = nullptr; // 让上层逻辑去创建新父节点
+            }
+            return true;
+        }
+        current = next_node;
+    }
+}
+
+#if 0
 bool DramSkiplist::find_candidate_parent(Inode* inode, Inode* parent_hint, 
                                         Inode*& candidate_parent, Inode*& candidate_next, 
                                         Inode*& header_above) {
@@ -862,10 +910,8 @@ bool DramSkiplist::find_candidate_parent(Inode* inode, Inode* parent_hint,
 
     while (true) {
         Inode* next_node = dramInodePool->at(current->hdr.next);
-        cout << "Looking for key: " << key << " current node: "<< current->getId() << " current node minkey: " << current->getMinKey() <<" next node: " << next_node->getId() <<" next node minKey: " << next_node->getMinKey()<< endl;
         if (next_node->isTail() || key < next_node->getMinKey()) 
         {
-            cout << " going to break the loop, next_node: " << next_node->getId() << " is tail: " << isTail(next_node->getId()) << " key < next_node->getMinKey() " << (key < next_node->getMinKey()) << endl;
             candidate_parent = current;
             candidate_next = next_node;
             // 如果是从 header 开始找，且一步都没移动，说明父链表为空
@@ -878,7 +924,7 @@ bool DramSkiplist::find_candidate_parent(Inode* inode, Inode* parent_hint,
     }
 }
 
-#if 0
+
 //return 0 if no rebalance is needed, return 1 if the target node is split, return 2 if the parent node is split
 int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint) 
 {
@@ -1061,7 +1107,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
         Inode* candidate_next = nullptr;
         Inode* header_above = nullptr;
         
-        find_candidate_parent(inode, parent_inode_hint, candidate_parent, candidate_next, header_above);
+        find_and_verify_candidate_parent(inode, parent_inode_hint, candidate_parent, candidate_next, header_above);
 
         std::vector<Inode*> nodes_to_lock;
         nodes_to_lock.push_back(inode);
@@ -1099,7 +1145,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                     verified_parent->hdr.next  = header_above->hdr.next;
                     header_above->hdr.next     = verified_parent->getId();
                     verified_parent->insertAtPos(inode->getMinKey(), inode->getId(), 0, 1);
-
+                    inode->setParent(verified_parent->getId());
                     increaseLevel();
                     created_parent = true;
                     log_entries.emplace_back(create_log_entry(verified_parent));
@@ -1121,21 +1167,23 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
             if (verified_parent) {
                 Inode temp_parent(*verified_parent); // 用于日志记录的临时节点拷贝
                 int pos = verified_parent->findKeyPos(inode->getMinKey());
+                assert(pos >= 0 && pos <= verified_parent->hdr.last_index);
+                if(inode->getParent() != verified_parent->getId())
+                    inode->setParent(verified_parent->getId());
+
                 if(!verified_parent->isUnbalanced(pos)) {
                     // Normal case, parent is balanced at pos, just do covered_nodes++
                     verified_parent->gps[pos].covered_nodes++;
+                    next_node->setParent(verified_parent->getId());
                     ckpt_log_single_slot_delta(ckpt_log, verified_parent, static_cast<int16_t>(pos));
-                    recordInodeRelation(inode, verified_parent);
-                    recordInodeRelation(next_node, verified_parent);
                     ret = 1;
                 }else {
                     // verified_parent is unbalanced at pos, need to activate GP
                     if(verified_parent->isFull()) {
                         // cannot activate GP, parent is full
                         verified_parent->gps[pos].covered_nodes++;
+                        next_node->setParent(verified_parent->getId());
                         ckpt_log_single_slot_delta(ckpt_log, verified_parent, static_cast<int16_t>(pos));
-                        recordInodeRelation(inode, verified_parent);
-                        recordInodeRelation(next_node, verified_parent);
                         ret = 2;
                     }else {
                         verified_parent->gps[pos].covered_nodes++;
@@ -1167,8 +1215,10 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                         }
 
                         if(verified_parent->activateGP(new_min_key, next_node->getId(), temp_pos, relative_pos)) {
+                            next_node->setParent(verified_parent->getId());
                             log_entries.push_back(std::unique_ptr<dram_log_entry_t>(this->create_log_entry(verified_parent)));
                             ret = 1;
+#if 0
                             if(verified_parent->gps[temp_pos].covered_nodes >= 4) {
                                 cout << "1 Dumping after activteGP, covered node still 4 verified_parent inode: " << verified_parent->getId() << " GP at pos " << temp_pos << " covered_nodes: " << verified_parent->gps[temp_pos].covered_nodes << endl;
                                 Inode *start_node_of_chain = nullptr;
@@ -1205,9 +1255,10 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                                     start_node_of_chain = dramInodePool->at(start_node_of_chain->hdr.next);
                                 }
                             }
+#endif
                         }else {
                             ret = 2;
-                            cout << "Warning: failed to activate GP in fastRebalance, parent inode: " << verified_parent->getId() << " at pos: " << pos << endl;
+                            cout << "weird Warning: failed to activate GP in fastRebalance, parent inode: " << verified_parent->getId() << " at pos: " << pos << endl;
                         }
                     }
                 }
@@ -1407,6 +1458,7 @@ dram_log_entry_t *DramSkiplist::create_log_entry(Inode *inode)
 // 建议：可在类外增加微型统计（可选）
 static std::atomic<uint64_t> g_parent_rd{0}, g_parent_miss{0}, g_parent_tryfail{0}, g_parent_wr{0};
 
+#if 0
 void DramSkiplist::recordInodeRelation(Inode* &child, Inode* &parent) {
     if (child == nullptr) return;
     size_t s = parent_shard_of(child);
@@ -1418,6 +1470,7 @@ void DramSkiplist::recordInodeRelation(Inode* &child, Inode* &parent) {
     m[child] = parent;
     g_parent_wr.fetch_add(1, std::memory_order_relaxed);
 }
+
 
 Inode* DramSkiplist::getParentInode(Inode* &child) {
     if (child == nullptr) return nullptr;
@@ -1435,6 +1488,16 @@ Inode* DramSkiplist::getParentInode(Inode* &child) {
         return nullptr;
     }
     return it->second;
+}
+#endif
+
+Inode* DramSkiplist::getParentInode(Inode* &child) {
+    if(child == nullptr) return nullptr;
+    int32_t nodeid = child->getParent();
+    if(nodeid != -1)
+        return dramInodePool->at(nodeid);
+    else
+        return nullptr;
 }
 
 void DramSkiplist::removeInodeRelation(Inode* &child) {

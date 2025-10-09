@@ -428,7 +428,7 @@ public:
         hdr.parent_id = parent_id;
     }
 
-    static inline bool parentCoversChild(Inode* parent, Inode* parent_next, Inode* child) {
+    static bool parentCoversChild(Inode* parent, Inode* parent_next, Inode* child) {
         if (!parent || !child) return false;
         Key_t low = parent->getMinKey();
         Key_t high = (parent_next && !parent_next->isTail())
@@ -437,7 +437,6 @@ public:
         Key_t cmk = child->getMinKey();
         return (cmk >= low && cmk < high);
     }
-
 };
 
 class vnodeHeader {
