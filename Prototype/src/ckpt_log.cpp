@@ -111,10 +111,11 @@ void CkptLog::enq(dram_log_entry_t *entry)
 void CkptLog::enqDelta(int32_t inode_id,
                        int32_t last_index,
                        int32_t next,
+                       int32_t parent_id,
                        const WalDeltaEntry *entries,
                        size_t entry_count)
 {
-    if (!appendDeltaLog(inode_id, last_index, next, entries, entry_count)) {
+    if (!appendDeltaLog(inode_id, last_index, next, parent_id, entries, entry_count)) {
         throw std::runtime_error("ckpt log full (delta)");
     }
 }
@@ -122,6 +123,7 @@ void CkptLog::enqDelta(int32_t inode_id,
 bool CkptLog::appendDeltaLog(int32_t inode_id,
                              int32_t last_index,
                              int32_t next,
+                             int32_t parent_id,
                              const WalDeltaEntry *entries,
                              size_t entry_count)
 {
@@ -143,6 +145,7 @@ bool CkptLog::appendDeltaLog(int32_t inode_id,
     hdr->inode_id   = inode_id;
     hdr->last_index = last_index;
     hdr->next       = next;
+    hdr->parent_id  = parent_id;
 
     auto *delta_entries = reinterpret_cast<WalDeltaEntry *>(hdr + 1);
     std::memcpy(delta_entries, entries, entry_count * sizeof(WalDeltaEntry));
@@ -160,7 +163,8 @@ void CkptLog::applyDeltaEntries(Inode *inode,
                                 const WalDeltaEntry *entries,
                                 size_t entry_count,
                                 int32_t new_last_index,
-                                int32_t new_next)
+                                int32_t new_next,
+                                int32_t new_parent_id)
 {
     if (!inode || !entries) return;
     for (size_t i = 0; i < entry_count; ++i) {
@@ -179,6 +183,10 @@ void CkptLog::applyDeltaEntries(Inode *inode,
     if (new_next != WAL_META_KEEP) {
         inode->hdr.next = new_next;
         PmemManager::flushNoDrain(CKPLOGPOOL, &inode->hdr.next, sizeof(inode->hdr.next));
+    }
+    if (new_parent_id != WAL_META_KEEP) {
+        inode->hdr.parent_id = new_parent_id;
+        PmemManager::flushNoDrain(CKPLOGPOOL, &inode->hdr.parent_id, sizeof(inode->hdr.parent_id));
     }
 }
 #endif // ENABLE_DELTA_LOG
@@ -352,7 +360,7 @@ size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
 
             auto *entries = reinterpret_cast<WalDeltaEntry *>(dh + 1);
             Inode *inode = pmemInodePool->at(dh->inode_id);
-            applyDeltaEntries(inode, entries, dh->count, dh->last_index, dh->next);
+            applyDeltaEntries(inode, entries, dh->count, dh->last_index, dh->next, dh->parent_id);
 
             consumed += entry_sz;
             continue;
@@ -379,6 +387,7 @@ size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
             inode->hdr.last_index = fh->last_index;
             inode->hdr.next       = fh->next;
             inode->hdr.level      = fh->level;   // 新增：回放 FULL 时同步 level
+            inode->hdr.parent_id  = fh->parent_id; // 新增：回放 FULL 时同步 parent_id
 
             for (int i = 0; i < fh->count; ++i) {
                 int gi = entries[i].gp_idx;
@@ -535,6 +544,7 @@ void CkptLog::initLogEntryHeaderFromDramLogEntry(log_entry_hdr *dst,
     dst->last_index = src->hdr.last_index;
     dst->next       = src->hdr.next;
     dst->level      = src->hdr.level;
+    dst->parent_id  = src->hdr.parent_id;
     assert(dst->id >=0);
 }
 

@@ -36,8 +36,9 @@ public:
     int16_t last_index; // last valid gp of the inode
     int32_t next; // next inode id
     int16_t level;
+    int32_t parent_id; // **新增：父节点ID**
     // **修改构造函数：移除 coveredNodes 参数**
-    log_entry_hdr(int32_t id, int16_t last_index, int32_t next, int16_t level) : id(id), last_index(last_index), next(next), level(level) {
+    log_entry_hdr(int32_t id, int16_t last_index, int32_t next, int16_t level, int32_t parent_id) : id(id), last_index(last_index), next(next), level(level), parent_id(parent_id) {
         count = 0;
     }
 
@@ -60,11 +61,12 @@ enum WalLogType : uint16_t {
 static constexpr int32_t WAL_META_KEEP = -1;
 
 struct WalDeltaHeader {
-    uint16_t type;
-    uint16_t count;
+    uint16_t type;       // WAL_LOG_TYPE_DELTA
+    uint16_t count;      // number of WalDeltaEntry
     int32_t  inode_id;
     int32_t  last_index;
     int32_t  next;
+    int32_t  parent_id;  // **新增**
 };
 
 struct WalDeltaEntry {
@@ -95,7 +97,7 @@ public:
     }
 
     // **修改构造函数以匹配新的 log_entry_hdr**
-    dram_log_entry_t(int32_t id, int16_t last_index, int32_t next, int16_t level) : hdr(id, last_index, next, level) {
+    dram_log_entry_t(int32_t id, int16_t last_index, int32_t next, int16_t level, int32_t parent_id) : hdr(id, last_index, next, level, parent_id) {
         initArrays();
     }
 
@@ -269,24 +271,30 @@ public:
 
     // 新增：写入增量日志
 #if ENABLE_DELTA_LOG
+    // **修改 appendDeltaLog 签名**
     bool appendDeltaLog(int32_t inode_id,
                         int32_t last_index,
                         int32_t next,
+                        int32_t parent_id,
                         const WalDeltaEntry *entries,
                         size_t entry_count);
 
+    // **修改 enqDelta 签名**
     void enqDelta(int32_t inode_id,
                   int32_t last_index,
                   int32_t next,
+                  int32_t parent_id,
                   const WalDeltaEntry *entries,
                   size_t entry_count);
 
+    // **修改 applyDeltaEntries 签名**
     void applyDeltaEntries(Inode *inode,
                            const WalDeltaEntry *entries,
                            size_t entry_count,
                            int32_t new_last_index,
-                           int32_t new_next);
-#endif
+                           int32_t new_next,
+                           int32_t new_parent_id);
+#endif // ENABLE_DELTA_LOG
 
     // 查询队列间隙
     size_t getDurableGap() const;   // durable - consumed，可回放的持久字节

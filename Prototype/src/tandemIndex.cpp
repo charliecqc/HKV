@@ -40,7 +40,7 @@ TandemIndex::TandemIndex() {
     Inode *index_header = mainIndex->getHeader();
     Vnode *value_header = valueList->getHeader();
     index_header->gps[0].value = value_header->getId();
-    dram_log_entry_t *header_entry = new dram_log_entry_t(index_header->getId(), index_header->hdr.last_index,index_header->hdr.next, index_header->hdr.level);
+    dram_log_entry_t *header_entry = new dram_log_entry_t(index_header->getId(), index_header->hdr.last_index,index_header->hdr.next, index_header->hdr.level, index_header->hdr.parent_id);
     header_entry->setKeyVal(0, index_header->gps[0].key, index_header->gps[0].value, 1);
     ckptLog->enq(header_entry);
     
@@ -89,7 +89,7 @@ TandemIndex::~TandemIndex() {
     
     Inode *superNode = pmemRecoveryArray->at(MAX_NODES - 1);
     if(superNode != nullptr) {
-         superNode->hdr.last_index = dramInodePool->getCurrentIdx();
+         superNode->hdr.next = dramInodePool->getCurrentIdx();
          superNode->hdr.level = mainIndex->getLevel();
          PmemManager::flushToNVM(1, reinterpret_cast<char *>(superNode), sizeof(Inode));
     } 
@@ -333,7 +333,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
 #endif
         
         target_lock.unlock(); // 释放targetVnode的锁
-        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
+        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level, parent_inode->hdr.parent_id);
         for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
             entry->setKeyVal(i, parent_inode->gps[i].key, parent_inode->gps[i].value, parent_inode->gps[i].covered_nodes);
         }
@@ -346,7 +346,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     // 新GP只覆盖这一个Vnode，所以初始覆盖数是1。
     if (parent_inode->activateGPForVnode(targetKey, targetVnode->getId(), pos, 1)) {
         target_lock.unlock(); // 释放targetVnode的锁
-        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level);
+        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level, parent_inode->hdr.parent_id);
         for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
             entry->setKeyVal(i, parent_inode->gps[i].key, parent_inode->gps[i].value, parent_inode->gps[i].covered_nodes);
         }
