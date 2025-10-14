@@ -123,7 +123,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
         }
     }
 
-    // 链接并持久化
+    // 链接
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next  = nextNode->getId();
 

@@ -476,7 +476,6 @@ class Vnode
 public:
     vnodeHeader hdr;
     vnode_entry records[vnode_fanout];
-	//std::atomic<uint64_t> version{0};
     //BloomFilter bloom;
     Vnode(int id, int next = 0)
     {
