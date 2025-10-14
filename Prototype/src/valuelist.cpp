@@ -1,5 +1,9 @@
 #include "valuelist.h"
 #include <cassert>
+#include <vector>
+#include <algorithm>
+#include <limits>
+#include <cstring>
 
 ValueList::ValueList() {
     pmemVnodePool = new PmemVnodePool(sizeof(Vnode), MAX_VALUE_NODES);
@@ -30,49 +34,88 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
 {
     assert(nextNode->isEmpty());
 
-    // 1. 收集所有有效记录
-    std::vector<vnode_entry> valid_records;
-    valid_records.reserve(fanout);
+    // 仅遍历已用槽位
+    uint32_t used_mask = curNode->hdr.bitmap;
+    int used = __builtin_popcount(used_mask);
+    if (used < 2) return true; // 不足以分裂
 
-    for (uint32_t i = 0; i < fanout; ++i) {
-        if (curNode->hdr.isBitSet(i)) { 
-            valid_records.push_back(curNode->records[i]);
+    struct KI { int pos; Key_t key; };
+    std::vector<KI> items;
+    items.reserve(used);
+
+    Key_t gmin = std::numeric_limits<Key_t>::max();
+    Key_t gmax = std::numeric_limits<Key_t>::min();
+
+    for (uint32_t bm = used_mask; bm; bm &= (bm - 1)) {
+        int i = __builtin_ctz(bm);
+        Key_t k = curNode->records[i].key;
+        items.push_back({ i, k });
+        if (k < gmin) gmin = k;
+        if (k > gmax) gmax = k;
+    }
+    // 全部键相同，无法满足 prev.max < next.min
+    if (gmin == gmax) return false;
+
+    // 选取“右半起点”的键作为 pivot，构造严格阈值 right_min_key
+    const size_t right_begin_rank = items.size() / 2;
+    std::vector<Key_t> keys;
+    keys.reserve(items.size());
+    for (auto &it : items) keys.push_back(it.key);
+
+    std::nth_element(keys.begin(), keys.begin() + right_begin_rank, keys.end());
+    Key_t pivot = keys[right_begin_rank];
+
+    Key_t right_min_key = std::numeric_limits<Key_t>::max();
+    for (Key_t k : keys) if (k >= pivot && k < right_min_key) right_min_key = k;
+
+    // 确保左侧存在严格小于 right_min_key 的元素
+    bool has_left = false;
+    for (Key_t k : keys) { if (k < right_min_key) { has_left = true; break; } }
+    if (!has_left) {
+        Key_t strict_gt = std::numeric_limits<Key_t>::max();
+        for (Key_t k : keys) if (k > pivot && k < strict_gt) strict_gt = k;
+        if (strict_gt == std::numeric_limits<Key_t>::max()) return false; // 无法形成严格不等式
+        right_min_key = strict_gt;
+    }
+
+    // 选择要搬移的槽位：key >= right_min_key
+    uint32_t move_mask = 0;
+    for (auto &it : items) {
+        if (it.key >= right_min_key) move_mask |= (1u << it.pos);
+    }
+    int right_cnt = __builtin_popcount(move_mask);
+    int left_cnt  = used - right_cnt;
+    if (right_cnt == 0 || left_cnt == 0) return false;
+
+    // 构建 nextNode：写入对应槽位并置位 bitmap；curNode 仅清除位（不清空数据）
+    nextNode->hdr.bitmap = 0;
+    for (uint32_t mm = move_mask; mm; mm &= (mm - 1)) {
+        int i = __builtin_ctz(mm);
+        nextNode->records[i] = curNode->records[i];
+        nextNode->hdr.bitmap |= (1u << i);
+    }
+    curNode->hdr.bitmap &= ~move_mask; // 仅无效化被移除的 bit
+
+    // 重建 Bloom（简单起见全量重建，也可按位增量更新）
+    {
+        BloomFilter *srcBloom = &bf[curNode->hdr.id];
+        BloomFilter *dstBloom = &bf[nextNode->hdr.id];
+        srcBloom->clear();
+        for (uint32_t bm = curNode->hdr.bitmap; bm; bm &= (bm - 1)) {
+            int i = __builtin_ctz(bm);
+            srcBloom->add(curNode->records[i].key, i);
+        }
+        dstBloom->clear();
+        for (uint32_t bm = nextNode->hdr.bitmap; bm; bm &= (bm - 1)) {
+            int i = __builtin_ctz(bm);
+            dstBloom->add(nextNode->records[i].key, i);
         }
     }
 
-    if (valid_records.empty()) return true;
-
-    // 2. 排序以满足 maxKey <= minKey 的要求
-    std::sort(valid_records.begin(), valid_records.end(), 
-              [](const vnode_entry& a, const vnode_entry& b) { return a.key < b.key; });
-
-    // 3. 确定分裂点
-    size_t num_to_keep = valid_records.size() / 2;
-    size_t num_to_move = valid_records.size() - num_to_keep;
-
-    // 4. 清理并重新填充节点
-    curNode->clear();
-    nextNode->clear(); // 确保 nextNode 也是干净的
-
-    // 复制数据回 curNode
-    if (num_to_keep > 0) {
-        memcpy(curNode->records, valid_records.data(), num_to_keep * sizeof(entry));
-        curNode->rebuildMetadata(&bf[curNode->hdr.id], num_to_keep); // 【使用新函数】
-    }
-
-    // 复制数据到 nextNode
-    if (num_to_move > 0) {
-        memcpy(nextNode->records, &valid_records[num_to_keep], num_to_move * sizeof(entry));
-        nextNode->rebuildMetadata(&bf[nextNode->hdr.id], num_to_move); // 【使用新函数】
-    }
-
-    assert(curNode->getMaxKey() <= nextNode->getMinKey());
-
-    // 5. 更新链表指针
+    // 链接并持久化
     nextNode->hdr.next = curNode->hdr.next;
-    curNode->hdr.next = nextNode->getId();
+    curNode->hdr.next  = nextNode->getId();
 
-    // 6. 验证和持久化
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
 

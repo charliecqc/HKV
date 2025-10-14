@@ -87,7 +87,7 @@ namespace {
 #define ENABLE_SEARCH_STABILITY 0
 #endif
 
-#define ENABLE_SEARCH_STABILITY 1
+//#define ENABLE_SEARCH_STABILITY 1
 
 #if ENABLE_SEARCH_STABILITY
 #define DBG_SEARCH_STABILITY 1
@@ -586,7 +586,6 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current,
 #endif
             tls_mark_fail(start_node->getMinKey());
             // 回退到原始 temp_start，不采用该缓存节点
-            // 不修改 current / current_lock（保持调用方已持有的 current_lock）
         } else {
             // key >= lower_bound：可以把 start_node 当作一个“候选起点”
             // 如果 key 已经在区间内，直接接受；否则尝试向右最多 SOFT_MAX_STEPS 步
@@ -1065,8 +1064,6 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                 next_node->setParent(verified_parent->getId());
                 commit_full_logs();
 #if ENABLE_DELTA_LOG
-                //ckpt_log_single_slot_delta(ckpt_log, verified_parent, static_cast<int16_t>(pos));
-                //ckpt_log_single_slot_delta(ckpt_log, verified_parent, static_cast<int16_t>(temp_pos));
                 auto new_verified_entry = create_log_entry(verified_parent);
                 ckpt_log->enq(new_verified_entry);
 #endif

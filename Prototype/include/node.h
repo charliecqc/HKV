@@ -18,6 +18,7 @@
 #include <immintrin.h>
 #endif
 const int32_t fanout = 28;
+const int32_t vnode_fanout =31;
 
 class BloomFilter {
 public:
