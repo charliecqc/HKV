@@ -174,6 +174,7 @@ public:
     header hdr;
     entry gps[fanout/2];
     entry sgps[fanout/2];
+	std::atomic<uint64_t> version{0};
     
 
     Inode(uint32_t level)
@@ -191,6 +192,7 @@ public:
             gps[i].value = std::numeric_limits<Val_t>::max();
             sgps[i].key = std::numeric_limits<Key_t>::max();
             sgps[i].value = std::numeric_limits<Val_t>::max();
+			version.store(0, std::memory_order_relaxed);
         }
     }
 
@@ -472,6 +474,7 @@ class Vnode
 public:
     vnodeHeader hdr;
     vnode_entry records[fanout];
+	std::atomic<uint64_t> version{0};
     //BloomFilter bloom;
     Vnode(int id, int next = 0)
     {
@@ -482,6 +485,7 @@ public:
             records[i].key = std::numeric_limits<Key_t>::max();
             records[i].value = std::numeric_limits<Val_t>::max();
         }
+		version.store(0, std::memory_order_relaxed);
     }
 
     bool lookup(Key_t key, Val_t &value, BloomFilter *bloom) {
@@ -744,3 +748,18 @@ public:
         std::cout << " min: " << getMinKey() << " max: " << getMaxKey() << std::endl;
     }
 };
+
+inline void write_start(std::atomic<uint64_t>& v) { v.fetch_add(1, std::memory_order_acq_rel); } // odd
+inline void write_end  (std::atomic<uint64_t>& v) { v.fetch_add(1, std::memory_order_release); } // even
+
+template<class Fn>
+auto read_consistent(const std::atomic<uint64_t>& v, Fn&& fn) -> decltype(fn()) {
+    for (;;) {
+        uint64_t a = v.load(std::memory_order_acquire);
+        if (a & 1u) continue;               // writer active
+        auto out = fn();
+        std::atomic_thread_fence(std::memory_order_acquire);
+        uint64_t b = v.load(std::memory_order_acquire);
+        if (a == b) return out;             // stable snapshot
+    }
+}

@@ -23,10 +23,14 @@ ValueList::ValueList() {
 bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 {
     //std::unique_lock<std::shared_mutex> lock(curNode->hdr.mtx);
+    write_start(curNode->version);
+    write_start(nextNode->version);
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
+    write_end(nextNode->version);
+    write_end(curNode->version);
     return true;
 }
 
@@ -37,7 +41,10 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     // 仅遍历已用槽位
     uint32_t used_mask = curNode->hdr.bitmap;
     int used = __builtin_popcount(used_mask);
-    if (used < 2) return true; // 不足以分裂
+    if (used < 2) {
+
+        return true; // 不足以分裂
+    }
 
     struct KI { int pos; Key_t key; };
     std::vector<KI> items;
@@ -88,6 +95,9 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     if (right_cnt == 0 || left_cnt == 0) return false;
 
     // 构建 nextNode：写入对应槽位并置位 bitmap；curNode 仅清除位（不清空数据）
+    write_start(curNode->version);
+    write_start(nextNode->version);
+
     nextNode->hdr.bitmap = 0;
     for (uint32_t mm = move_mask; mm; mm &= (mm - 1)) {
         int i = __builtin_ctz(mm);
@@ -118,6 +128,9 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
 
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
+
+    write_end(nextNode->version);
+    write_end(curNode->version);
 
     return true;
 }

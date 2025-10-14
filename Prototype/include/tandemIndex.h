@@ -32,13 +32,17 @@ class TandemIndex {
 
         bool insertWithoutIndex(Key_t key, Val_t value);
         bool insertWithNewInodes(Key_t key, Val_t value, Vnode* &vnode);
-        bool insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock, Key_t key, Val_t value);
+        //bool insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock, Key_t key, Val_t value);
+        bool insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t key, Val_t value);
         bool moveToNextVnodeForInsert(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock);
+        //bool handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom, 
+        //                                 std::unique_lock<std::shared_mutex> &vnode_lock, 
+        //                                 Key_t key, Val_t value, Vnode* &newNode);
         bool handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom, 
-                                         std::unique_lock<std::shared_mutex> &vnode_lock, 
                                          Key_t key, Val_t value, Vnode* &newNode);
         //bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &idx, int &coveredNodes);
-        bool updateParentInodeAfterSplit(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level);
+        //bool updateParentInodeAfterSplit(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level);
+        bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level);
 
         //std::thread *workerThread;kk
         std::thread *logFlushThread = nullptr;
