@@ -18,7 +18,7 @@
 #include <immintrin.h>
 #endif
 const int32_t fanout = 28;
-const int32_t vnode_fanout =31;
+const int32_t vnode_fanout = 30;
 
 class BloomFilter {
 public:
@@ -471,14 +471,14 @@ class Vnode
 {
 public:
     vnodeHeader hdr;
-    vnode_entry records[fanout];
+    vnode_entry records[vnode_fanout];
     //BloomFilter bloom;
     Vnode(int id, int next = 0)
     {
         hdr.id = id;
         hdr.next = next;
         hdr.bitmap = 0;
-        for(int32_t i = 0; i < fanout; i++) {
+        for(int32_t i = 0; i < vnode_fanout; i++) {
             records[i].key = std::numeric_limits<Key_t>::max();
             records[i].value = std::numeric_limits<Val_t>::max();
         }
@@ -506,7 +506,7 @@ public:
 #ifdef __AVX2__
         uint8_t target_fp = bloom->hashKey(key);
         int SIMD_WIDTH = 32;
-        for (int32_t i = 0; i < fanout; i += SIMD_WIDTH) {
+        for (int32_t i = 0; i < vnode_fanout; i += SIMD_WIDTH) {
             // load 32 fingerprints into a vector
             __m256i fp_vec = _mm256_loadu_si256((__m256i*)&bloom->fingerprints[i]);
             // create a vector with the target fingerprint
@@ -518,7 +518,7 @@ public:
             while (mask) {
                 // get the index of the rightmost set bit
                 int idx = i + __builtin_ctz(mask);
-                if (idx < fanout && hdr.isBitSet(idx) && records[idx].key == key) {
+                if (idx < vnode_fanout && hdr.isBitSet(idx) && records[idx].key == key) {
                     value = records[idx].value;
                     return true;
                 }
@@ -528,7 +528,7 @@ public:
         }
 #else
         // non-SIMD version for fingerprint comparison
-        for (int32_t i = fanout - 1; i >= 0; i--) {
+        for (int32_t i = vnode_fanout - 1; i >= 0; i--) {
             if (hdr.isBitSet(i) && bloom->checkFingerprint(key, i)) {
                 if (records[i].key == key) {
                     value = records[i].value;
@@ -546,7 +546,7 @@ public:
         uint8_t target_fp = bloom->hashKey(key);
         // use SIMD to optimize fingerprint comparison
         const int SIMD_WIDTH = 32;
-        for (int32_t i = 0; i < fanout; i += SIMD_WIDTH) {
+        for (int32_t i = 0; i < vnode_fanout; i += SIMD_WIDTH) {
             // load 32 fingerprints into a vector
             __m256i fp_vec = _mm256_loadu_si256((__m256i*)&bloom->fingerprints[i]);
             // create a vector with the target fingerprint
@@ -558,7 +558,7 @@ public:
             while (mask) {
                 // get the index of the rightmost set bit
                 int idx = i + __builtin_ctz(mask);
-                if (idx < fanout && hdr.isBitSet(idx) && records[idx].key == key) {
+                if (idx < vnode_fanout && hdr.isBitSet(idx) && records[idx].key == key) {
                     pos = idx;
                     return true;
                 }
@@ -568,7 +568,7 @@ public:
         }
 #else
         // non-SIMD version for fingerprint comparison
-        for (int32_t i = fanout - 1; i >= 0; i--) {
+        for (int32_t i = vnode_fanout - 1; i >= 0; i--) {
             if (hdr.isBitSet(i) && bloom->checkFingerprint(key, i)) {
                 if (records[i].key == key) {
                     pos = i;
@@ -579,22 +579,6 @@ public:
 #endif
         return false;
     }
-
-#if 0
-    Key_t getMaxKey() {
-        //Todo:: use figer print to get the max key
-        Key_t maxKey = std::numeric_limits<Key_t>::min();
-        for(int i = fanout - 1; i >= 0; i--) {
-            if(hdr.isBitSet(i) == false) {
-                continue;
-            }
-            if(records[i].key >= maxKey) {
-                maxKey = records[i] .key;
-            }
-        }
-        return maxKey;
-    }
-#endif
 
     Key_t getMaxKey()
     {
@@ -648,7 +632,7 @@ public:
     //return remaining number of keys need to be scanned
     int scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &pq) {
         size_t remaining_range = range;
-        for(int32_t i = fanout - 1; i >= 0; i--) {
+        for(int32_t i = vnode_fanout - 1; i >= 0; i--) {
             if(hdr.isBitSet(i) == false) {
                 continue;
             }
@@ -671,7 +655,7 @@ public:
 //find the first empty slot and insert the key and value
     bool insert(Key_t key, Val_t value, BloomFilter *bloom) {
         int32_t pos = __builtin_ffs(~hdr.bitmap) - 1;
-        if (pos >= 0 && pos < fanout) {
+        if (pos >= 0 && pos < vnode_fanout) {
             records[pos].key = key;
             records[pos].value = value;
             hdr.setBit(pos);
@@ -719,7 +703,7 @@ public:
     
     bool isFull()
     {
-        return hdr.bitmap == static_cast<uint32_t>((1 << fanout) - 1);
+        return hdr.bitmap == static_cast<uint32_t>((1 << vnode_fanout) - 1);
     }
 
     bool isEmpty()
@@ -730,11 +714,11 @@ public:
     void dump()
     {
         std::cout << "Vnode id: " << hdr.id << " next: " << hdr.next << " bitmap (binary): ";
-        for (int i = fanout - 1; i >= 0; i--) {
+        for (int i = vnode_fanout - 1; i >= 0; i--) {
             std::cout << ((hdr.bitmap >> i) & 1);
         }
         std::cout << std::endl;
-        for(int32_t i = 0; i < fanout; i++) {
+        for(int32_t i = 0; i < vnode_fanout; i++) {
 #if 0
             if(hdr.isBitSet(i)) {
                 std::cout << "Key: " << records[i].key << " Value: " << records[i].value << std::endl;

@@ -25,8 +25,11 @@ bool ValueList::append(Vnode *curNode, Vnode *nextNode)
     //std::unique_lock<std::shared_mutex> lock(curNode->hdr.mtx);
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
+
+    // 仅持久化被修改的 header（包含 next）
+    unsigned long hdr_flush = PmemManager::align_uint_to_cacheline(sizeof(vnodeHeader));
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(&nextNode->hdr), hdr_flush);
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(&curNode->hdr), hdr_flush);
     return true;
 }
 
@@ -112,12 +115,21 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
         }
     }
 
-    // 链接并持久化
+    // 链接
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next  = nextNode->getId();
 
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
+    // 仅持久化被修改的部分：
+    // 1) nextNode 被写入的每个 record 槽位
+    const unsigned long rec_flush = PmemManager::align_uint_to_cacheline(sizeof(vnode_entry));
+    for (uint32_t mm = move_mask; mm; mm &= (mm - 1)) {
+        int i = __builtin_ctz(mm);
+        PmemManager::flushToNVM(0, reinterpret_cast<char *>(&nextNode->records[i]), rec_flush);
+    }
+    // 2) 两个节点的 header（包含 bitmap/next）
+    const unsigned long hdr_flush = PmemManager::align_uint_to_cacheline(sizeof(vnodeHeader));
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(&nextNode->hdr), hdr_flush);
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(&curNode->hdr),  hdr_flush);
 
     return true;
 }
