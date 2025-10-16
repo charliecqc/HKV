@@ -7,6 +7,7 @@
 #include "checkpoint.h"
 #include "common.h"
 #include <sys/syscall.h>
+#include "insert_tracker.h"
 
 std::queue<CheckpointVector *> g_checkpointQueue;
 bool wqReady[WORKERQUEUE_NUM] = {false};
@@ -14,6 +15,17 @@ volatile bool wtInitialized = false;
 volatile bool mgInitialized = false;
 std::atomic<bool> g_endTandem;
 SpinLock g_spinLock;
+
+std::shared_ptr<tl::InsertTracker> tracker_;
+struct InsertForecastingOptions {
+    bool use_insert_forecasting = true;
+    size_t num_inserts_per_epoch = 10000; // The number of inserts in each InsertTracker epoch; the total elements of the equi-depth histogram used for insert forecasting.
+    size_t num_partitions = 10; // The number of bins in the insert forecasitng histogram.
+    size_t sample_size = 1000; // The size of the reservoir sample based on which the partition boundaries are set at the beginning of each epoch.
+    size_t random_seed = 42; // The random seed to be used by the insert tracker.
+    double overestimation_factor = 1.5; // Estimated ratio of (number of records in reorg range) / (number of records that fit in base pages in reorg range).
+    size_t num_future_epochs = 1; // During reorganization, the system will leave sufficient space to accommodate forecasted inserts for the next `num_future_epochs` epochs.
+};
 
 #define LOG_SIZE 3UL*1024UL*1024UL*1024UL
 
@@ -43,7 +55,18 @@ TandemIndex::TandemIndex() {
         rebalanceThread[i] = nullptr;
     }
     
-    insert(0,1);
+    InsertForecastingOptions forecasting;
+    if (forecasting.use_insert_forecasting) {
+        tracker_ = std::make_shared<tl::InsertTracker>(
+        forecasting.num_inserts_per_epoch,
+        forecasting.num_partitions,
+        forecasting.sample_size,
+        forecasting.random_seed);
+    } else {
+        tracker_.reset(); // or leave null
+    }
+
+    insert(0,1); 
 }
 
 TandemIndex::~TandemIndex() {
@@ -95,10 +118,13 @@ TandemIndex::~TandemIndex() {
     }
     cout << "vnode count: " << valueList->pmemVnodePool->getCurrentIdx() << endl;
     mainIndex->printStats();
+
+    tracker_.reset();
 }
 
 bool TandemIndex::insert(Key_t key, Val_t value)
 {
+    tracker_->Add(key); //sampling
     int idx = -1;
     bool ret = false;
     Vnode *target_vnode = nullptr;
@@ -125,7 +151,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             {
                 cout << "There is smaller key already inserted in the index." << endl;
             }
-        }
+        } 
         return true;
     }   
 
@@ -762,5 +788,3 @@ void TandemIndex::print()
     mainIndex->print();
 }
 #endif
-
-
