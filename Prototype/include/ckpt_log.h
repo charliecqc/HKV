@@ -168,7 +168,7 @@ public:
 
 class CkptLogNVM {
 private:
-    std::string fileName = "/mnt/pmem1/ckpt_log";
+    std::string fileName = "/mnt/pmem0/ckpt_log";
 public:
     volatile unsigned char *_buf; // buffer for checkpoint log
     volatile unsigned char *buf; // cacheline alighed buffer for checkpoint log

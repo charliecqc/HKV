@@ -8,12 +8,6 @@
 #include "common.h"
 #include <sys/syscall.h>
 
-//std::queue<std::vector<wq_entry *>*> g_workQueue[WORKERQUEUE_NUM];
-//std::queue <wq_entry_t *> g_workQueue;
-//std::vector<int> g_workQueue;
-//std::queue<std::vector<ckp_entry *>*> g_checkpointQueue;
-//boost::lockfree::spsc_queue<CheckpointVector*, boost::lockfree::capacity<1000000>> g_checkpointQueue;
-//boost::lockfree::spsc_queue<ckp_entry *, boost::lockfree::capacity<1000000>> g_checkpointQueue;
 std::queue<CheckpointVector *> g_checkpointQueue;
 bool wqReady[WORKERQUEUE_NUM] = {false};
 volatile bool wtInitialized = false;
@@ -157,40 +151,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         return false;
     }
     BloomFilter *bloom = &valueList->bf[target_vnode->getId()];
-    /*
-    std::unique_lock<std::shared_mutex> vnode_lock(bloom->vnode_mtx);
 
-    int current_last_idx = target_inode->hdr.last_index;
-    // **移除：不再需要获取旧的全局 coveredNodes**
-    // int coveredNodes = target_inode->hdr.coveredNodes;
-
-    header_lock.unlock();
-    //target_vnode: start of the target vnode chain. 
-    //vnode_lock: lock for the target vnode's bloom filter, will be changed inside
-    ret = insertInVnodeChain(target_vnode, bloom, vnode_lock, key, value);
-    if(!ret) {
-        // ret == false ==> vnode is full, need to split
-        Vnode *newVnode = nullptr;
-#ifdef DBG
-        {
-            std::lock_guard<std::mutex> lock(printMutex);
-            cout << "Vnode is full, need to split. Current target_vnode: " << target_vnode->hdr.id << " key: " << key << " tid: " << syscall(SYS_gettid) << endl;
-        }
-#endif
-        ret = handleNodeFullAndSplit(target_vnode, bloom, vnode_lock, key, value, newVnode);
-        if(ret) {
-            // update the parent inode after split
-            ret = updateParentInodeAfterSplit(target_inode, newVnode, updates, current_last_idx, idx);
-            if(!ret) {
-                std::cout << "Failed to update the parent inode after split." << std::endl;
-                return false;
-            }
-        }else {
-            std::cout << "Failed to handle node full and split." << std::endl;
-            return false;
-        }
-    } */
-    // 5) Fast path: try to insert in the chain (traverses without locks; uses versioned writes)
     if (insertInVnodeChain(target_vnode, bloom, key, value)) {
         return true;
     }
@@ -226,64 +187,23 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
     // 在新vnode中插入键值对
     BloomFilter* bloom = &valueList->bf[newVnode->getId()];
     std::unique_lock<std::shared_mutex> vnode_lock(bloom->vnode_mtx);
+    write_start(bloom->version);
 
     // release header vnode lock, because new vnode is ready to be used
     vheader_lock.unlock();
     
     if (!newVnode->insert(key, value, bloom)) {
         std::cerr << "Failed to insert into new vnode" << std::endl;
+        write_end(bloom->version);
         return false;
     }
+    write_end(bloom->version);
     target_vnode = newVnode;
     return true;    
-    //vnode_lock.unlock();
-    //return ret;
 }
 
 bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t key, Val_t value)
 {
-    /*
-    // To verify the lock is held, you can use an assertion.
-    // This will cause the program to terminate if the lock is not owned
-    // by the unique_lock object, which is useful for debugging.
-    while(true) {
-#ifdef DBG
-        {
-            std::lock_guard<std::mutex> lock(printMutex);
-            cout << " traverse vnode : " << vnode->hdr.id << " vnode->next: " << vnode->hdr.next << " vnode addr: " << vnode << " mutex: " << vnode_lock.mutex() <<" key " << key << " tid " <<syscall(SYS_gettid)<< endl;
-        }
-#endif
-        if(vnode->hdr.next != -1 ) {
-            Vnode *next_vnode = valueList->pmemVnodePool->at(vnode->hdr.next);
-            BloomFilter *next_bloom = &valueList->bf[next_vnode->getId()];
-            std::unique_lock<std::shared_mutex> next_lock(next_bloom->vnode_mtx);
-            if(key > next_vnode->getMinKey()) {
-                vnode_lock.unlock();
-                vnode_lock = std::move(next_lock);
-                vnode = next_vnode;
-                bloom = next_bloom;
-                continue;
-            }else {
-                break;
-            }
-        }else {
-            break;
-        }
-    }
-
-    // 尝试插入
-    if(vnode->insert(key, value, bloom)) {
-        return true; // 插入成功，直接返回
-    }else {
-#ifdef DBG
-        {
-            std::lock_guard<std::mutex> lock(printMutex);
-            cout << "Vnode is full, need to split. Current vnode: " << vnode->hdr.id << " key: " << key << " tid: " << syscall(SYS_gettid) << endl;
-        }
-#endif
-        return false;
-    }*/
-
    for (;;) {
         // ------------ 1) lock-free forward traversal ------------
         for (;;) {
@@ -292,16 +212,16 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
                 int  next_id{-1};
             };
 
-            Step s = read_consistent(vnode->version, [&]() -> Step {
+            Step s = read_consistent(bloom->version, [&]() -> Step {
                 Step r;
                 int nid = vnode->hdr.next;            // read under vnode's version
                 if (nid == -1) return r;
 
                 Vnode* n = valueList->pmemVnodePool->at(nid);
                 if (!n) return r;
-
+                BloomFilter* nb = &valueList->bf[n->hdr.id]; // 新增：右节点的版本源
                 // read next's min under next's version
-                Key_t next_min = read_consistent(n->version, [&]() {
+                Key_t next_min = read_consistent(nb->version, [&]() {
                     return n->getMinKey();
                 });
 
@@ -314,7 +234,8 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
 
             Vnode* next = valueList->pmemVnodePool->at(s.next_id);
             if (!next) break; // defensive
-
+            __builtin_prefetch(&next->hdr, 0, 1);
+            __builtin_prefetch(next->records, 0, 1);
             vnode = next;
             bloom = &valueList->bf[next->hdr.id];
         }
@@ -322,15 +243,14 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
         // ------------ 2) lock & re-validate ------------
         // A concurrent split may have made our key belong to the next vnode.
         {
-            //std::lock_guard<std::mutex> g(bloom->vnode_mtx);
             std::unique_lock<std::shared_mutex> lock(bloom->vnode_mtx);
-
             // Re-check routing decision while holding this vnode's writer lock.
             int nid = vnode->hdr.next;
             if (nid != -1) {
                 Vnode* n = valueList->pmemVnodePool->at(nid);
                 if (n) {
-                    Key_t next_min = read_consistent(n->version, [&]() {
+                    BloomFilter* nb = &valueList->bf[n->hdr.id]; // 新增：右节点的版本源
+                    Key_t next_min = read_consistent(nb->version, [&]() {
                         return n->getMinKey();
                     });
 
@@ -344,9 +264,9 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
             }
 
             // ------------ 3) do the insert under versioned write ------------
-            write_start(vnode->version);
+            write_start(bloom->version);
             bool ok = vnode->insert(key, value, bloom);
-            write_end(vnode->version);
+            write_end(bloom->version);
 
             return ok; // if false, caller will do split path
         }
@@ -356,73 +276,33 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
 bool TandemIndex::handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom,  
                                          Key_t key, Val_t value, Vnode* &next_node)
 {
-    /*Vnode* nextVnode = valueList->pmemVnodePool->getNextNode();
-    if (!nextVnode) {
-        return false;
-    }
-    BloomFilter* target_bloom = &valueList->bf[nextVnode->getId()];
-    //Key_t targetKey = 0;
-    //split vnode, lock of vnode is still held, targetVnode is unseen
-    assert(vnode_lock.owns_lock());
-#ifdef DBG
-    {
-        std::lock_guard<std::mutex> lock(printMutex);
-        cout << " Splitting vnode: " << vnode->hdr.id << " vnode addr: " << vnode << " mutex: " << vnode_lock.mutex()<< " key " << key << " tid "<< syscall(SYS_gettid) << endl;
-    }
-#endif
-    valueList->split(vnode, nextVnode);
-    // 插入操作 - 需要写权限
-    bool insert_success = false;
-    if (key <= nextVnode->getMinKey()) {
-        // 在当前持有的锁保护下修改原vnode
-        insert_success = vnode->insert(key, value, bloom);
-        if (!insert_success) {
-            return false;
-        }
-    //dont need to lock the targetVnode because its a new node and the predecessor is locked
-        //targetKey = nextVnode->getMinKey();
-    } else {
-    //dont need to lock the targetVnode because its a new node and the predecessor is locked
-        insert_success = nextVnode->insert(key, value, target_bloom);
-        //targetKey = nextVnode->getMinKey();
-        if (!insert_success) {
-            return false;
-        }
-    }
-    next_node = nextVnode;
-    vnode_lock.unlock(); // 释放当前vnode的锁
-    return true;*/
-
     std::unique_lock<std::shared_mutex> left_lock(bloom->vnode_mtx);
-
     Vnode* nextVnode = valueList->pmemVnodePool->getNextNode();
     if (!nextVnode) {
         return false;
     }
 
     valueList->split(vnode, nextVnode);
-
     // 3) Decide which node should receive (key,value)
-    //    Read nextVnode’s min under its own version to avoid torn reads.
-    Key_t next_min = read_consistent(nextVnode->version, [&](){
-    return nextVnode->getMinKey();
+    // Read nextVnode’s min under its own version to avoid torn reads.
+    BloomFilter* next_bloom = &valueList->bf[nextVnode->getId()];
+    Key_t next_min = read_consistent(next_bloom->version, [&](){
+        return nextVnode->getMinKey();
     });
 
     bool ok = false;
-    if (key <= next_min) {
-        // Insert into LEFT (existing) vnode
-        write_start(vnode->version);
+    if (key < next_min) {
+        write_start(bloom->version);
         ok = vnode->insert(key, value, bloom);
-        write_end(vnode->version);
+        write_end(bloom->version);
     } else {
         // Insert into RIGHT (new) vnode
+        left_lock.unlock();
         BloomFilter* right_bloom = &valueList->bf[nextVnode->getId()];
-        //std::lock_guard<std::mutex> right_guard(right_bloom->vnode_mtx);
         std::unique_lock<std::shared_mutex> right_lock(right_bloom->vnode_mtx);
-        write_start(nextVnode->version);
+        write_start(right_bloom->version);
         ok = nextVnode->insert(key, value, right_bloom);
-        write_end(nextVnode->version);
-        // Optional: keep caller’s bloom in sync with the node we just inserted into
+        write_end(right_bloom->version);
         bloom = right_bloom;
     }
     if (!ok) return false;
@@ -440,7 +320,6 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
 {
     std::unique_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[parent_inode->getId()]);
     
-    // 这个检查仍然非常重要，用于防止在分裂和更新父节点之间发生其他并发修改
     if(parent_inode->hdr.last_index != last_idx) {
 #if 0
         std::cout << "Inode last_index mismatch after split, likely a concurrent modification. id: "  << parent_inode->getId() << std::endl;
@@ -448,11 +327,11 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         return true; // 操作被抢占，直接返回，让上层逻辑重试
     }
 
-    //BloomFilter* target_bloom = &valueList->bf[targetVnode->getId()];
+    BloomFilter* target_bloom = &valueList->bf[targetVnode->getId()];
     //std::shared_lock<std::shared_mutex> target_lock(target_bloom->vnode_mtx);
     //Key_t targetKey = targetVnode->getMinKey();
-    Key_t targetKey = read_consistent(targetVnode->version, [&](){
-    return targetVnode->getMinKey();
+    Key_t targetKey = read_consistent(target_bloom->version, [&](){
+        return targetVnode->getMinKey();
     });
 
     // check if the gps[idx_to_next_level] 
@@ -543,29 +422,6 @@ Val_t TandemIndex::lookup(Key_t key)
     }
     
     BloomFilter *bloom = &valueList->bf[vnode_id];
-    /*
-    std::shared_lock<std::shared_mutex> vnode_lock(bloom->vnode_mtx);
-    // vnode链表遍历逻辑
-    while(true) {
-       //if bloom filter might contain the key, then lookup in the vnode 
-        bool mightContain = bloom->mightContain(key);
-        if(mightContain) {
-            if(vnode->lookupWithoutFilter(key, value, bloom)) {
-                return value;
-            }
-        }
-        //if cant find the key, then decide whether to move to the next vnode
-        //1. the next vnode exists
-        //2. and key is larger than the max key of the current vnode or the bloom filter decide key not exist in the current vnode
-        if(vnode->hdr.next != -1 && (key > vnode->getMaxKey() || !mightContain)) {
-            if(!moveToNextVnode(vnode, bloom, vnode_lock)) {
-                return -1; // no next vnode to move to
-            }
-            continue; // continue to check the next vnode
-        }
-        // if cant move to next vnode, also cant find the key, key does not exist in the index
-        return -1;
-    }*/
     // ----- 3) Lock-free traversal of vnode chain -----
     for (;;) {
         struct Snap {
@@ -575,7 +431,7 @@ Val_t TandemIndex::lookup(Key_t key)
             int  next_id{-1};
         };
 
-        Snap s = read_consistent(vnode->version, [&]() -> Snap {
+        Snap s = read_consistent(bloom->version, [&]() -> Snap {
             Snap res;
 
             // (a) If bloom says 'maybe', do an exact match under the same version snapshot
@@ -604,40 +460,12 @@ Val_t TandemIndex::lookup(Key_t key)
 
         // Hop to the next vnode (still no locks). We’ll re-evaluate under the next vnode’s version.
         Vnode *next = valueList->pmemVnodePool->at(s.next_id);
-        if (!next) return -1;              // defensive
+        if (!next) return -1;
+        __builtin_prefetch(&next->hdr, 0, 1);
+        __builtin_prefetch(next->records, 0, 1);
         vnode = next;
         bloom = &valueList->bf[next->hdr.id];
     }
-}
-
-bool TandemIndex::moveToNextVnode(Vnode*& vnode, BloomFilter*& bloom, 
-                                 std::shared_lock<std::shared_mutex>& current_lock)
-{
-    // 检查当前节点是否有下一个节点
-    if(vnode->hdr.next == -1) {
-        return false;
-    }
-    
-    // 获取下一个节点的ID，避免重复访问
-    int next_vnode_id = vnode->hdr.next;
-    
-    // 从持久化内存池中获取下一个vnode
-    Vnode *next = valueList->pmemVnodePool->at(next_vnode_id);
-    if(next == nullptr) {
-        return false;
-    }
-    
-    // 获取下一个节点的布隆过滤器
-    BloomFilter *next_bloom = &valueList->bf[next->hdr.id];
-    
-    // 尝试获取下一个节点的锁
-    std::shared_lock<std::shared_mutex> next_lock(next_bloom->vnode_mtx);
-    // 安全地转移到下一个节点
-    current_lock.unlock();
-    vnode = next;
-    bloom = next_bloom;
-    current_lock = std::move(next_lock);
-    return true;
 }
 
 void TandemIndex::createLogFlushThread()

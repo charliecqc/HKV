@@ -23,14 +23,14 @@ ValueList::ValueList() {
 bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 {
     //std::unique_lock<std::shared_mutex> lock(curNode->hdr.mtx);
-    write_start(curNode->version);
-    write_start(nextNode->version);
+    BloomFilter *leftBloom = &bf[curNode->hdr.id];
+    write_start(leftBloom->version);
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
-    write_end(nextNode->version);
-    write_end(curNode->version);
+    unsigned long hdr_flush = PmemManager::align_uint_to_cacheline(sizeof(vnodeHeader));
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(&nextNode->hdr), hdr_flush);
+    PmemManager::flushToNVM(0, reinterpret_cast<char *>(&curNode->hdr), hdr_flush);
+    write_end(leftBloom->version);
     return true;
 }
 
@@ -95,8 +95,10 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     if (right_cnt == 0 || left_cnt == 0) return false;
 
     // 构建 nextNode：写入对应槽位并置位 bitmap；curNode 仅清除位（不清空数据）
-    write_start(curNode->version);
-    write_start(nextNode->version);
+    BloomFilter *srcBloom = &bf[curNode->hdr.id];
+    BloomFilter *dstBloom = &bf[nextNode->hdr.id];
+    write_start(srcBloom->version);
+    //write_start(dstBloom->version);
 
     nextNode->hdr.bitmap = 0;
     for (uint32_t mm = move_mask; mm; mm &= (mm - 1)) {
@@ -108,8 +110,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
 
     // 重建 Bloom（简单起见全量重建，也可按位增量更新）
     {
-        BloomFilter *srcBloom = &bf[curNode->hdr.id];
-        BloomFilter *dstBloom = &bf[nextNode->hdr.id];
+        
         srcBloom->clear();
         for (uint32_t bm = curNode->hdr.bitmap; bm; bm &= (bm - 1)) {
             int i = __builtin_ctz(bm);
@@ -126,11 +127,17 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next  = nextNode->getId();
 
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(nextNode), sizeof(Vnode));
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(curNode), sizeof(Vnode));
+     // 仅持久化被改动的区域
+    const unsigned long rec_flush = PmemManager::align_uint_to_cacheline(sizeof(vnode_entry));
+    for (uint32_t mm = move_mask; mm; mm &= (mm - 1)) {
+        int i = __builtin_ctz(mm);
+        PmemManager::flushToNVM(0, reinterpret_cast<char*>(&nextNode->records[i]), rec_flush);
+    }
+    const unsigned long hdr_flush = PmemManager::align_uint_to_cacheline(sizeof(vnodeHeader));
+    PmemManager::flushToNVM(0, reinterpret_cast<char*>(&nextNode->hdr), hdr_flush);
+    PmemManager::flushToNVM(0, reinterpret_cast<char*>(&curNode->hdr),  hdr_flush);
 
-    write_end(nextNode->version);
-    write_end(curNode->version);
+    write_end(srcBloom->version);
 
     return true;
 }

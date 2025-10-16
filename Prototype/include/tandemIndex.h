@@ -27,7 +27,6 @@ class TandemIndex {
         //void print();
         Val_t lookup(Key_t key);
         void recover(Key_t key);
-        bool moveToNextVnode(Vnode*& vnode, BloomFilter*& bloom, std::shared_lock<std::shared_mutex>& current_lock);
         bool insertWithNewInodes(Key_t key, Val_t value);
 
         bool insertWithoutIndex(Key_t key, Val_t value);
