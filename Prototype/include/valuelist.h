@@ -19,7 +19,6 @@ public:
     bool split(Vnode* curVnode, Vnode* nextVnode);
     bool update(Key_t key, Val_t value);
     bool remove(Key_t key);
-    bool lookup(Key_t key, Val_t &value);
     bool recovery();
     Vnode *getNext(Vnode *curNode);
     Vnode* getHeader()

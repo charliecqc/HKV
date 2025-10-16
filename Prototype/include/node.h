@@ -489,22 +489,6 @@ public:
 		//version.store(0, std::memory_order_relaxed);
     }
 
-    bool lookup(Key_t key, Val_t &value, BloomFilter *bloom) {
-        // check bloom filter first
-        if (!bloom->mightContain(key)) {
-            return false;
-        }
-        return lookupWithoutFilter(key, value, bloom); // use the existing lookup method
-    }
-
-    bool lookup(Key_t key, int &pos, BloomFilter *bloom) {
-        // check bloom filter first
-        if (!bloom->mightContain(key)) {
-            return false;
-        }
-        return lookupWithoutFilter(key, pos, bloom); // use the existing lookup method
-    }
-
     bool lookupWithoutFilter(Key_t key, Val_t &value, BloomFilter *bloom) 
     {
            // use SIMD to optimize fingerprint comparison
@@ -556,46 +540,6 @@ public:
         return false;
 #endif
         return false; 
-    }
-
-    bool lookupWithoutFilter(Key_t key, int &pos, BloomFilter *bloom) 
-    {
-#ifdef __AVX2__
-        uint8_t target_fp = bloom->hashKey(key);
-        // use SIMD to optimize fingerprint comparison
-        const int SIMD_WIDTH = 32;
-        for (int32_t i = 0; i < vnode_fanout; i += SIMD_WIDTH) {
-            // load 32 fingerprints into a vector
-            __m256i fp_vec = _mm256_loadu_si256((__m256i*)&bloom->fingerprints[i]);
-            // create a vector with the target fingerprint
-            __m256i target_vec = _mm256_set1_epi8(target_fp);
-            // compare the fingerprints
-            int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(fp_vec, target_vec));
-            
-            // handle the mask to find matching fingerprints
-            while (mask) {
-                // get the index of the rightmost set bit
-                int idx = i + __builtin_ctz(mask);
-                if (idx < vnode_fanout && hdr.isBitSet(idx) && records[idx].key == key) {
-                    pos = idx;
-                    return true;
-                }
-                // clear the rightmost set bit
-                mask &= (mask - 1);
-            }
-        }
-#else
-        // non-SIMD version for fingerprint comparison
-        for (int32_t i = vnode_fanout - 1; i >= 0; i--) {
-            if (hdr.isBitSet(i) && bloom->checkFingerprint(key, i)) {
-                if (records[i].key == key) {
-                    pos = i;
-                    return true;
-                }
-            }
-        }
-#endif
-        return false;
     }
 
     Key_t getMaxKey()

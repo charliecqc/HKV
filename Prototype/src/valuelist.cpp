@@ -176,18 +176,6 @@ bool ValueList::remove(Key_t key)
 return true;
 }   
 
-bool ValueList::lookup(Key_t key, Val_t &value)
-{
-    Vnode *curNode = head;
-    Vnode *nextNode = getNext(curNode);
-    while(nextNode != nullptr && nextNode->getMaxKey() <= key) {
-        curNode = nextNode;
-        nextNode = getNext(curNode);
-    }
-    bool ret = curNode->lookup(key, value, &bf[curNode->hdr.id]);
-    return ret;
-}
-
 bool ValueList::recovery()
 {
     return true;

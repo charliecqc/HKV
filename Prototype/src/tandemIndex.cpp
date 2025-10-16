@@ -416,8 +416,7 @@ Val_t TandemIndex::lookup(Key_t key)
 {
     int idx = -1;
     Vnode *vnode = nullptr;
-    Val_t value;
-    
+
     // 获取起始层级和header节点
     int current_level = mainIndex->getLevel();
     if(current_level <= 0) {
