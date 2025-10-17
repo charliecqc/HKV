@@ -491,31 +491,46 @@ public:
 
     bool lookupWithoutFilter(Key_t key, Val_t &value, BloomFilter *bloom) 
     {
-           // use SIMD to optimize fingerprint comparison
 #ifdef __AVX2__
-        uint8_t target_fp = bloom->hashKey(key);
-        int SIMD_WIDTH = 32;
-        for (int32_t i = 0; i < vnode_fanout; i += SIMD_WIDTH) {
-            // load 32 fingerprints into a vector
-            __m256i fp_vec = _mm256_loadu_si256((__m256i*)&bloom->fingerprints[i]);
-            // create a vector with the target fingerprint
-            __m256i target_vec = _mm256_set1_epi8(target_fp);
-            // compare the fingerprints
-            int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(fp_vec, target_vec));
-            
-            // handle the mask to find matching fingerprints
-            while (mask) {
-                // get the index of the rightmost set bit
-                int idx = i + __builtin_ctz(mask);
-                if (idx < vnode_fanout && hdr.isBitSet(idx) && records[idx].key == key) {
-                    value = records[idx].value;
-                    return true;
-                }
-                // clear the rightmost set bit
-                mask &= (mask - 1);
-            }
+        // 如果没有 bloom filter，则退回非 SIMD 的线性扫描
+        if (bloom == nullptr) {
+            goto non_simd;
         }
-#else
+
+        // 1. SIMD 并行比较指纹
+    {
+        // 创建一个包含 32 个目标指纹的向量
+        const __m256i target_fp_vec = _mm256_set1_epi8(bloom->hashKey(key));
+        // 加载 vnode 中存储的 32 个指纹（即使 fanout 是 28，加载 32 也是安全的，因为数组大小是 32）
+        const __m256i stored_fp_vec = _mm256_load_si256((const __m256i*)bloom->fingerprints);
+        // 比较两个向量，生成一个掩码，每个匹配的字节对应一个置位
+        uint32_t fp_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(target_fp_vec, stored_fp_vec));
+
+        // 2. 结合 bitmap 过滤
+        // 将指纹匹配的掩码与记录有效数据的 bitmap 进行“与”操作
+        // 得到既有效又指纹匹配的最终候选项掩码
+        uint32_t final_mask = fp_mask & hdr.bitmap;
+
+        // 3. 遍历候选项并进行精确 Key 比较
+        while (final_mask) {
+            // 获取最低置位（set bit）的索引，即第一个候选项的位置
+            int idx = __builtin_ctz(final_mask);
+            
+            // 精确比较 Key
+            if (records[idx].key == key) {
+                value = records[idx].value;
+                return true; // 找到匹配项
+            }
+            
+            // 从掩码中移除已检查过的位，继续下一次循环
+            final_mask &= (final_mask - 1);
+        }
+        // SIMD 路径未找到，返回 false
+        return false;
+    }
+
+non_simd:
+#endif // __AVX2__
         // non-SIMD version for fingerprint comparison
         constexpr uint32_t FULL_MASK = (vnode_fanout >= 32u)
             ? 0xFFFFFFFFu
@@ -538,8 +553,6 @@ public:
             }
         }
         return false;
-#endif
-        return false; 
     }
 
     Key_t getMaxKey()

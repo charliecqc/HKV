@@ -43,10 +43,9 @@ CkptLog::CkptLog(size_t logSize)
     : retry_count(0),
       ckptlog(new CkptLogNVM(logSize)) {
 
-    // 初始镜像（持久结构内字段都在 CkptLogNVM::init 中设为 0）
-    a_consumed_start.store(ckptlog->start, std::memory_order_relaxed);
-    a_durable_end.store(ckptlog->start_persistent, std::memory_order_relaxed);
-    a_produced_end.store(ckptlog->end_persistent, std::memory_order_relaxed);
+    a_consumed_start.v.store(ckptlog->start, std::memory_order_relaxed);
+    a_durable_end.v.store(ckptlog->start_persistent, std::memory_order_relaxed);
+    a_produced_end.v.store(ckptlog->end_persistent, std::memory_order_relaxed);
 }
 
 // 析构函数
@@ -98,9 +97,9 @@ void CkptLog::enq(dram_log_entry_t *entry)
     if (entry_sz > used) {
         std::memset(base + used, 0, entry_sz - used);
     }
-
+    
     // 5) 推进生产游标
-    a_produced_end.fetch_add(entry_sz, std::memory_order_release);
+    a_produced_end.v.fetch_add(entry_sz, std::memory_order_release);
 }
 
 #ifndef ENABLE_DELTA_LOG
@@ -154,8 +153,9 @@ bool CkptLog::appendDeltaLog(int32_t inode_id,
     if (entry_size > used) {
         std::memset(reinterpret_cast<char *>(hdr) + used, 0, entry_size - used);
     }
-
-    a_produced_end.fetch_add(entry_size, std::memory_order_release);
+    
+    a_produced_end.v.fetch_add(entry_size, std::memory_order_release);
+    
     return true;
 }
 
@@ -191,51 +191,6 @@ void CkptLog::applyDeltaEntries(Inode *inode,
 }
 #endif // ENABLE_DELTA_LOG
 
-log_entry_hdr *CkptLog::put_log_entry(dram_log_entry_t *entry)
-{
-    // 计算对齐大小
-    unsigned long payload = entry->getPayLoadSize();
-    unsigned long entry_size = PmemManager::align_uint_to_cacheline(payload + sizeof(log_entry_hdr));
-
-    // 1) 短锁分配（可后续无锁化）
-    log_entry_hdr *slot = nullptr;
-    {
-        std::unique_lock<std::shared_mutex> lk(mtx);
-        slot = nvm_log_enq(entry_size);
-        if (!slot) return nullptr;
-    }
-
-    // 2) 构造到临时缓冲并一次 memcpy
-    char stack_buf[1024];
-    char *tmp;
-    std::vector<char> heap_buf;
-    if (entry_size <= sizeof(stack_buf)) {
-        tmp = stack_buf;
-    } else {
-        heap_buf.resize(entry_size);
-        tmp = heap_buf.data();
-    }
-
-    auto *hdr_out = reinterpret_cast<log_entry_hdr *>(tmp);
-    initLogEntryHeaderFromDramLogEntry(hdr_out, entry);
-
-    auto *out_entries = reinterpret_cast<nvm_log_entry_t *>(tmp + sizeof(log_entry_hdr));
-    for (int i = 0; i < entry->hdr.count; ++i) {
-        out_entries[i].gp_idx = entry->gp_idx[i];
-        out_entries[i].key    = entry->key[i];
-        out_entries[i].value  = entry->value[i];
-        out_entries[i].covered_nodes = entry->covered_nodes[i];
-    }
-
-    // 3) memcpy 写入映射区（不 flush）
-    std::memcpy(slot, tmp, entry_size);
-
-    // 4) 发布 produced_end（顺序保证：写数据 -> release 发布）
-    a_produced_end.fetch_add(entry_size, std::memory_order_release);
-
-    return slot;
-}
-
 log_entry_hdr *CkptLog::nvm_log_enq(size_t entry_size)
 {
     log_entry_hdr *log_entry_hdr;
@@ -266,8 +221,8 @@ log_entry_hdr *CkptLog::nvm_log_enq(size_t entry_size)
 void CkptLog::forcePersist()
 {
     for (;;) {
-        size_t durable  = a_durable_end.load(std::memory_order_acquire);
-        size_t produced = a_produced_end.load(std::memory_order_acquire);
+        size_t durable  = a_durable_end.v.load(std::memory_order_acquire);
+        size_t produced = a_produced_end.v.load(std::memory_order_acquire);
         if (produced <= durable) break;
         size_t len = produced - durable;
 
@@ -287,34 +242,31 @@ void CkptLog::forcePersist()
         PmemManager::flushNoDrain(CKPLOGPOOL, &ckptlog->end_persistent, sizeof(ckptlog->end_persistent));
         PmemManager::drain(CKPLOGPOOL);
 
-        a_durable_end.store(produced, std::memory_order_release);
+        a_durable_end.v.store(produced, std::memory_order_release);
     }
 }
 
 // 新：使用新游标强制回放并可选重置
 void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
 {
-    // 1. 先确保全部已持久化
     forcePersist();
 
-    // 2. 回放所有 durable 尚未消费的日志
     for (;;) {
-        size_t consumed = a_consumed_start.load(std::memory_order_acquire);
-        size_t durable  = a_durable_end.load(std::memory_order_acquire);
+        size_t consumed   = a_consumed_start.v.load(std::memory_order_acquire);
+        size_t durable = a_durable_end.v.load(std::memory_order_acquire);
         if (consumed >= durable) break;
+
         // 一次性尝试吃完剩余（内部会按条目完整度截断）
         reclaimBatch(pmemInodePool, durable - consumed);
     }
-
-    // 3. 可选：重置（仅在程序结束时调用）
     std::unique_lock<std::shared_mutex> lk(mtx, std::try_to_lock);
     if (lk.owns_lock()) {
         ckptlog->start = ckptlog->end = ckptlog->current_update = 0;
         ckptlog->start_persistent = ckptlog->end_persistent = 0;
 
-        a_consumed_start.store(0, std::memory_order_relaxed);
-        a_durable_end.store(0, std::memory_order_relaxed);
-        a_produced_end.store(0, std::memory_order_relaxed);
+        a_consumed_start.v.store(0, std::memory_order_relaxed);
+        a_durable_end.v.store(0, std::memory_order_relaxed);
+        a_produced_end.v.store(0, std::memory_order_relaxed);
 
         PmemManager::flushNoDrain(CKPLOGPOOL, ckptlog, sizeof(*ckptlog));
         PmemManager::drain(CKPLOGPOOL);
@@ -323,8 +275,8 @@ void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
 
 size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
 {
-    size_t start   = a_consumed_start.load(std::memory_order_acquire);
-    size_t durable = a_durable_end.load(std::memory_order_acquire);
+    size_t start   = a_consumed_start.v.load(std::memory_order_acquire);
+    size_t durable = a_durable_end.v.load(std::memory_order_acquire);
     if (start >= durable) return 0;
 
     size_t window = durable - start;
@@ -413,7 +365,7 @@ size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
     PmemManager::drain(CKPLOGPOOL);
 
     // 推进消费游标
-    a_consumed_start.fetch_add(consumed, std::memory_order_acq_rel);
+    a_consumed_start.v.fetch_add(consumed, std::memory_order_acq_rel);
     return consumed;
 }
 
@@ -463,16 +415,16 @@ log_entry_hdr *CkptLog::nvm_log_at(size_t index)
 // 基于“已持久化边界”的无锁判空
 bool CkptLog::isLogEmpty()
 {
-    size_t c = a_consumed_start.load(std::memory_order_acquire);
-    size_t d = a_durable_end.load(std::memory_order_acquire);
+    size_t c = a_consumed_start.v.load(std::memory_order_acquire);
+    size_t d = a_durable_end.v.load(std::memory_order_acquire);
     return c >= d;
 }
 
 // 返回已持久化的可消费区间长度
 size_t CkptLog::getLogQueueSize()
 {
-    size_t c = a_consumed_start.load(std::memory_order_acquire);
-    size_t d = a_durable_end.load(std::memory_order_acquire);
+    size_t c = a_consumed_start.v.load(std::memory_order_acquire);
+    size_t d = a_durable_end.v.load(std::memory_order_acquire);
     return (d > c) ? (d - c) : 0;
 }
 
@@ -481,8 +433,8 @@ bool CkptLog::flushOnce()
     // 防止并发 flush
     if (flush_busy.test_and_set(std::memory_order_acq_rel)) return false;
 
-    size_t durable = a_durable_end.load(std::memory_order_acquire);
-    size_t produced = a_produced_end.load(std::memory_order_acquire);
+    size_t durable  = a_durable_end.v.load(std::memory_order_acquire);
+    size_t produced = a_produced_end.v.load(std::memory_order_acquire);
     if (produced <= durable) {
         flush_busy.clear(std::memory_order_release);
         return false;
@@ -509,13 +461,13 @@ bool CkptLog::flushOnce()
     PmemManager::drain(CKPLOGPOOL);
 
     // 推进 durable_end（release，让回放线程看到完整持久内容）
-    a_durable_end.store(produced, std::memory_order_release);
+    a_durable_end.v.store(produced, std::memory_order_release);
 
     // 可选：镜像持久元数据（不阻塞）
     std::unique_lock<std::shared_mutex> lk(mtx, std::try_to_lock);
     if (lk.owns_lock()) {
         ckptlog->end_persistent   = produced;
-        ckptlog->start_persistent = a_consumed_start.load(std::memory_order_relaxed);
+        ckptlog->start_persistent = a_consumed_start.v.load(std::memory_order_relaxed);
     }
 
     flush_busy.clear(std::memory_order_release);
@@ -525,7 +477,7 @@ bool CkptLog::flushOnce()
 void CkptLog::waitDurable(size_t lsn)
 {
     for (;;) {
-        size_t d = a_durable_end.load(std::memory_order_acquire);
+        size_t d = a_durable_end.v.load(std::memory_order_acquire);
         if (d >= lsn) break;
         // 轻量自旋或 sleep/yield
         std::this_thread::yield();
@@ -550,22 +502,22 @@ void CkptLog::initLogEntryHeaderFromDramLogEntry(log_entry_hdr *dst,
 
 size_t CkptLog::getDurableGap() const
 {
-    size_t c = a_consumed_start.load(std::memory_order_acquire);
-    size_t d = a_durable_end.load(std::memory_order_acquire);
+    size_t c = a_consumed_start.v.load(std::memory_order_acquire);
+    size_t d = a_durable_end.v.load(std::memory_order_acquire);
     return d > c ? (d - c) : 0;
 }
 
 size_t CkptLog::getProducedGap() const
 {
-    size_t d = a_durable_end.load(std::memory_order_acquire);
-    size_t p = a_produced_end.load(std::memory_order_acquire);
+    size_t d = a_durable_end.v.load(std::memory_order_acquire);
+    size_t p = a_produced_end.v.load(std::memory_order_acquire);
     return p > d ? (p - d) : 0;
 }
 
 size_t CkptLog::getBacklogGap() const
 {
-    size_t c = a_consumed_start.load(std::memory_order_acquire);
-    size_t p = a_produced_end.load(std::memory_order_acquire);
+    size_t c = a_consumed_start.v.load(std::memory_order_acquire);
+    size_t p = a_produced_end.v.load(std::memory_order_acquire);
     return p > c ? (p - c) : 0;
 }
 

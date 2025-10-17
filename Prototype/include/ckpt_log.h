@@ -227,6 +227,11 @@ public:
     }
 };
 
+struct alignas(64) AlignedAtomicSizeT {
+    std::atomic<size_t> v;
+    char pad[64 - sizeof(std::atomic<size_t>)]{};
+};
+
 class CkptLog {
 public:
     std::shared_mutex mtx;
@@ -234,9 +239,9 @@ public:
     CkptLogNVM *ckptlog;
 
     // 游标
-    std::atomic<size_t> a_consumed_start{0};
-    std::atomic<size_t> a_produced_end{0};
-    std::atomic<size_t> a_durable_end{0};
+    AlignedAtomicSizeT a_consumed_start; // use: a_consumed_start.v
+    AlignedAtomicSizeT a_produced_end;   // use: a_produced_end.v
+    AlignedAtomicSizeT a_durable_end;    // use: a_durable_end.v
 
     std::atomic_flag flush_busy = ATOMIC_FLAG_INIT;
 

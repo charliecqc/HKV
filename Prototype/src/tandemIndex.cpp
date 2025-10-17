@@ -212,7 +212,7 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
         return false;
     }
     //lock state: headerVnode: yes, newVnode: no
-    bool ret = valueList->append(headerVnode, newVnode);
+    valueList->append(headerVnode, newVnode);
 
     // 在新vnode中插入键值对
     BloomFilter* bloom = &valueList->bf[newVnode->getId()];
