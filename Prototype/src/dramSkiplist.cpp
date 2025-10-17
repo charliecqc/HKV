@@ -1537,3 +1537,25 @@ void DramSkiplist::ckpt_log_multi_slots_delta(CkptLog *log,
                   buf.data(), n);
 }
 #endif // ENABLE_DELTA_LOG
+
+Inode* DramSkiplist::nextAtLevel(Inode* n) const {
+  int nid = n->hdr.next;
+  return (nid >= 0) ? dramInodePool->at(nid) : nullptr;
+}
+
+std::vector<Inode*> DramSkiplist::nodesCoveringRangeAtLevel(uint64_t a, uint64_t b, int level) {
+  std::vector<Inode*> out;
+  Inode* cur = getHeader(level);
+  if (!cur) return out;
+
+  // 1) seek to first node that may overlap [a,b)
+  while (cur && cur->getMaxKey() <= a) cur = nextAtLevel(cur);
+
+  // 2) collect until we pass b
+  while (cur && cur->getMinKey() < b) {
+    // TODO? shared-lock while reading bounds
+    out.push_back(cur);
+    cur = nextAtLevel(cur);
+  }
+  return out;
+}

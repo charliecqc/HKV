@@ -77,6 +77,9 @@ public:
     void populate_cache(Key_t key, Inode* node, int current_total_level);
     void populate_cache_shards(Key_t key, Inode* node, int current_total_level);
 
+    std::vector<Inode*> nodesCoveringRangeAtLevel(uint64_t a, uint64_t b, int level);
+    Inode* nextAtLevel(Inode* n) const;
+
 
 private:
     // 线程本地路标（跨函数共享）
@@ -161,4 +164,5 @@ public:
     void ckpt_log_single_slot_delta(CkptLog *log, Inode *inode, int16_t slot);
     void ckpt_log_multi_slots_delta(CkptLog *log, Inode *inode, const std::vector<int16_t> &slots);
 #endif
+
 };

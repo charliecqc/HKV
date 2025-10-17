@@ -6,6 +6,7 @@
 #include "spinLock.h"
 #include "valuelist.h"
 #include "workerThread.h"
+#include "insert_tracker.h"
 #include <boost/lockfree/spsc_queue.hpp>
 #include <thread>
 #include <queue>
@@ -63,6 +64,8 @@ class TandemIndex {
         bool getFromRebalanceQueue(Inode* &inode);
         void addToRebalanceMap(Inode *child, Inode *parent);
         bool getFromRebalanceMap(Inode *child, Inode *parent);
+
+        void maybeActivateHotRegion();
 
     private:
         DramSkiplist *mainIndex;

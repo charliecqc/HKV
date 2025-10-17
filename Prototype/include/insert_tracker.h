@@ -10,6 +10,11 @@
 
 namespace tl {
 
+struct Region { 
+  uint64_t start{0};
+  uint64_t end{0}; 
+  double weight{0}; 
+};
 // Tracks the distribution of an (insert) workload using an equi-depth
 // histogram. The histogram boundaries are set using a sample which is
 // maintained using reservoir sampling. The inserts are tracked per "epoch"
@@ -89,6 +94,84 @@ class InsertTracker {
     return true;
   }
 
+  
+
+  bool GetLastEpochHistogram(std::vector<uint64_t>& boundaries, std::vector<size_t>& counts) 
+  {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  if (!last_epoch_is_valid_) return false;
+  boundaries = partition_boundaries_last_epoch_;
+  counts     = partition_counters_last_epoch_;
+  return true;
+  }
+
+  // Sliding-window hottest region (w buckets). Returns false if no epoch yet.
+  bool GetHottestRegion(size_t w, Region* out) {
+  std::vector<uint64_t> B; std::vector<size_t> C;
+  if (!GetLastEpochHistogram(B, C)) return false;
+  if (w == 0 || C.empty()) return false;
+
+  size_t best_i = 0;
+  size_t cur = 0, best = 0;
+  for (size_t i = 0; i < std::min(w, C.size()); ++i) cur += C[i];
+  best = cur;
+
+  for (size_t i = w; i < C.size(); ++i) {
+    cur += C[i];
+    cur -= C[i - w];
+    if (cur > best) { best = cur; best_i = i - w + 1; }
+  }
+
+  out->start  = B[best_i];
+  out->end    = B[best_i + w];// boundaries are exclusive on the right
+  out->weight = static_cast<double>(best);
+  return true;
+}
+
+// Given last-epoch histogram, pick m anchor keys inside [Wstart, Wend)
+std::vector<uint64_t> quantileAnchorsInWindow(
+    const std::vector<uint64_t>& B,   // size P+1 boundaries
+    const std::vector<size_t>& C,     // size P counts
+    uint64_t Wstart, uint64_t Wend, size_t m) {
+
+  // 1) collect per-partition overlap and effective counts
+  struct Seg { uint64_t a,b; double cnt; int i; };
+  std::vector<Seg> segs;
+  double total = 0.0;
+  for (int i = 0; i < (int)C.size(); ++i) {
+    uint64_t a = std::max<uint64_t>(B[i], Wstart);
+    uint64_t b = std::min<uint64_t>(B[i+1], Wend);
+    if (a >= b || C[i] == 0) continue;
+    double frac = double(b - a) / double(B[i+1] - B[i]); // (0,1]
+    double eff = C[i] * frac;
+    segs.push_back({a,b,eff,i});
+    total += eff;
+  }
+  if (total <= 0.0 || m == 0) return {};
+
+  // 2) walk cumulative and interpolate anchors at target masses
+  std::vector<uint64_t> out; out.reserve(m);
+  double cum = 0.0;
+  size_t k = 1;
+  double tgt = total * (double(k) / m);
+  for (auto& s : segs) {
+    while (k <= m && cum + s.cnt >= tgt && s.cnt > 0) {
+      double need = tgt - cum;                  // within this segment
+      double f = need / s.cnt;                  // [0,1]
+      uint64_t key = s.a + (uint64_t)((s.b - s.a) * f);
+      out.push_back(key);
+      ++k;
+      tgt = total * (double(k) / m);
+    }
+    cum += s.cnt;
+  }
+  // If rounding left us short, pad evenly:
+  while (out.size() < m) {
+    out.push_back(Wstart + (uint64_t)((Wend - Wstart) * (double)out.size()/m));
+  }
+  return out;
+}
+
  private:
   // See Algorithm L: https://en.wikipedia.org/wiki/Reservoir_sampling
   void AddKeyToSample(const uint64_t key) {
@@ -145,7 +228,7 @@ class InsertTracker {
     const size_t num_records_per_partition =
         sorted_sample.size() / num_partitions_;
 
-    for (int i = 0; i < num_partitions_; ++i) {
+    for (size_t i = 0; i < num_partitions_; ++i) {
       const uint64_t start_key = sorted_sample[i * num_records_per_partition];
       partition_boundaries_curr_epoch_[i] = start_key;
     }

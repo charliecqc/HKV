@@ -8,6 +8,9 @@
 #include "common.h"
 #include <sys/syscall.h>
 #include "insert_tracker.h"
+#include <iomanip>
+#include <numeric>   // std::accumulate
+#include <sstream>
 
 std::queue<CheckpointVector *> g_checkpointQueue;
 bool wqReady[WORKERQUEUE_NUM] = {false};
@@ -125,6 +128,7 @@ TandemIndex::~TandemIndex() {
 bool TandemIndex::insert(Key_t key, Val_t value)
 {
     tracker_->Add(key); //sampling
+    maybeActivateHotRegion(); //TODO [discard the histogram after this]
     int idx = -1;
     bool ret = false;
     Vnode *target_vnode = nullptr;
@@ -773,6 +777,108 @@ void TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
 #endif
 }
 
+struct AnchorParams {
+  double inserts_per_anchor = 64.0; // how many future inserts justify one SGP
+  int    max_per_node       = 8;    // cap [remaining empty slots in SGP array]
+  size_t future_epochs      = 1;    // forecast horizon
+  size_t window_buckets     = 16;   // hot-region width for GetHottestRegion
+};
+
+// tiny helper for pretty-printing vectors
+static std::string join_u64(const std::vector<uint64_t>& v) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+        oss << v[i];
+        if (i + 1 < v.size()) oss << ", ";
+    }
+    oss << "]";
+    return oss.str();
+}
+
+void TandemIndex::maybeActivateHotRegion() {
+    if (!tracker_) return;
+
+    // Choose a window of buckets to represent the “region” (e.g., 16 buckets)
+    tl::Region hot{};
+    const size_t window = 16;
+    if (!tracker_->GetHottestRegion(window, &hot)) {
+        //std::cout << "[SGP] no completed epoch yet; skip activation\n";
+        return;  // no completed epoch yet
+    }
+    //std::cout << "[SGP] hottest region = [" << hot.start << ", " << hot.end << ") (window=" << window << ")\n";
+
+    // Forecast one future epoch (tweak if you want >1)
+    double forecast = 0.0;
+    if (!tracker_->GetNumInsertsInKeyRangeForNumFutureEpochs(
+        hot.start, hot.end, /*num_future_epochs=*/1, &forecast)) {
+        //std::cout << "[SGP] forecast failed at GetNumInsertsInKeyRangeForNumFutureEpochs; skip\n";
+        return;
+    }
+    //std::cout << std::fixed << std::setprecision(1) << "[SGP] forecast in hot region (next epoch) ≈ " << forecast << "\n";
+
+    // Map to covering nodes at an appropriate level
+    int L = 0; // TODO start from lowest level [propagate to parent?]
+    auto nodes = mainIndex->nodesCoveringRangeAtLevel(hot.start, hot.end, L);
+    if (nodes.empty()) {
+        //std::cout << "[SGP] no covering inodes at level " << L << "\n";
+        return;
+    }
+    //std::cout << "[SGP] covering inodes at level " << L << ": " << nodes.size() << "\n";
+
+    //pill the last histogram once
+    std::vector<uint64_t> B; // P+1 partition boundaries of last competed epoch
+    std::vector<size_t>   C; // insert counts per partition from last epoch
+    if (!tracker_->GetLastEpochHistogram(B, C)) {
+        //std::cout << "[SGP] no last-epoch histogram; skip\n";
+        return;
+    }
+
+    // per node intersect, forecast , choose how many SGPs, place anchors, activate sgp
+    const AnchorParams P{};
+    for (auto* inode : nodes) { 
+        // TODO: check if no SGP slots - queue for rebalnce 
+        // TODO: if node queued for rebalance - continue
+
+        //intersection of node and hot region
+        const uint64_t nmin = inode->getMinKey();
+        const uint64_t nmax = inode->getMaxKey();              // assume inclusive
+        const uint64_t S = std::max(hot.start, nmin);
+        const uint64_t E = std::min(hot.end, nmax);   // make end exclusive [nmax-1?]
+        
+        if (S >= E) {
+            //std::cout << "  [SGP] inode " << inode->getId() << " range=[" << nmin << "," << nmax << "] no overlap; skip\n";
+            continue;
+        }
+
+        //forecast how many inserts will hit this node
+        double pred = 0.0;
+        if (!tracker_->GetNumInsertsInKeyRangeForNumFutureEpochs(S, E, P.future_epochs, &pred) || pred <= 0.0) {
+            //std::cout << "  [SGP] inode " << inode->getId() << " slice=[" << S << "," << E << ") forecast≈" << pred << "; skip\n";
+            continue;
+        }
+
+        //decide how many anchors for this node
+        //P.max_per_node = (fanout / 2) - inode->sgp_last_index
+        int m = std::clamp<int>(std::lround(pred / P.inserts_per_anchor), 1, P.max_per_node);
+
+        //place anchors by density inside [S,E]
+        auto anchors = tracker_->quantileAnchorsInWindow(B, C, S, E, (size_t)m);
+        //std::cout << "  [SGP] inode " << inode->getId()
+        //          << " node_range=[" << nmin << "," << nmax << "]"
+        //          << " slice=[" << S << "," << E << ")"
+        //          << " pred≈" << pred << " -> anchors=" << anchors.size()
+        //          << " keys=" << join_u64(anchors) << "\n";
+
+        // activate SGPs at those anchor keys
+        for(uint64_t key : anchors){
+            // get lock 
+            // node->activateSGP(n);  //TODO implement
+        }
+        
+    } 
+    // TODO - clear current epoch
+}
 
 #if 0
 void TandemIndex::remove(int key)
