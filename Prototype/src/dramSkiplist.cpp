@@ -932,7 +932,8 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
         // 分裂当前节点：把 next_node 插到 inode 之后
         next_node->hdr.next = inode->hdr.next;
         inode->hdr.next     = next_node->getId();
-        inode->split(next_node);
+        //inode->split(next_node);
+        inode->splitWithSGP(next_node);
         const Key_t new_min_key = next_node->getMinKey();
 
         // 通用 FULL 日志提交

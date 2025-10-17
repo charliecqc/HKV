@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include "common.h"
+#include <bitset>
 #ifdef __AVX2__
 #include <immintrin.h>
 #endif
@@ -135,9 +136,10 @@ public:
     int16_t level;
     int32_t next;
     int16_t last_index;
+    int16_t last_sgp; 
     int32_t parent_id;              // 新增
 public:
-    header() : id(0), level(0), next(0), last_index(-1), parent_id(-1) {}
+    header() : id(0), level(0), next(0), last_index(-1), last_sgp(-1), parent_id(-1) {}
     friend class Inode;
 };
 
@@ -176,6 +178,7 @@ public:
     header hdr;
     entry gps[fanout/2];
     entry sgps[fanout/2];
+    std::bitset<fanout/2> sgpVisible;
 	std::atomic<uint64_t> version{0};
     
 
@@ -194,6 +197,7 @@ public:
             gps[i].value = std::numeric_limits<Val_t>::max();
             sgps[i].key = std::numeric_limits<Key_t>::max();
             sgps[i].value = std::numeric_limits<Val_t>::max();
+            sgpVisible.reset();
 			version.store(0, std::memory_order_relaxed);
         }
     }
@@ -216,6 +220,10 @@ public:
     bool isFull()
     {
         return hdr.last_index == fanout/2 - 1;
+    }
+    bool isSGPFull()
+    {
+        return hdr.last_sgp == fanout/2 - 1;
     }
 
     bool activateGP(Key_t targetKey, Val_t value, int &pos, int16_t relative_pos)
@@ -441,6 +449,109 @@ public:
                    : std::numeric_limits<Key_t>::max();
         Key_t cmk = child->getMinKey();
         return (cmk >= low && cmk < high);
+    }
+
+    bool shiftSGP(int oldIdx) { // shift data from oldIdx to newIdx
+        memmove(&sgps[oldIdx+1], &sgps[oldIdx], sizeof(entry) * (hdr.last_sgp - oldIdx + 1));
+        return true;
+    }
+
+    bool insertSGPAtPos(Key_t key, int pos) {
+        if(isHeader()) {
+            std::cout << "this is weird" << std::endl;
+        }
+        if(pos <= hdr.last_sgp) {
+            shiftSGP(pos);
+        }
+
+        // TODO: make sure it's not already a GP
+        // TODO: add sgppos to vnode entry
+
+        sgps[pos].key = key;
+        // sgps[pos].value = value; stays empty
+        // sgps[pos].covered_nodes = 0; still doesnt apply
+        // assert(sgps[pos].covered_nodes >= 1);
+        // sgpVisible.set(pos); //later when we link
+
+        hdr.last_sgp++;
+        return true;
+    }
+
+    bool splitWithSGP(Inode *targetInode)
+    {
+        std::vector<entry> merged_entries;
+        for (int i = 0; i <= hdr.last_index; i++)
+        {
+            merged_entries.push_back(gps[i]); //add existing gps
+        }
+
+        for (int i = 0; i <= hdr.last_sgp; ++i) {
+            if (sgpVisible.test(i)) 
+            {
+                merged_entries.push_back(sgps[i]); //add visible sgps 
+            }
+
+        }
+
+        std::sort(merged_entries.begin(), merged_entries.end(), [](const entry &a, const entry &b) {
+            return a.key < b.key; // Sort merged entries by key
+        });
+
+        int total_entries = static_cast<int>(merged_entries.size());
+        int first_half_count = total_entries / 2;
+        int second_half_count = total_entries - first_half_count;
+
+        memcpy(gps, merged_entries.data(), sizeof(entry) * first_half_count);
+        hdr.last_index = first_half_count - 1;
+
+        memcpy(targetInode->gps, merged_entries.data() + first_half_count, sizeof(entry) * second_half_count);
+        targetInode->hdr.last_index = second_half_count - 1;
+
+        //clear all speculative entries and metadata
+        memset(this->sgps, 0, sizeof(sgps));
+        this->sgpVisible.reset();
+        this->hdr.last_sgp = -1;
+
+        assert(this->getMaxKey() <= targetInode->getMinKey());
+        return true;
+    }
+
+    int findInsertSGPPos(Key_t key)
+    {
+        //handle the boundary cases
+        if (hdr.last_sgp < 0) return 0;
+        if (key < sgps[0].key) return 0;
+        if (key >= sgps[hdr.last_sgp].key) return hdr.last_sgp + 1;
+        
+        // binary search for the position
+        int left = 0, right = hdr.last_sgp;
+        while (left < right) {
+            int mid = left + (right - left) / 2;
+            if (sgps[mid].key <= key) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        return left;
+    }
+
+    bool activateSGP(Key_t targetKey)
+    {
+        //check if there is enough space to insert the new SGP
+        int16_t cur_index = this->hdr.last_sgp;  
+        if(static_cast<int32_t>(cur_index + 1)>= fanout/2) {
+            return false;
+        }else {
+            int pos = this->findInsertSGPPos(targetKey);
+            if(pos < 0 || pos > cur_index + 1) {
+                std::cout << "Invalid position for inserting GP: " << pos << std::endl;
+                return false;
+            }
+            assert(pos != 0);
+            this->insertSGPAtPos(targetKey, pos);
+            return true;
+        }
     }
 };
 

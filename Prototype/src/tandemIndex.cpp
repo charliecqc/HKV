@@ -127,8 +127,8 @@ TandemIndex::~TandemIndex() {
 
 bool TandemIndex::insert(Key_t key, Val_t value)
 {
-    tracker_->Add(key); //sampling
-    maybeActivateHotRegion(); //TODO [discard the histogram after this]
+    tracker_->Add(key); //TODO: sampling out of the critical section
+    maybeActivateHotRegion(); 
     int idx = -1;
     bool ret = false;
     Vnode *target_vnode = nullptr;
@@ -837,8 +837,16 @@ void TandemIndex::maybeActivateHotRegion() {
     // per node intersect, forecast , choose how many SGPs, place anchors, activate sgp
     const AnchorParams P{};
     for (auto* inode : nodes) { 
-        // TODO: check if no SGP slots - queue for rebalnce 
-        // TODO: if node queued for rebalance - continue
+        // no room for speculation
+        if (inode->isSGPFull()) { //TODO: check if it increase number of splits
+            addToRebalanceQueue(inode);
+            //std::cout << "  [SGP] inode " << inode->getId() << no room for speculation - added to rebanance queue; skip\n"; 
+            continue;
+        }
+        if(getFromRebalanceQueue(inode)){
+            //std::cout << "  [SGP] inode " << inode->getId() << queued for rebalance; skip\n";
+            continue;
+        }
 
         //intersection of node and hot region
         const uint64_t nmin = inode->getMinKey();
@@ -871,9 +879,10 @@ void TandemIndex::maybeActivateHotRegion() {
         //          << " keys=" << join_u64(anchors) << "\n";
 
         // activate SGPs at those anchor keys
+        // TODO - get lock
         for(uint64_t key : anchors){
-            // get lock 
-            // node->activateSGP(n);  //TODO implement
+            inode->activateSGP(key);
+            //TODO - checkpoint or flush
         }
         
     } 
