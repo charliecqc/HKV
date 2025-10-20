@@ -53,27 +53,6 @@ struct SpeculationToken {
   SpeculationToken& operator=(const SpeculationToken&) = delete;
 };
 
-std::atomic<bool> speculation_running_{false};
-struct SpeculationToken {
-  std::atomic<bool>& flag;
-  bool is_leader{false};
-
-  explicit SpeculationToken(std::atomic<bool>& f) : flag(f) {
-    bool expected = false;
-    // become leader iff flag was false
-    is_leader = flag.compare_exchange_strong(expected, true,
-                                             std::memory_order_acq_rel,
-                                             std::memory_order_acquire);
-  }
-  ~SpeculationToken() {
-    if (is_leader) flag.store(false, std::memory_order_release);
-  }
-
-  // non-copyable
-  SpeculationToken(const SpeculationToken&) = delete;
-  SpeculationToken& operator=(const SpeculationToken&) = delete;
-};
-
 #define LOG_SIZE 10UL*1024UL*1024UL*1024UL
 
 TandemIndex::TandemIndex() {
