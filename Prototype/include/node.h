@@ -484,13 +484,12 @@ public:
         {
             merged_entries.push_back(gps[i]); //add existing gps
         }
-
-        for (int i = 0; i <= hdr.last_sgp; ++i) {
-            if (sgpVisible.test(i)) 
-            {
-                merged_entries.push_back(sgps[i]); //add visible sgps 
+        
+        if (hdr.last_sgp>=0){
+            for (int i = 0; i <= hdr.last_sgp; ++i) {
+                if (sgpVisible.test(i)) 
+                    merged_entries.push_back(sgps[i]); //add visible sgps
             }
-
         }
 
         std::sort(merged_entries.begin(), merged_entries.end(), [](const entry &a, const entry &b) {
@@ -548,7 +547,7 @@ public:
                 std::cout << "Invalid position for inserting GP: " << pos << std::endl;
                 return false;
             }
-            assert(pos != 0);
+            //assert(pos != 0);
             this->insertSGPAtPos(targetKey, pos);
             return true;
         }

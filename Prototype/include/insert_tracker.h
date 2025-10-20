@@ -105,6 +105,21 @@ class InsertTracker {
   return true;
   }
 
+  bool LastEpochHistogramValid() {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return last_epoch_is_valid_;
+  }
+
+  void DropLastEpochHistogram() {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    last_epoch_is_valid_ = false;
+
+    // Free memory immediately
+    std::vector<size_t>().swap(partition_counters_last_epoch_);
+    std::vector<uint64_t>().swap(partition_boundaries_last_epoch_);
+    return;
+  }
+
   // Sliding-window hottest region (w buckets). Returns false if no epoch yet.
   bool GetHottestRegion(size_t w, Region* out) {
   std::vector<uint64_t> B; std::vector<size_t> C;

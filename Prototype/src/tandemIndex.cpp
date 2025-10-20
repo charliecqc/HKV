@@ -20,14 +20,58 @@ std::atomic<bool> g_endTandem;
 SpinLock g_spinLock;
 
 std::shared_ptr<tl::InsertTracker> tracker_;
+
+
 struct InsertForecastingOptions {
     bool use_insert_forecasting = true;
     size_t num_inserts_per_epoch = 10000; // The number of inserts in each InsertTracker epoch; the total elements of the equi-depth histogram used for insert forecasting.
-    size_t num_partitions = 10; // The number of bins in the insert forecasitng histogram.
+    size_t num_partitions = 1000; // The number of bins in the insert forecasitng histogram. TODO: make adaptive with increased node numbers
     size_t sample_size = 1000; // The size of the reservoir sample based on which the partition boundaries are set at the beginning of each epoch.
     size_t random_seed = 42; // The random seed to be used by the insert tracker.
     double overestimation_factor = 1.5; // Estimated ratio of (number of records in reorg range) / (number of records that fit in base pages in reorg range).
     size_t num_future_epochs = 1; // During reorganization, the system will leave sufficient space to accommodate forecasted inserts for the next `num_future_epochs` epochs.
+};
+
+std::atomic<bool> speculation_running_{false};
+struct SpeculationToken {
+  std::atomic<bool>& flag;
+  bool is_leader{false};
+
+  explicit SpeculationToken(std::atomic<bool>& f) : flag(f) {
+    bool expected = false;
+    // become leader iff flag was false
+    is_leader = flag.compare_exchange_strong(expected, true,
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire);
+  }
+  ~SpeculationToken() {
+    if (is_leader) flag.store(false, std::memory_order_release);
+  }
+
+  // non-copyable
+  SpeculationToken(const SpeculationToken&) = delete;
+  SpeculationToken& operator=(const SpeculationToken&) = delete;
+};
+
+std::atomic<bool> speculation_running_{false};
+struct SpeculationToken {
+  std::atomic<bool>& flag;
+  bool is_leader{false};
+
+  explicit SpeculationToken(std::atomic<bool>& f) : flag(f) {
+    bool expected = false;
+    // become leader iff flag was false
+    is_leader = flag.compare_exchange_strong(expected, true,
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire);
+  }
+  ~SpeculationToken() {
+    if (is_leader) flag.store(false, std::memory_order_release);
+  }
+
+  // non-copyable
+  SpeculationToken(const SpeculationToken&) = delete;
+  SpeculationToken& operator=(const SpeculationToken&) = delete;
 };
 
 #define LOG_SIZE 10UL*1024UL*1024UL*1024UL
@@ -121,7 +165,12 @@ TandemIndex::~TandemIndex() {
 bool TandemIndex::insert(Key_t key, Val_t value)
 {
     tracker_->Add(key); //TODO: sampling out of the critical section
-    maybeActivateHotRegion(); 
+    if (tracker_->LastEpochHistogramValid()) {
+        SpeculationToken tok(speculation_running_); 
+        if (tok.is_leader) {
+            maybeActivateHotRegion();
+        }
+    }
     int idx = -1;
     bool ret = false;
     Vnode *target_vnode = nullptr;
@@ -784,8 +833,6 @@ static std::string join_u64(const std::vector<uint64_t>& v) {
 }
 
 void TandemIndex::maybeActivateHotRegion() {
-    if (!tracker_) return;
-
     // Choose a window of buckets to represent the “region” (e.g., 16 buckets)
     tl::Region hot{};
     const size_t window = 16;
@@ -795,10 +842,10 @@ void TandemIndex::maybeActivateHotRegion() {
     }
     //std::cout << "[SGP] hottest region = [" << hot.start << ", " << hot.end << ") (window=" << window << ")\n";
 
-    // Forecast one future epoch (tweak if you want >1)
+    // Forecast one future epoch
     double forecast = 0.0;
     if (!tracker_->GetNumInsertsInKeyRangeForNumFutureEpochs(
-        hot.start, hot.end, /*num_future_epochs=*/1, &forecast)) {
+        hot.start, hot.end, 1, &forecast)) {
         //std::cout << "[SGP] forecast failed at GetNumInsertsInKeyRangeForNumFutureEpochs; skip\n";
         return;
     }
@@ -820,7 +867,7 @@ void TandemIndex::maybeActivateHotRegion() {
         //std::cout << "[SGP] no last-epoch histogram; skip\n";
         return;
     }
-
+    /*
     // per node intersect, forecast , choose how many SGPs, place anchors, activate sgp
     const AnchorParams P{};
     for (auto* inode : nodes) { 
@@ -865,15 +912,23 @@ void TandemIndex::maybeActivateHotRegion() {
         //          << " pred≈" << pred << " -> anchors=" << anchors.size()
         //          << " keys=" << join_u64(anchors) << "\n";
 
+        //check rebalance again before activating SGPs [no need activating SGPS in node to be rebalanced]
+        if(getFromRebalanceQueue(inode)){
+            //std::cout << "  [SGP] inode " << inode->getId() << queued for rebalance; skip\n";
+            continue;
+        }
         // activate SGPs at those anchor keys
         // TODO - get lock
         for(uint64_t key : anchors){
-            inode->activateSGP(key);
+            //inode->activateSGP(key);
             //TODO - checkpoint or flush
         }
         
-    } 
-    // TODO - clear current epoch
+    }*/ 
+    // clear current epoch histogram
+    tracker_->DropLastEpochHistogram();
+    //std::cout << "[SGP] Speculation completed, dropping last epoch histogram\n";
+
 }
 
 #if 0
