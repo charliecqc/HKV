@@ -8,6 +8,9 @@
 #include "common.h"
 #include "node.h"
 #include <atomic>
+#include <chrono>
+#include <unordered_map>
+#include <tuple>
 
 #pragma once
 
@@ -168,7 +171,7 @@ public:
 
 class CkptLogNVM {
 private:
-    std::string fileName = "/mnt/pmem1/ckpt_log";
+    std::string fileName = "/mnt/pmem0/ckpt_log";
 public:
     volatile unsigned char *_buf; // buffer for checkpoint log
     volatile unsigned char *buf; // cacheline alighed buffer for checkpoint log
@@ -186,7 +189,7 @@ public:
 public:
     CkptLogNVM(size_t maxSize) : maxSize(maxSize), start(0), end(0), isFull(false) {
         root_obj *root = nullptr;
-        init(root);
+        init(root,maxSize);
         start = 0;
         end = 0;
         current_update = 0;
@@ -197,7 +200,7 @@ public:
         mask = log_size - 1;
     }
 
-    int init(root_obj *root);
+    int init(root_obj *root, size_t maxSize);
 
     ~CkptLogNVM() {
         // Deallocate memory blocks
@@ -313,6 +316,77 @@ public:
     size_t suggestReclaimBatchBytes() const;
 
     // 已有：forcePersist(), reclaimBatch(...), forceReclaim(...) 等
+
+    // 批量预留/提交（FULL/DELTA 通用）
+    unsigned char* reserveChunk(size_t total_bytes_aligned);
+    void commitChunk(size_t total_bytes_aligned);
+    void enqBatch(const std::vector<dram_log_entry_t*>& entries);
+    struct DeltaPack {
+        WalDeltaHeader                 hdr;
+        std::vector<WalDeltaEntry>    entries;
+    };
+    void enqDeltaBatch(const std::vector<DeltaPack>& packs);
+
+    // 线程本地批处理器：保证“捕获顺序”->“写入顺序”
+    class Batcher {
+    public:
+        explicit Batcher(CkptLog* owner)
+            : owner_(owner), last_flush_(Clock::now()) {}
+
+        // 捕获 FULL（保持最小改动）
+        void addFull(dram_log_entry_t* e);
+
+        // 捕获单槽 DELTA（保持最小改动）
+        void addDeltaSlot(int32_t inode_id,
+                          int32_t last_index,
+                          int32_t next,
+                          int32_t parent_id,
+                          int16_t slot,
+                          const Key_t& key,
+                          const Val_t& value,
+                          int16_t covered);
+
+        void flush();
+        ~Batcher() { flush(); }
+
+    private:
+        using Clock = std::chrono::steady_clock;
+        // 阈值：可按压测调整
+        static constexpr size_t  kMaxEntries   = 128;         // 事件条数阈值（FULL+DELTA）
+        static constexpr size_t  kMaxBytes     = 512 * 1024; // 估算字节阈值
+        static constexpr int64_t kMaxDelayNs   = 400000;     // 400us
+
+        enum class Kind : uint8_t { Full, Delta };
+
+        struct EvFull {
+            dram_log_entry_t* e;
+            size_t aligned; // 预计算对齐后大小
+        };
+        struct EvDelta {
+            // 一个“单槽”增量条目
+            WalDeltaHeader hdr;
+            WalDeltaEntry  entry;
+            size_t aligned; // 预估对齐大小（用于阈值控制，最终会在 run 内聚合）
+        };
+        struct Event {
+            Kind    kind;
+            uint64_t seq; // 本线程捕获序号
+            // 简单变体
+            EvFull  f;
+            EvDelta d;
+        };
+
+        void maybeFlush();
+
+        CkptLog* owner_;
+        inline static thread_local uint64_t s_seq_; // 本线程单调递增序号
+
+        std::vector<Event> events_;          // 按捕获顺序追加
+        size_t             bytes_est_{0};    // 粗略估计（run 聚合后会更小）
+        Clock::time_point  last_flush_;
+    };
+
+    Batcher& batcher() { thread_local Batcher b(this); return b; }
 };
 
 

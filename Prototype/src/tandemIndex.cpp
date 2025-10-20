@@ -30,7 +30,7 @@ struct InsertForecastingOptions {
     size_t num_future_epochs = 1; // During reorganization, the system will leave sufficient space to accommodate forecasted inserts for the next `num_future_epochs` epochs.
 };
 
-#define LOG_SIZE 3UL*1024UL*1024UL*1024UL
+#define LOG_SIZE 10UL*1024UL*1024UL*1024UL
 
 TandemIndex::TandemIndex() {
     g_endTandem.store(false,std::memory_order_relaxed);
@@ -49,9 +49,12 @@ TandemIndex::TandemIndex() {
     Inode *index_header = mainIndex->getHeader();
     Vnode *value_header = valueList->getHeader();
     index_header->gps[0].value = value_header->getId();
-    dram_log_entry_t *header_entry = new dram_log_entry_t(index_header->getId(), index_header->hdr.last_index,index_header->hdr.next, index_header->hdr.level, index_header->hdr.parent_id);
+    dram_log_entry_t *header_entry = new dram_log_entry_t(index_header->getId(),
+        index_header->hdr.last_index,index_header->hdr.next,
+        index_header->hdr.level, index_header->hdr.parent_id);
     header_entry->setKeyVal(0, index_header->gps[0].key, index_header->gps[0].value, 1);
-    ckptLog->enq(header_entry);
+    // 改为批量累积
+    ckptLog->batcher().addFull(header_entry);
     
     // 初始化rebalanceThread数组
     for(int i = 0; i < MAX_REBALANCE_THREADS; i++) {
@@ -73,46 +76,36 @@ TandemIndex::TandemIndex() {
 }
 
 TandemIndex::~TandemIndex() {
-    // 1. 首先设置结束标志
+    // 先提交尾批
+    ckptLog->batcher().flush();
+    // 通知退出
     g_endTandem.store(true, std::memory_order_relaxed);
-    
-    // 2. 等待所有重平衡线程完全结束
+    // 1) 等重平衡线程
     for(int i = 0; i < MAX_REBALANCE_THREADS; i++) {
         if(rebalanceThread[i] != nullptr) {
-            if(rebalanceThread[i]->joinable()) {
-                rebalanceThread[i]->join();
-            }
+            if(rebalanceThread[i]->joinable()) rebalanceThread[i]->join();
             delete rebalanceThread[i];
             rebalanceThread[i] = nullptr;
         }
     }
-    
-    // 3. 在所有线程结束后，显式清理共享资源
-    {
-        std::lock_guard<std::mutex> lock(rebalanceQueueMutex);
-        rebalanceQueue = std::queue<Inode *>(); // 清空队列
-        rebalancingInodes.clear();              // 清空集合
-        nodesInRebalanceProcess.clear();        // 清空集合
-    }
-
-    if(logFlushThread && logFlushThread->joinable()) {
+    // 2) 等日志线程
+    if (logFlushThread && logFlushThread->joinable()) {
         logFlushThread->join();
         delete logFlushThread;
         logFlushThread = nullptr;
     }
-    
     if (logMergeThread && logMergeThread->joinable()) {
         logMergeThread->join();
         delete logMergeThread;
         logMergeThread = nullptr;
     }
-    
-    Inode *superNode = pmemRecoveryArray->at(MAX_NODES - 1);
-    if(superNode != nullptr) {
-         superNode->hdr.next = dramInodePool->getCurrentIdx();
-         superNode->hdr.level = mainIndex->getLevel();
-         PmemManager::flushToNVM(1, reinterpret_cast<char *>(superNode), sizeof(Inode));
-    } 
+    // 3) 所有线程都结束后再安全销毁 ckptLog
+    if (ckptLog) {
+        // 析构前确保完全刷盘/回放
+        ckptLog->forceReclaim(pmemRecoveryArray);
+        delete ckptLog;
+        ckptLog = nullptr;
+    }
 
     Vnode *metaVnode = valueList->pmemVnodePool->at(MAX_VALUE_NODES - 1);
     if(metaVnode != nullptr) {
@@ -351,66 +344,60 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     std::unique_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[parent_inode->getId()]);
     
     if(parent_inode->hdr.last_index != last_idx) {
-#if 0
-        std::cout << "Inode last_index mismatch after split, likely a concurrent modification. id: "  << parent_inode->getId() << std::endl;
-#endif
-        return true; // 操作被抢占，直接返回，让上层逻辑重试
+        return true;
     }
 
     BloomFilter* target_bloom = &valueList->bf[targetVnode->getId()];
-    //std::shared_lock<std::shared_mutex> target_lock(target_bloom->vnode_mtx);
-    //Key_t targetKey = targetVnode->getMinKey();
     Key_t targetKey = read_consistent(target_bloom->version, [&](){
         return targetVnode->getMinKey();
     });
 
-    // check if the gps[idx_to_next_level] 
     if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
-        // **逻辑正确**: 父节点足够平衡，不需激活新GP。
         parent_inode->gps[idx_to_next_level].covered_nodes++;
 #if ENABLE_DELTA_LOG
-        mainIndex->ckpt_log_single_slot_delta(ckptLog, parent_inode, static_cast<int16_t>(idx_to_next_level));
+        // 单槽 delta 改为批量聚合
+        ckptLog->batcher().addDeltaSlot(
+            parent_inode->getId(),
+            parent_inode->hdr.last_index,
+            parent_inode->hdr.next,
+            parent_inode->hdr.parent_id,
+            static_cast<int16_t>(idx_to_next_level),
+            parent_inode->gps[idx_to_next_level].key,
+            parent_inode->gps[idx_to_next_level].value,
+            parent_inode->gps[idx_to_next_level].covered_nodes
+        );
 #endif
-        
-        //target_lock.unlock(); // 释放targetVnode的锁
-        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level, parent_inode->hdr.parent_id);
+        // FULL 快照也改为批量累积（如仍需保守冗余）
+        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
+            parent_inode->hdr.last_index, parent_inode->hdr.next,
+            parent_inode->hdr.level, parent_inode->hdr.parent_id);
         for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
-            entry->setKeyVal(i, parent_inode->gps[i].key, parent_inode->gps[i].value, parent_inode->gps[i].covered_nodes);
+            entry->setKeyVal(i, parent_inode->gps[i].key,
+                                parent_inode->gps[i].value,
+                                parent_inode->gps[i].covered_nodes);
         }
-        ckptLog->enq(entry);
+        ckptLog->batcher().addFull(entry);
         return true;
     }
     
     int pos = -1;
-    // **逻辑正确**: 父节点不平衡，需要激活一个新GP来指向新分裂出的Vnode。
-    // 新GP只覆盖这一个Vnode，所以初始覆盖数是1。
     if (parent_inode->activateGPForVnode(targetKey, targetVnode->getId(), pos, 1)) {
-        //target_lock.unlock(); // 释放targetVnode的锁
-        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(), parent_inode->hdr.last_index, parent_inode->hdr.next, parent_inode->hdr.level, parent_inode->hdr.parent_id);
+        // 结构变化时仍记录 FULL（批量）
+        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
+            parent_inode->hdr.last_index, parent_inode->hdr.next,
+            parent_inode->hdr.level, parent_inode->hdr.parent_id);
         for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
-            entry->setKeyVal(i, parent_inode->gps[i].key, parent_inode->gps[i].value, parent_inode->gps[i].covered_nodes);
+            entry->setKeyVal(i, parent_inode->gps[i].key,
+                                parent_inode->gps[i].value,
+                                parent_inode->gps[i].covered_nodes);
         }
-        ckptLog->enq(entry);
+        ckptLog->batcher().addFull(entry);
         return true;
     } else {
-        // **逻辑正确**: 父节点不平衡，且已经满了，无法激活新GP。
-        // 必须对父节点自身进行重平衡。
-        //[TODO] write barrier + lock?
-        // 记录从根到目标节点的路径上所有父子关系，为重平衡提供父节点指针
         for (size_t i = 1; i < updates.size(); ++i) {
-            //mainIndex->recordInodeRelation(updates[i], updates[i-1]);
             updates[i]->setParent(updates[i-1]->getId());
-
         }
-        // 将需要重平衡的节点及其父节点信息添加到重平衡任务中
         assert(parent_inode->hdr.last_index == fanout / 2 - 1);
-#if 0
-        cout << " Parent inode needs rebalancing. id: " << parent_inode->getId()<< endl;
-        
-        for(int i = 0; i < parent_inode->hdr.last_index; i++) {
-            cout << " gp " << i << " key: " << parent_inode->gps[i].key << " value: " << parent_inode->gps[i].value << " covered_nodes: " << parent_inode->gps[i].covered_nodes << endl;
-        }
-#endif
         addToRebalanceQueue(parent_inode);
         return true;
     }

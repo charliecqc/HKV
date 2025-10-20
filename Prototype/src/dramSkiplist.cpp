@@ -305,8 +305,8 @@ DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool, ValueList *val
             dram_log_entry_t *tail_entry = new dram_log_entry_t(tail[i]->getId(), tail[i]->hdr.last_index, tail[i]->hdr.next, tail[i]->hdr.level, tail[i]->hdr.parent_id);
             tail_entry->setKeyVal(0, tail[i]->gps[0].key, tail[i]->gps[0].value, tail[i]->gps[0].covered_nodes);
 
-            ckpt_log->enq(tail_entry);
-            ckpt_log->enq(header_entry);
+            ckpt_log->batcher().addFull(tail_entry);
+            ckpt_log->batcher().addFull(header_entry);
         }
         level = 1;
     }else {
@@ -395,8 +395,8 @@ bool DramSkiplist::add(Vnode *targetVnode)
 
         dram_log_entry_t *next_entry = create_log_entry(next);
         dram_log_entry_t *cur_entry  = create_log_entry(current_update);
-        ckpt_log->enq(next_entry);
-        ckpt_log->enq(cur_entry);
+        ckpt_log->batcher().addFull(next_entry);
+        ckpt_log->batcher().addFull(cur_entry);
 
         auto it = node_to_lock_index.find(current_update);
         if (it != node_to_lock_index.end()) {
@@ -445,8 +445,6 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
 #if ENABLE_DELTA_LOG
                 ckpt_log_single_slot_delta(ckpt_log, target, static_cast<int16_t>(idx));
 #endif
-                //dram_log_entry_t *entry = create_log_entry(target);
-                //ckpt_log->enq(entry);
             }   
             if(i != 0) {
                 target = dramInodePool->at(target->gps[idx].value);
@@ -940,10 +938,10 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
         auto commit_full_logs = [&](){
             auto next_entry  = this->create_log_entry(next_node);
             auto inode_entry = this->create_log_entry(inode);
-            ckpt_log->enq(next_entry);
-            ckpt_log->enq(inode_entry);
-            if (verified_parent_entry) ckpt_log->enq(verified_parent_entry);
-            if (header_above_entry)    ckpt_log->enq(header_above_entry);
+            ckpt_log->batcher().addFull(next_entry);
+            ckpt_log->batcher().addFull(inode_entry);
+            if (verified_parent_entry) ckpt_log->batcher().addFull(verified_parent_entry);
+            if (header_above_entry)    ckpt_log->batcher().addFull(header_above_entry);
         };
 
         // 顶层无父：只写两节点 FULL 日志即可
@@ -1012,7 +1010,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                 commit_full_logs();
 #if ENABLE_DELTA_LOG
                 auto new_verified_entry = create_log_entry(verified_parent);
-                ckpt_log->enq(new_verified_entry);
+                ckpt_log->batcher().addFull(new_verified_entry);
 #endif
                 ret = 1;
             } else {
@@ -1178,7 +1176,7 @@ int DramSkiplist::rebalanceIdx(Vnode &targetVnode, Key_t targetKey)
     }
 
     for(auto &entry: log_entries) {
-        ckpt_log->enq(entry.release());
+        ckpt_log->batcher().addFull(entry.release());
     }
 
     return true;
@@ -1501,17 +1499,12 @@ void DramSkiplist::populate_cache(Key_t key, Inode* leaf_node, int current_total
 void DramSkiplist::ckpt_log_single_slot_delta(CkptLog *log, Inode *inode, int16_t slot) {
     if (!log || !inode) return;
     if (slot < 0 || slot > inode->hdr.last_index) return;
-    WalDeltaEntry e{
-        .slot    = slot,
-        .covered = inode->gps[slot].covered_nodes,
-        .key     = inode->gps[slot].key,
-        .value   = inode->gps[slot].value
-    };
-    log->enqDelta(inode->hdr.id,
+    const auto& gp = inode->gps[slot];
+    log->batcher().addDeltaSlot(inode->hdr.id,
                   inode->hdr.last_index,
                   inode->hdr.next,
                   inode->hdr.parent_id,
-                  &e, 1);
+                  slot, gp.key, gp.value, gp.covered_nodes);
 }
 
 void DramSkiplist::ckpt_log_multi_slots_delta(CkptLog *log,

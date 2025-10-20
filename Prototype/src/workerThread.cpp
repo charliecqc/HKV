@@ -9,9 +9,8 @@ LogFlushThread::LogFlushThread(int tid, CkptLog *cklog, PmemInodePool *pmemInode
 }
 
 LogFlushThread::~LogFlushThread() {
-    if(!ckptLog->isLogEmpty()) {
-        ckptLog->forcePersist();
-    }
+    // 析构前确保把 [durable, produced) 全部刷盘
+    ckptLog->forcePersist();
 }
 
 void LogFlushThread::LogFlushOperation() {
@@ -30,7 +29,6 @@ LogMergeThread::LogMergeThread(int tid, CkptLog *cklog, PmemInodePool *pmemInode
 
 LogMergeThread::~LogMergeThread() {
     if(!ckptLog->isLogEmpty()) {
-        ckptLog->forcePersist();
         ckptLog->forceReclaim(pmemInodePool);
     }
     assert(ckptLog->isLogEmpty());
@@ -39,7 +37,8 @@ LogMergeThread::~LogMergeThread() {
         superNode->hdr.last_index = pmemInodePool->getCurrentIdx();  
         PmemManager::flushToNVM(1, reinterpret_cast<char *>(superNode), sizeof(Inode));
     }
-    delete ckptLog;
+    // 删除 ckptLog 的职责移到 TandemIndex 析构里统一处理
+    // delete ckptLog;  // <-- 移除
 }
 
 void LogMergeThread::logMergeOperation() {
