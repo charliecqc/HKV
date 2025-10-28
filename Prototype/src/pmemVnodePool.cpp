@@ -20,10 +20,11 @@ int PmemVnodePool::init(root_obj *root) {
             return -1;
         }
         void *vnodePool = pmemobj_direct(root->ptr[0]);
+        void *currentPoolAddr = vnodePool;
         for(int i = 0; i < numNodes; i++) {
-            Vnode *vnode = (Vnode *) new (vnodePool) Vnode(i);
+            Vnode *vnode = (Vnode *) new (currentPoolAddr) Vnode(i);
             pmemVnodePool.push_back(vnode);
-            vnodePool = static_cast<char *>(vnodePool) + nodeSize;
+            currentPoolAddr = static_cast<char *>(currentPoolAddr) + nodeSize;
         }
         PmemManager::flushToNVM(0, (char *)vnodePool, nodeSize * numNodes);
         return 0;

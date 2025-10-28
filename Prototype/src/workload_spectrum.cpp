@@ -251,7 +251,9 @@ inline void exec(int wl,
     double elapsed_time = 0;
 
     //Index<keytype, keycomp> *idx = getInstance<keytype, keycomp>(index_type, key_type);
+    bool is_data_loaded = false;
     TandemIndex *idx = new TandemIndex();
+    is_data_loaded = idx->isDataLoaded();
     int count = (int)init_keys.size();
 
     // RECOVERY PHASE-------------------------------------------------------------------------------------
@@ -326,28 +328,30 @@ inline void exec(int wl,
         return;
     };
 
-    start_time = get_now();
-    startThreads(idx, num_thread, func2);
-    end_time = get_now();
+    if(is_data_loaded == false) {
+        start_time = get_now();
+        startThreads(idx, num_thread, func2);
+        end_time = get_now();
 
-    std::cout << std::fixed;
-    tput = count / (end_time - start_time);
-    elapsed_time = (end_time - start_time);
+        std::cout << std::fixed;
+        tput = count / (end_time - start_time);
+        elapsed_time = (end_time - start_time);
 
-    std::cout << "YCSB_INSERT throughput " << tput << "\n";
-    std::cout << "Elapsed_time " << elapsed_time << "\n";
+        std::cout << "YCSB_INSERT throughput " << tput << "\n";
+        std::cout << "Elapsed_time " << elapsed_time << "\n";
 
     // If the workload only executes load phase then we return here
-    if (insert_only == true)
-    {
-        delete idx;
-        return;
+        if (insert_only == true)
+        {
+            delete idx;
+            return;
+        }
+        sleep(1);
     }
-    sleep(1);
     //---------------------------------------------------------------------------------------------------
 
     // CACHE WARM-UP--------------------------------------------------------------------------------------
-#if 1
+#if 0
     auto func3 = [idx, &init_keys, num_thread, &values, index_type](uint64_t thread_id)
     {
         size_t total_num_key = init_keys.size();
@@ -623,11 +627,12 @@ int main(int argc, char *argv[])
     ranges.reserve(100000000);
     ops.reserve(100000000);
 
-    memset(&init_keys[0], 0x00, 100000000 * sizeof(keytype));
-    memset(&keys[0], 0x00, 100000000 * sizeof(keytype));
-    memset(&values[0], 0x00, 100000000 * sizeof(uint64_t));
-    memset(&ranges[0], 0x00, 100000000 * sizeof(int));
-    memset(&ops[0], 0x00, 100000000 * sizeof(int));
+    // 删除以下5行未定义行为的 memset（reserve 后 size 仍为0，&v[0] 越界）
+    // memset(&init_keys[0], 0x00, 100000000 * sizeof(keytype));
+    // memset(&keys[0], 0x00, 100000000 * sizeof(keytype));
+    // memset(&values[0], 0x00, 100000000 * sizeof(uint64_t));
+    // memset(&ranges[0], 0x00, 100000000 * sizeof(int));
+    // memset(&ops[0], 0x00, 100000000 * sizeof(int));
 
     load(wl, kt, index_type, init_keys, keys, values, ranges, ops);
     // printf("Finished loading workload file\n");

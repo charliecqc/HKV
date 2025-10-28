@@ -334,7 +334,8 @@ bool DramSkiplist::add(Vnode *targetVnode)
     {
         BloomFilter *bloom = &valueList->bf[targetVnode->hdr.id];
         std::shared_lock<std::shared_mutex> lock(bloom->vnode_mtx);
-        targetKey = reinterpret_cast<Vnode *>(targetVnode)->getMinKey();
+        //targetKey = reinterpret_cast<Vnode *>(targetVnode)->getMinKey();
+        targetKey = bloom->getMinKey();
     }
     int newlevel = generateRandomLevel();
     bool level_grew = false;          // 新增：记录是否提升层数
@@ -639,7 +640,7 @@ Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current,
 
 Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx)
 {
-     int start_level = -1;
+    int start_level = -1;
     bool cache_hit_and_verified = false;
     int current_total_level = currentHighestLevelIndex + 1; // 保存总层数
 
@@ -712,8 +713,8 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
             assert(current != nullptr);
             {
                 Inode *next = dramInodePool->at(current->hdr.next);
-                __builtin_prefetch(&next->hdr, 0, 1);
-                __builtin_prefetch(next->gps,  0, 1);
+                __builtin_prefetch(&next->hdr, 0, 3);
+                __builtin_prefetch(next->gps,  0, 3);
                 std::shared_lock<std::shared_mutex> next_horizental_lock(inode_locks[next->getId()]);
                 if(!next->isTail() && key >= next->getMinKey()) {
                     assert(current->getMaxKey() <= next->getMinKey());

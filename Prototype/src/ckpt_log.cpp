@@ -636,6 +636,11 @@ void CkptLog::enqBatch(const std::vector<dram_log_entry_t*>& entries) {
         auto* out = reinterpret_cast<nvm_log_entry_t*>(
             reinterpret_cast<unsigned char*>(hdr) + sizeof(log_entry_hdr));
         for (int k = 0; k < entries[i]->hdr.count; ++k) {
+            if(entries[i]->hdr.id == 40 && entries[i]->hdr.next == 39 && entries[i]->hdr.parent_id == -1 && entries[i]->hdr.last_index == 0 && entries[i]->hdr.count == 1 && entries[i]->key[0] == 0 && entries[i]->value[0] == 1 && entries[i]->covered_nodes[0] == 1) {
+                cout << "enqBatch: id=" << entries[i]->hdr.id << ", last_index=" << entries[i]->hdr.last_index
+                     << ", next=" << entries[i]->hdr.next << ", level=" << entries[i]->hdr.level
+                     << ", parent_id=" << entries[i]->hdr.parent_id << ", count=" << entries[i]->hdr.count << endl;
+            }
             out[k].gp_idx        = entries[i]->gp_idx[k];
             out[k].key           = entries[i]->key[k];
             out[k].value         = entries[i]->value[k];
@@ -709,7 +714,6 @@ void CkptLog::Batcher::addFull(dram_log_entry_t* e) {
     if (!e) return;
     const size_t used = sizeof(uint16_t) + sizeof(log_entry_hdr) + e->getPayLoadSize();
     const size_t aligned = PmemManager::align_uint_to_cacheline(static_cast<unsigned>(used));
-
     Event ev{};
     ev.kind = Kind::Full;
     ev.seq  = s_seq_++;
@@ -769,36 +773,39 @@ void CkptLog::Batcher::maybeFlush() {
 }
 
 void CkptLog::Batcher::flush() {
-    if (events_.empty()) return;
+    std::vector<Event> evs = std::move(events_);
+    events_.clear();
+    bytes_est_  = 0;
+    last_flush_ = Clock::now();
+    if (evs.empty()) return;
 
     // 1) 保持捕获顺序：events_ 已按 seq 追加（单线程），无需排序
     //    合并为多个“run”，相同类型相邻事件合并提交；DELTA run 内再按 inode 聚合为 pack
-    size_t i = 0, n = events_.size();
+    size_t i = 0, n = evs.size();
     while (i < n) {
-        const Kind k = events_[i].kind;
+        const Kind k = evs[i].kind;
         size_t j = i + 1;
-        while (j < n && events_[j].kind == k) ++j;
+        while (j < n && evs[j].kind == k) ++j;
 
         if (k == Kind::Full) {
             // 收集 [i, j) 为 FULL 组
             std::vector<dram_log_entry_t*> group;
             group.reserve(j - i);
-            for (size_t t = i; t < j; ++t) group.push_back(events_[t].f.e);
+            for (size_t t = i; t < j; ++t) group.push_back(evs[t].f.e);
             owner_->enqBatch(group);
         } else { // Kind::Delta
-#if ENABLE_DELTA_LOG
             // 将 [i, j) 内连续、inode 元字段相同的 DELTA 合并成 pack
             std::vector<CkptLog::DeltaPack> packs;
             packs.reserve(j - i);
             size_t p = i;
             while (p < j) {
                 DeltaPack pack{};
-                pack.hdr = events_[p].d.hdr;
+                pack.hdr = evs[p].d.hdr;
                 pack.hdr.count = 0;
                 // 合并同一 inode 元字段（inode_id/last_index/next/parent_id）
                 size_t q = p;
                 for (; q < j; ++q) {
-                    const auto& cur = events_[q].d;
+                    const auto& cur = evs[q].d;
                     if (cur.hdr.inode_id   != pack.hdr.inode_id ||
                         cur.hdr.last_index != pack.hdr.last_index ||
                         cur.hdr.next       != pack.hdr.next ||
@@ -812,13 +819,12 @@ void CkptLog::Batcher::flush() {
                 p = q;
             }
             owner_->enqDeltaBatch(packs);
-#endif
         }
 
         i = j;
     }
 
-    events_.clear();
+    evs.clear();
     bytes_est_  = 0;
     last_flush_ = Clock::now();
 }

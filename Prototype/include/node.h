@@ -27,9 +27,11 @@ public:
     static const size_t HASH_FUNCTIONS = 4;
     alignas(64) uint8_t fingerprints[32];
     alignas(64) uint8_t bits[FILTER_SIZE];
+    alignas(64) int32_t next_id{-1};
 
     alignas(64) std::atomic<uint64_t> version{0}; // 独占 cacheline
     alignas(64) std::shared_mutex vnode_mtx;      // 与 version 分离，避免伪共享
+    alignas(64) Key_t min_key{std::numeric_limits<Key_t>::max()};
 public:
     // 哈希函数，返回位置
     size_t getPosition(Key_t key, int seed) const {
@@ -126,6 +128,18 @@ public:
     void updateFingerprint(int pos, Key_t key) {
         fingerprints[pos] = hashKey(key);
     }
+
+    void setNextId(int32_t next) {
+        next_id = next;
+    }
+
+    void setMinKey(Key_t key) {
+        min_key = key;
+    }
+
+    Key_t getMinKey() const {
+        return min_key;
+    }
 };
 
 //extern BloomFilter bf[MAX_VALUE_NODES];
@@ -179,7 +193,7 @@ public:
     entry gps[fanout/2];
     entry sgps[fanout/2];
     std::bitset<fanout/2> sgpVisible;
-	std::atomic<uint64_t> version{0};
+	//std::atomic<uint64_t> version{0};
     
 
     Inode(uint32_t level)
@@ -198,7 +212,7 @@ public:
             sgps[i].key = std::numeric_limits<Key_t>::max();
             sgps[i].value = std::numeric_limits<Val_t>::max();
             sgpVisible.reset();
-			version.store(0, std::memory_order_relaxed);
+			//version.store(0, std::memory_order_relaxed);
         }
     }
 

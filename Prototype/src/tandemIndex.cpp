@@ -57,7 +57,17 @@ struct SpeculationToken {
 
 TandemIndex::TandemIndex() {
     g_endTandem.store(false,std::memory_order_relaxed);
+    pmemBFPool = new PmemBFPool(MAX_VALUE_NODES);
     valueList = new ValueList();
+    if(valueList->pmemVnodePool->getCurrentIdx() > 1) {
+        PmemManager::memcpyToDRAM(4,
+            reinterpret_cast<char *>(valueList->bf),
+            reinterpret_cast<char *>(pmemBFPool->at(0)),
+            sizeof(BloomFilter) * (valueList->pmemVnodePool->getCurrentIdx() + 1));
+        setDataLoaded(true);
+    }else{
+        setDataLoaded(false);
+    }
     pmemRecoveryArray = new PmemInodePool(sizeof(Inode), MAX_NODES);
     recoveryManager = new RecoveryManager(pmemRecoveryArray); 
     int level = recoveryManager->recoveryOperation();
@@ -94,15 +104,18 @@ TandemIndex::TandemIndex() {
     } else {
         tracker_.reset(); // or leave null
     }
-
-    insert(0,1); 
+    if(is_data_loaded == false) {
+        insert(0,1); 
+        ckptLog->drainAndPersistOnce();
+    }
 }
 
 TandemIndex::~TandemIndex() {
-    // 先提交尾批
-    ckptLog->batcher().flush();
-    // 通知退出
+    // 先提交主线程的尾批，并阻止 TLS 析构时再次 flush
     g_endTandem.store(true, std::memory_order_relaxed);
+
+    // 通知退出
+    
     // 1) 等重平衡线程
     for(int i = 0; i < MAX_REBALANCE_THREADS; i++) {
         if(rebalanceThread[i] != nullptr) {
@@ -111,12 +124,15 @@ TandemIndex::~TandemIndex() {
             rebalanceThread[i] = nullptr;
         }
     }
+    //cout << "after finish rebalance" << pmemRecoveryArray->at(40)->hdr.next << endl;
+    ckptLog->drainAndPerssistBatchers();
     // 2) 等日志线程
     if (logFlushThread && logFlushThread->joinable()) {
         logFlushThread->join();
         delete logFlushThread;
         logFlushThread = nullptr;
     }
+    //cout << "after finish log flush" << pmemRecoveryArray->at(40)->hdr.next << endl;
     if (logMergeThread && logMergeThread->joinable()) {
         logMergeThread->join();
         delete logMergeThread;
@@ -124,10 +140,19 @@ TandemIndex::~TandemIndex() {
     }
     // 3) 所有线程都结束后再安全销毁 ckptLog
     if (ckptLog) {
-        // 析构前确保完全刷盘/回放
-        ckptLog->forceReclaim(pmemRecoveryArray);
+        if(!ckptLog->isLogEmpty()) {
+            ckptLog->forceReclaim(pmemRecoveryArray);
+        }
+        assert(ckptLog->isLogEmpty());
         delete ckptLog;
         ckptLog = nullptr;
+    }
+
+    Inode *superNode = pmemRecoveryArray->at(MAX_NODES - 1);
+    if(superNode != nullptr) {
+        superNode->hdr.next = dramInodePool->getCurrentIdx();
+        superNode->hdr.level = mainIndex->getLevel();
+        PmemManager::flushToNVM(0, reinterpret_cast<char *>(superNode), sizeof(Inode));
     }
 
     Vnode *metaVnode = valueList->pmemVnodePool->at(MAX_VALUE_NODES - 1);
@@ -135,14 +160,21 @@ TandemIndex::~TandemIndex() {
         metaVnode->hdr.next = valueList->pmemVnodePool->getCurrentIdx();
         PmemManager::flushToNVM(0, reinterpret_cast<char *>(metaVnode), sizeof(Vnode));
     }
+
+    PmemManager::memcpyToNVM(4,reinterpret_cast<char *>(pmemBFPool->at(0)),
+        reinterpret_cast<char *>(valueList->bf),
+        sizeof(BloomFilter) * (valueList->pmemVnodePool->getCurrentIdx() + 1));
+
     cout << "vnode count: " << valueList->pmemVnodePool->getCurrentIdx() << endl;
     mainIndex->printStats();
 
     tracker_.reset();
+    
 }
 
 bool TandemIndex::insert(Key_t key, Val_t value)
 {
+#if 0
     tracker_->Add(key); //TODO: sampling out of the critical section
     if (tracker_->LastEpochHistogramValid()) {
         SpeculationToken tok(speculation_running_); 
@@ -150,6 +182,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             maybeActivateHotRegion();
         }
     }
+#endif
     int idx = -1;
     bool ret = false;
     Vnode *target_vnode = nullptr;
@@ -234,6 +267,7 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
     }
     //lock state: headerVnode: yes, newVnode: no
     valueList->append(headerVnode, newVnode);
+    headerbloom->setNextId(newVnode->getId());
 
     // 在新vnode中插入键值对
     BloomFilter* bloom = &valueList->bf[newVnode->getId()];
@@ -248,6 +282,9 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
         write_end(bloom->version);
         return false;
     }
+    if(key < bloom->getMinKey()) {
+        bloom->setMinKey(key);
+    }
     write_end(bloom->version);
     target_vnode = newVnode;
     return true;    
@@ -255,6 +292,7 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
 
 bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t key, Val_t value)
 {
+    int32_t current_vnode_id = vnode->getId();
    for (;;) {
         // ------------ 1) lock-free forward traversal ------------
         for (;;) {
@@ -265,15 +303,18 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
 
             Step s = read_consistent(bloom->version, [&]() -> Step {
                 Step r;
-                int nid = vnode->hdr.next;            // read under vnode's version
-                if (nid == -1) return r;
+                int nid = bloom->next_id;              // 读取右节点id
+                if (nid == -1) {
+                    return r;
+                }
 
-                Vnode* n = valueList->pmemVnodePool->at(nid);
-                if (!n) return r;
-                BloomFilter* nb = &valueList->bf[n->hdr.id]; // 新增：右节点的版本源
+                //Vnode* n = valueList->pmemVnodePool->at(nid);
+                //if (!n) return r;
+                BloomFilter* nb = &valueList->bf[nid]; // 新增：右节点的版本源
+                if(!nb) return r;
                 // read next's min under next's version
                 Key_t next_min = read_consistent(nb->version, [&]() {
-                    return n->getMinKey();
+                    return nb->getMinKey();
                 });
 
                 r.can_move = (key >= next_min);
@@ -283,12 +324,11 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
 
             if (!s.can_move) break;
 
-            Vnode* next = valueList->pmemVnodePool->at(s.next_id);
-            if (!next) break; // defensive
-            __builtin_prefetch(&next->hdr, 0, 1);
-            __builtin_prefetch(next->records, 0, 1);
-            vnode = next;
-            bloom = &valueList->bf[next->hdr.id];
+            BloomFilter* next_bloom = &valueList->bf[s.next_id];
+            if (!next_bloom) break; // defensive
+            __builtin_prefetch(&next_bloom->min_key, 0, 1);
+            bloom = next_bloom;
+            current_vnode_id = s.next_id; 
         }
 
         // ------------ 2) lock & re-validate ------------
@@ -296,19 +336,23 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
         {
             std::unique_lock<std::shared_mutex> lock(bloom->vnode_mtx);
             // Re-check routing decision while holding this vnode's writer lock.
-            int nid = vnode->hdr.next;
+            //int nid = vnode->hdr.next;
+            int nid = bloom->next_id;
             if (nid != -1) {
-                Vnode* n = valueList->pmemVnodePool->at(nid);
-                if (n) {
-                    BloomFilter* nb = &valueList->bf[n->hdr.id]; // 新增：右节点的版本源
+                //Vnode* n = valueList->pmemVnodePool->at(nid);
+                BloomFilter* nb = &valueList->bf[nid]; // 新增：右节点的版本源
+                if (nb) {
+                    //BloomFilter* nb = &valueList->bf[n->hdr.id]; // 新增：右节点的版本源
                     Key_t next_min = read_consistent(nb->version, [&]() {
-                        return n->getMinKey();
+                        return nb->getMinKey();
                     });
 
                     if (key >= next_min) {
                         // We should move right; drop the lock and loop.
-                        vnode = n;
-                        bloom = &valueList->bf[n->hdr.id];
+                       //vnode = n;
+                        //bloom = &valueList->bf[n->h];
+                        bloom = nb;
+                        current_vnode_id = nid;
                         continue; // go back to (1)
                     }
                 }
@@ -316,7 +360,11 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
 
             // ------------ 3) do the insert under versioned write ------------
             write_start(bloom->version);
+            vnode = valueList->pmemVnodePool->at(current_vnode_id);
             bool ok = vnode->insert(key, value, bloom);
+            if(key < bloom->getMinKey()) {
+                bloom->setMinKey(key);
+            }
             write_end(bloom->version);
 
             return ok; // if false, caller will do split path
@@ -345,14 +393,20 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom,
     if (key < next_min) {
         write_start(bloom->version);
         ok = vnode->insert(key, value, bloom);
+        if(key < bloom->getMinKey()) {
+            bloom->setMinKey(key);
+        }
         write_end(bloom->version);
     } else {
         // Insert into RIGHT (new) vnode
-        left_lock.unlock();
         BloomFilter* right_bloom = &valueList->bf[nextVnode->getId()];
         std::unique_lock<std::shared_mutex> right_lock(right_bloom->vnode_mtx);
+        left_lock.unlock();
         write_start(right_bloom->version);
         ok = nextVnode->insert(key, value, right_bloom);
+        if(key < right_bloom->getMinKey()) {
+            right_bloom->setMinKey(key);
+        }
         write_end(right_bloom->version);
         bloom = right_bloom;
     }
@@ -434,7 +488,6 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
 Val_t TandemIndex::lookup(Key_t key)
 {
     int idx = -1;
-    Vnode *vnode = nullptr;
 
     // 获取起始层级和header节点
     int current_level = mainIndex->getLevel();
@@ -459,56 +512,57 @@ Val_t TandemIndex::lookup(Key_t key)
     // now header_lock is still held, as lock of target
     int vnode_id = target->gps[idx].value;
     header_lock.unlock();
-
-    vnode = valueList->pmemVnodePool->at(vnode_id);
-    if(vnode == nullptr) {
+    BloomFilter *bloom = &valueList->bf[vnode_id];
+    if(bloom == nullptr) {
         return -1;
     }
-    
-    BloomFilter *bloom = &valueList->bf[vnode_id];
     // ----- 3) Lock-free traversal of vnode chain -----
+    int current_vnode_id = vnode_id;
     for (;;) {
         struct Snap {
-            bool found{false};
             Val_t out{};
             bool can_move{false};
             int  next_id{-1};
         };
+        
 
         Snap s = read_consistent(bloom->version, [&]() -> Snap {
             Snap res;
 
-            // (a) If bloom says 'maybe', do an exact match under the same version snapshot
-            bool might = bloom->mightContain(key);
-            if (might) {
-                Val_t tmp;
-                if (vnode->lookupWithoutFilter(key, tmp, bloom)) {
-                    res.found = true;
-                    res.out = tmp;
-                    return res;
-                }
+            // (b) Decide whether we should move right
+            int next = bloom->next_id;
+            if(next == -1) {
+                return res;
+            }
+            BloomFilter* nb = &valueList->bf[next]; // 新增：右节点的版本源
+            if(!nb) {
+                return res;
             }
 
-            // (b) Decide whether we should move right
-            int next = vnode->hdr.next;
-            if (next != -1) {
-                Key_t vmax = vnode->getMaxKey();         // safe under version snapshot
-                res.can_move = (key > vmax) || !might;   // classic routing rule
-                if (res.can_move) res.next_id = next;
+            Key_t next_min = read_consistent(nb->version, [&]() {
+                return nb->getMinKey();
+            });
+            res.can_move = (key >= next_min);
+            res.next_id = next;
+            if(!res.can_move) {
+                // (c) Try to lookup in the current vnode
+                Val_t tmp;
+                Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
+                if (vnode->lookupWithoutFilter(key, tmp, bloom)) {
+                    res.out = tmp;
+                } else {
+                    res.out = -1;
+                }
             }
             return res;
         });
+        if(s.can_move == false) {
+            return s.out;
+        }
 
-        if (s.found) return s.out;
-        if (!s.can_move) return -1;
-
-        // Hop to the next vnode (still no locks). We’ll re-evaluate under the next vnode’s version.
-        Vnode *next = valueList->pmemVnodePool->at(s.next_id);
-        if (!next) return -1;
-        __builtin_prefetch(&next->hdr, 0, 1);
-        __builtin_prefetch(next->records, 0, 1);
-        vnode = next;
-        bloom = &valueList->bf[next->hdr.id];
+        BloomFilter* next_bloom = &valueList->bf[s.next_id];
+        bloom = next_bloom;
+        current_vnode_id = s.next_id;
     }
 }
 
@@ -540,6 +594,8 @@ void TandemIndex::logFlushThreadExec(int id)
         usleep(200);
         lft.LogFlushOperation();
     }
+    // 退出前做一次最终 drain，确保无尾批残留
+    lft.LogFlushOperation();
 }
 
 void TandemIndex::createLogMergeThread()
@@ -570,6 +626,8 @@ void TandemIndex::logMergeThreadExec(int id)
         usleep(200);
         lmt.logMergeOperation();
     }
+    // 退出前做一次最终 drain
+    lmt.logMergeOperation();
 }
 
 void TandemIndex::createRebalanceThread() 
@@ -813,6 +871,7 @@ static std::string join_u64(const std::vector<uint64_t>& v) {
 
 void TandemIndex::maybeActivateHotRegion() {
     // Choose a window of buckets to represent the “region” (e.g., 16 buckets)
+    
     tl::Region hot{};
     const size_t window = 16;
     if (!tracker_->GetHottestRegion(window, &hot)) {

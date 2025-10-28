@@ -7,10 +7,6 @@
 
 ValueList::ValueList() {
     pmemVnodePool = new PmemVnodePool(sizeof(Vnode), MAX_VALUE_NODES);
-#if 0
-    head = pmemVnodePool->getNextNode();
-    head->hdr.next = std::numeric_limits<uint32_t>::max();
-#endif
     if(pmemVnodePool->getCurrentIdx() != 0) {
         head = pmemVnodePool->at(0);
     }else {
@@ -85,6 +81,8 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
         right_min_key = strict_gt;
     }
 
+    Key_t left_min_key = gmin;
+
     // 选择要搬移的槽位：key >= right_min_key
     uint32_t move_mask = 0;
     for (auto &it : items) {
@@ -107,6 +105,8 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
         nextNode->hdr.bitmap |= (1u << i);
     }
     curNode->hdr.bitmap &= ~move_mask; // 仅无效化被移除的 bit
+    srcBloom->setMinKey(left_min_key);
+    dstBloom->setMinKey(right_min_key);
 
     // 重建 Bloom（简单起见全量重建，也可按位增量更新）
     {
@@ -126,6 +126,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     // 链接
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next  = nextNode->getId();
+    
 
      // 仅持久化被改动的区域
     const unsigned long rec_flush = PmemManager::align_uint_to_cacheline(sizeof(vnode_entry));
@@ -137,6 +138,8 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     PmemManager::flushToNVM(0, reinterpret_cast<char*>(&nextNode->hdr), hdr_flush);
     PmemManager::flushToNVM(0, reinterpret_cast<char*>(&curNode->hdr),  hdr_flush);
 
+    dstBloom->setNextId(nextNode->hdr.next);
+    srcBloom->setNextId(nextNode->getId());
     write_end(srcBloom->version);
 
     return true;

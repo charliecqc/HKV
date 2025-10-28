@@ -31,14 +31,6 @@ LogMergeThread::~LogMergeThread() {
     if(!ckptLog->isLogEmpty()) {
         ckptLog->forceReclaim(pmemInodePool);
     }
-    assert(ckptLog->isLogEmpty());
-    Inode *superNode = pmemInodePool->at(MAX_NODES);
-    if(superNode != nullptr) {
-        superNode->hdr.last_index = pmemInodePool->getCurrentIdx();  
-        PmemManager::flushToNVM(1, reinterpret_cast<char *>(superNode), sizeof(Inode));
-    }
-    // 删除 ckptLog 的职责移到 TandemIndex 析构里统一处理
-    // delete ckptLog;  // <-- 移除
 }
 
 void LogMergeThread::logMergeOperation() {

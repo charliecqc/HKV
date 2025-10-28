@@ -248,6 +248,8 @@ public:
 
     std::atomic_flag flush_busy = ATOMIC_FLAG_INIT;
 
+    std::atomic<int32_t> active_batchers{0};
+
     // === 新增：构造 / 析构 ===
     explicit CkptLog(size_t logSize = MAX_CKP_LOG_ENTRIES);
     ~CkptLog();
@@ -277,6 +279,22 @@ public:
 
     void initLogEntryHeaderFromDramLogEntry(log_entry_hdr *dst, const dram_log_entry_t *src);
 
+    void drainAndPerssistBatchers() {
+        auto &b = batcher();
+        b.flush();
+        b.detach();
+        while(active_batchers.load(std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
+
+        forcePersist();
+    }
+
+    void drainAndPersistOnce(){
+        auto &b = batcher();
+        b.flush();
+        forcePersist();
+    }
     // 新增：写入增量日志
 #if ENABLE_DELTA_LOG
     // **修改 appendDeltaLog 签名**
@@ -331,7 +349,9 @@ public:
     class Batcher {
     public:
         explicit Batcher(CkptLog* owner)
-            : owner_(owner), last_flush_(Clock::now()) {}
+            : owner_(owner), last_flush_(Clock::now()) {
+            owner_->active_batchers.fetch_add(1, std::memory_order_acq_rel);
+            }
 
         // 捕获 FULL（保持最小改动）
         void addFull(dram_log_entry_t* e);
@@ -346,13 +366,27 @@ public:
                           const Val_t& value,
                           int16_t covered);
 
-        void flush();
-        ~Batcher() { flush(); }
-
+        void flush();              // 确保使用 move 并清空本地缓冲
+        void detach() noexcept { 
+            if(!detached_) {
+                detached_ = true; 
+                owner_->active_batchers.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        }  // 禁止析构期再 flush
+        ~Batcher() {
+            if (!detached_) {
+                flush();
+                owner_->active_batchers.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        }
     private:
         using Clock = std::chrono::steady_clock;
+        bool detached_{false};     // 新增
+        // 假设持有指向所属 CkptLog 的指针（已有）
+        // CkptLog* owner_;
+        // std::vector<dram_log_entry_t*> buf_;
         // 阈值：可按压测调整
-        static constexpr size_t  kMaxEntries   = 128;         // 事件条数阈值（FULL+DELTA）
+        static constexpr size_t  kMaxEntries   = 256;         // 事件条数阈值（FULL+DELTA）
         static constexpr size_t  kMaxBytes     = 512 * 1024; // 估算字节阈值
         static constexpr int64_t kMaxDelayNs   = 400000;     // 400us
 

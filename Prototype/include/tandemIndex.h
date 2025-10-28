@@ -2,6 +2,7 @@
 #include "checkpoint.h"
 #include "dramSkiplist.h"
 #include "pmemInodePool.h"
+#include "pmemBFPool.h"
 #include "recoveryManager.h"
 #include "spinLock.h"
 #include "valuelist.h"
@@ -32,16 +33,10 @@ class TandemIndex {
 
         bool insertWithoutIndex(Key_t key, Val_t value);
         bool insertWithNewInodes(Key_t key, Val_t value, Vnode* &vnode);
-        //bool insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock, Key_t key, Val_t value);
         bool insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t key, Val_t value);
         bool moveToNextVnodeForInsert(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock);
-        //bool handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom, 
-        //                                 std::unique_lock<std::shared_mutex> &vnode_lock, 
-        //                                 Key_t key, Val_t value, Vnode* &newNode);
         bool handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom, 
                                          Key_t key, Val_t value, Vnode* &newNode);
-        //bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &idx, int &coveredNodes);
-        //bool updateParentInodeAfterSplit(Inode *inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level);
         bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level);
 
         //std::thread *workerThread;kk
@@ -66,16 +61,27 @@ class TandemIndex {
         bool getFromRebalanceMap(Inode *child, Inode *parent);
 
         void maybeActivateHotRegion();
+        bool isDataLoaded()
+        {
+            return is_data_loaded;
+        }
+
+        void setDataLoaded(bool loaded)
+        {
+            is_data_loaded = loaded;
+        }
 
     private:
         DramSkiplist *mainIndex;
         DramInodePool *dramInodePool;
         PmemInodePool *pmemRecoveryArray;
+        PmemBFPool *pmemBFPool;
         //PmemSkiplist *shadowIndex;
         ValueList *valueList;
         CkptLog *ckptLog;
         RecoveryManager *recoveryManager;
         bool needToRebalance;
+        bool is_data_loaded;
         
         // 重平衡队列相关成员
         std::queue<Inode *> rebalanceQueue;

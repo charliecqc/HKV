@@ -21,10 +21,11 @@ bool PmemInodePool::init(root_obj *root) {
             return false;
         }
         void *inodePool = pmemobj_direct(root->ptr[0]);
+        void *currentPoolAddr = inodePool;
         for(int i = 0; i < numNodes; i++) {
-            Inode *inode = (Inode *) new (inodePool) Inode(i,0,0);
+            Inode *inode = (Inode *) new (currentPoolAddr) Inode(i,0,0);
             pmemInodePool.push_back(inode);
-            inodePool = static_cast<char *>(inodePool) + nodeSize;
+            currentPoolAddr = static_cast<char *>(currentPoolAddr) + nodeSize;
         }
         PmemManager::flushToNVM(0, (char *)inodePool, nodeSize * numNodes);
     }else {
