@@ -193,7 +193,7 @@ public:
     entry gps[fanout/2];
     entry sgps[fanout/2];
     std::bitset<fanout/2> sgpVisible;
-	//std::atomic<uint64_t> version{0};
+	std::atomic<uint64_t> version{0};
     
 
     Inode(uint32_t level)
@@ -212,7 +212,7 @@ public:
             sgps[i].key = std::numeric_limits<Key_t>::max();
             sgps[i].value = std::numeric_limits<Val_t>::max();
             sgpVisible.reset();
-			//version.store(0, std::memory_order_relaxed);
+			version.store(0, std::memory_order_relaxed);
         }
     }
 
@@ -453,6 +453,7 @@ public:
 
     inline void setParent(int32_t parent_id) {
         hdr.parent_id = parent_id;
+        assert(hdr.id != parent_id);
     }
 
     static bool parentCoversChild(Inode* parent, Inode* parent_next, Inode* child) {
@@ -827,13 +828,6 @@ non_simd:
     }
 };
 
-inline void write_start(std::atomic<uint64_t>& v) {
-    v.fetch_add(1, std::memory_order_acq_rel); // 奇数：进入写区间
-}
-inline void write_end(std::atomic<uint64_t>& v) {
-    v.fetch_add(1, std::memory_order_release); // 偶数：退出写区间
-}
-
 template<class Fn>
 auto read_consistent(const std::atomic<uint64_t>& v, Fn&& fn) -> decltype(fn()) {
     for (uint32_t spins = 0;; ++spins) {
@@ -874,4 +868,50 @@ inline void write_lock(std::atomic<uint64_t>& v) {
 
 inline void write_unlock(std::atomic<uint64_t>& v) {
     v.fetch_add(1, std::memory_order_release); // 偶数：退出写区间
+}
+
+template<class Fn>
+auto read_consistent_with_snap(const std::atomic<uint64_t>& v, Fn&& fn)
+    -> std::pair<decltype(fn()), uint64_t>
+{
+    for (uint32_t spins = 0;; ++spins) {
+        uint64_t a = v.load(std::memory_order_acquire);
+        if (a & 1u) {
+#if defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#endif
+            if ((spins & 0x7FFF) == 0x7FFF) std::this_thread::yield();
+            continue;
+        }
+        auto out = fn();
+        std::atomic_thread_fence(std::memory_order_acquire);
+        uint64_t b = v.load(std::memory_order_acquire);
+        if (a == b) return {out, a};
+    }
+}
+
+// 新增：验证某个快照令牌是否仍然有效
+inline bool validate_snapshot(const std::atomic<uint64_t>& v, uint64_t snap) {
+    return v.load(std::memory_order_acquire) == snap;
+}
+
+// 也可补充显式读锁/解锁（返回快照，解锁时校验仍然一致）
+inline uint64_t read_lock(const std::atomic<uint64_t>& v) {
+    for (;;) {
+        uint64_t a = v.load(std::memory_order_acquire);
+        if ((a & 1u) == 0) return a;
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#endif
+        std::this_thread::yield();
+    }
+}
+
+inline bool read_unlock(const std::atomic<uint64_t>& v, uint64_t snap) {
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return v.load(std::memory_order_acquire) == snap;
+}
+
+inline bool is_locked(const std::atomic<uint64_t>& v) {
+    return (v.load(std::memory_order_acquire) & 1u) != 0;
 }

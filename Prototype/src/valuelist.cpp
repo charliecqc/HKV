@@ -66,12 +66,25 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     std::nth_element(keys.begin(), keys.begin() + right_begin_rank, keys.end());
     Key_t pivot = keys[right_begin_rank];
 
+#if 0
     Key_t right_min_key = std::numeric_limits<Key_t>::max();
-    for (Key_t k : keys) if (k >= pivot && k < right_min_key) right_min_key = k;
+    for (Key_t k : keys) {
+        if (k >= pivot && k < right_min_key) {
+            right_min_key = k;
+        }
+    }
+#endif
+
+    Key_t right_min_key = pivot;
 
     // 确保左侧存在严格小于 right_min_key 的元素
     bool has_left = false;
-    for (Key_t k : keys) { if (k < right_min_key) { has_left = true; break; } }
+    for (Key_t k : keys) { 
+        if (k < right_min_key) { 
+            has_left = true; 
+            break; 
+        } 
+    }
     if (!has_left) {
         Key_t strict_gt = std::numeric_limits<Key_t>::max();
         for (Key_t k : keys) if (k > pivot && k < strict_gt) strict_gt = k;

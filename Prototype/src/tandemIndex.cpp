@@ -183,6 +183,96 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         }
     }
 #endif
+
+    for (;;) { // 重试环
+        int idx = -1;
+        Vnode *target_vnode = nullptr;
+        std::vector<Inode *> updates;
+        updates.reserve(MAX_LEVEL);
+
+        int current_level = mainIndex->getLevel();
+        if (current_level <= 0) return false;
+
+        Inode *header = mainIndex->getHeader(current_level - 1);
+        if (!header) return false;
+
+        // 新：lookup 时当场捕获叶子的短快照
+        InodeSnapShort snap{};
+        Inode *parent_inode =
+            mainIndex->lookupForInsertWithSnap(key, header, current_level - 1, idx, updates, snap);
+        
+        // 空结构（只 header）
+        if (parent_inode == nullptr) {
+            bool ret = insertWithNewInodes(key, value, target_vnode);
+            if (!ret) {
+                std::cerr << "Failed to insert with new inodes." << std::endl;
+                return false;
+            }
+            if (target_vnode != nullptr) {
+                ret = mainIndex->add(target_vnode);
+                if (!ret) {
+                    std::cout << "There is smaller key already inserted in the index." << std::endl;
+                }
+            }
+            return true;
+        }
+
+        // 使用短快照快速验证（优先用 ver_snap）
+        if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
+            continue; // 并发修改导致失效，整条路径重试
+        }
+        //cout << "this is target inode " << target_inode->getId() << " " << idx << " " << target_inode->hdr.last_index << " " << target_inode->getMinKey() << " " << target_inode->getMaxKey() << endl;
+
+        assert(parent_inode->hdr.level == 0); // 叶子层
+
+        const int start_vnode_id = snap.gp_value; //start vnode of the chain that contains the target vnode
+        const int current_last_idx = snap.last_index; // the last index of the target inode at the time of lookup
+
+        Vnode *start_vnode = valueList->pmemVnodePool->at(start_vnode_id);
+        if (!start_vnode) {
+            std::cerr << "Failed to get vnode (id=" << start_vnode_id << ")." << std::endl;
+            return false;
+        }
+        target_vnode = start_vnode;
+        BloomFilter *target_vnode_bloom = &valueList->bf[target_vnode->getId()];
+
+        Vnode *start_vnode_replica = new Vnode(*start_vnode); // create a replica of the target vnode for validation
+
+        // 快路径：尝试直接插入
+        if (insertInVnodeChain(target_vnode, target_vnode_bloom, key, value)) {
+            return true;
+        }
+
+        // 慢路径：节点满 -> split
+        Vnode* new_vnode = nullptr; //new_vnode and target_vnode share the contents of old target_vnode before split
+        BloomFilter* new_bloom = nullptr;
+        if (!handleNodeFullAndSplit(target_vnode, target_vnode_bloom, key, value, new_vnode, new_bloom)) {
+            std::cerr << "Failed to handle node full and split." << std::endl;
+            return false;
+        }
+
+        // 分裂后更新父节点（内部会短写锁再次核对 last_index）
+        int last_idx_mut = current_last_idx;
+        if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx)) {
+            std::cerr << "Failed to update the parent inode after split." << std::endl;
+            return false;
+        }
+        return true;
+    } // for retry
+}
+
+#if 0
+bool TandemIndex::insert(Key_t key, Val_t value)
+{
+#if 0
+    tracker_->Add(key); //TODO: sampling out of the critical section
+    if (tracker_->LastEpochHistogramValid()) {
+        SpeculationToken tok(speculation_running_); 
+        if (tok.is_leader) {
+            maybeActivateHotRegion();
+        }
+    }
+#endif
     int idx = -1;
     bool ret = false;
     Vnode *target_vnode = nullptr;
@@ -226,9 +316,9 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 #endif
 
     int current_last_idx = target_inode->hdr.last_index;
-    header_lock.unlock();
-    
     int vnode_id = target_inode->gps[idx].value;
+
+    header_lock.unlock();
     target_vnode = valueList->pmemVnodePool->at(vnode_id);
     if(target_vnode == nullptr) {
         std::cout << "Failed to get the vnode from the pmemVnodePool." << std::endl;
@@ -253,6 +343,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
     }
     return true;
 }
+#endif
 
 bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vnode)
 {
@@ -286,15 +377,18 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
     if(key < bloom->getMinKey()) {
         bloom->setMinKey(key);
     }
-    write_end(bloom->version);
+    write_unlock(bloom->version);
     target_vnode = newVnode;
     return true;    
 }
 
-bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t key, Val_t value)
+bool TandemIndex::insertInVnodeChain(Vnode* &start_vnode, BloomFilter* &start_bloom, Key_t key, Val_t value)
 {
-    int32_t current_vnode_id = vnode->getId();
-   for (;;) {
+    int32_t start_vnode_id = start_vnode->getId();
+    int32_t current_vnode_id = start_vnode_id;
+    BloomFilter *current_bloom = start_bloom;
+    Vnode *current_vnode = start_vnode;
+    for (;;) {
         // ------------ 1) lock-free forward traversal ------------
         for (;;) {
             struct Step {
@@ -302,18 +396,18 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
                 int  next_id{-1};
             };
 
-            Step s = read_consistent(bloom->version, [&]() -> Step {
+            Step s = read_consistent(current_bloom->version, [&]() -> Step {
                 Step r;
-                int nid = bloom->next_id;              // 读取右节点id
+                int nid = current_bloom->next_id;              // 读取右节点id
                 if (nid == -1) {
                     return r;
                 }
 
-                BloomFilter* nb = &valueList->bf[nid]; // 新增：右节点的版本源
-                if(!nb) return r;
+                BloomFilter* next_bloom = &valueList->bf[nid]; // 新增：右节点的版本源
+                if(!next_bloom) return r;
                 // read next's min under next's version
-                Key_t next_min = read_consistent(nb->version, [&]() {
-                    return nb->getMinKey();
+                Key_t next_min = read_consistent(next_bloom->version, [&]() {
+                    return next_bloom->getMinKey();
                 });
 
                 r.can_move = (key >= next_min);
@@ -326,7 +420,7 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
             BloomFilter* next_bloom = &valueList->bf[s.next_id];
             if (!next_bloom) break; // defensive
             __builtin_prefetch(&next_bloom->min_key, 0, 1);
-            bloom = next_bloom;
+            current_bloom = next_bloom;
             current_vnode_id = s.next_id; 
         }
 
@@ -334,19 +428,19 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
         // A concurrent split may have made our key belong to the next vnode.
         {
             // Re-check routing decision while holding this vnode's writer lock.
-            write_lock(bloom->version);
-            int nid = bloom->next_id;
+            write_lock(current_bloom->version);
+            int nid = current_bloom->next_id;
             if (nid != -1) {
-                BloomFilter* nb = &valueList->bf[nid]; // 新增：右节点的版本源
-                if (nb) {
-                    Key_t next_min = read_consistent(nb->version, [&]() {
-                        return nb->getMinKey();
+                BloomFilter* next_bloom= &valueList->bf[nid]; // 新增：右节点的版本源
+                if (next_bloom) {
+                    Key_t next_min = read_consistent(next_bloom->version, [&]() {
+                        return next_bloom->getMinKey();
                     });
 
                     if (key >= next_min) {
                         // We should move right; drop the lock and loop.
-                        write_unlock(bloom->version);
-                        bloom = nb;
+                        write_unlock(current_bloom->version);
+                        current_bloom = next_bloom;
                         current_vnode_id = nid;
                         continue; // go back to (1)
                     }
@@ -354,59 +448,89 @@ bool TandemIndex::insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t k
             }
 
             // ------------ 3) do the insert under versioned write ------------
-            vnode = valueList->pmemVnodePool->at(current_vnode_id);
-            bool ok = vnode->insert(key, value, bloom);
-            if(key < bloom->getMinKey()) {
-                bloom->setMinKey(key);
+            current_vnode = valueList->pmemVnodePool->at(current_vnode_id);
+            bool ok = current_vnode->insert(key, value, current_bloom);
+            if(!ok) {
+                start_vnode = current_vnode;
+                start_bloom = current_bloom;
+                write_unlock(current_bloom->version);
+                return ok; // vnode full, caller will do split path
             }
-            write_unlock(bloom->version);
+            if(key < current_bloom->getMinKey()) {
+                current_bloom->setMinKey(key);
+            }
+            start_vnode = current_vnode;
+            start_bloom = current_bloom;
+            write_unlock(current_bloom->version);
 
             return ok; // if false, caller will do split path
         }
     }
 }
 
-bool TandemIndex::handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom,  
-                                         Key_t key, Val_t value, Vnode* &next_node)
+bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_bloom,  
+                                         Key_t key, Val_t value, Vnode* &right_vnode, BloomFilter* &right_bloom)
 {
-    write_lock(bloom->version);
-    Vnode* nextVnode = valueList->pmemVnodePool->getNextNode();
-    if (!nextVnode) {
-        write_unlock(bloom->version);
+    write_lock(left_bloom->version);
+    right_vnode = valueList->pmemVnodePool->getNextNode();
+    if (!right_vnode) {
+        write_unlock(left_bloom->version);
         return false;
     }
 
-    valueList->split(vnode, nextVnode);
-    // 3) Decide which node should receive (key,value)
-    // Read nextVnode’s min under its own version to avoid torn reads.
-    BloomFilter* next_bloom = &valueList->bf[nextVnode->getId()];
-    Key_t next_min = read_consistent(next_bloom->version, [&](){
-        return nextVnode->getMinKey();
+    valueList->split(left_vnode, right_vnode);
+    right_bloom = &valueList->bf[right_vnode->getId()];
+
+    // 3) Decide which node should receive (key,value), Read nextVnode’s min under its own version to avoid torn reads.
+    Key_t next_right_min = read_consistent(right_bloom->version, [&](){
+        return right_bloom->getMinKey();
     });
 
     bool ok = false;
-    if (key < next_min) {
-        ok = vnode->insert(key, value, bloom);
-        if(key < bloom->getMinKey()) {
-            bloom->setMinKey(key);
+    if (key < next_right_min) {
+        ok = left_vnode->insert(key, value, left_bloom);
+
+#if 0
+        if(key < left_bloom->getMinKey()) {
+            left_bloom->setMinKey(key);
         }
-        write_unlock(bloom->version);
+#endif
+        Key_t left_min_key = left_vnode->getMinKey();
+        assert(left_min_key== left_bloom->min_key);
+        assert(key >= left_bloom->min_key);
+        write_unlock(left_bloom->version);
     } else {
         // Insert into RIGHT (new) vnode
-        BloomFilter* right_bloom = &valueList->bf[nextVnode->getId()];
+        //BloomFilter* right_bloom = &valueList->bf[right_vnode->getId()];
         write_lock(right_bloom->version);
-        write_unlock(bloom->version);
-        ok = nextVnode->insert(key, value, right_bloom);
+        write_unlock(left_bloom->version);
+        ok = right_vnode->insert(key, value, right_bloom);
+#if 0
         if(key < right_bloom->getMinKey()) {
             right_bloom->setMinKey(key);
         }
-        write_end(right_bloom->version);
-        bloom = right_bloom;
+#endif
+        Key_t right_min_key = right_vnode->getMinKey();
+        assert(right_min_key== right_bloom->min_key);
+        assert(key >= right_bloom->min_key);
+        write_unlock(right_bloom->version);
     }
     if (!ok) return false;
+    
+    Key_t left_min_key = read_consistent(left_bloom->version, [&](){
+        return left_vnode->getMinKey();
+    });
+    if(left_min_key != left_bloom->min_key) {
+        cout<< "min key mismatch after split: " << left_min_key << " " << left_bloom->min_key << endl;
+    }
 
-    // 4) Publish the new node to the caller (parent update will happen outside)
-    next_node = nextVnode;
+    Key_t right_min_key = read_consistent(right_bloom->version, [&](){
+        return right_vnode->getMinKey();
+    });
+    if(right_vnode->getMinKey() != right_bloom->min_key) {
+        cout<< "next min key mismatch after split: " << right_min_key << " " << right_bloom->min_key << endl;
+    }
+
     return true;
 }
 
@@ -416,9 +540,10 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
                                                std::vector<Inode *> &updates,
                                                int &last_idx, int &idx_to_next_level)
 {
-    std::unique_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[parent_inode->getId()]);
+    write_lock(parent_inode->version);
     
     if(parent_inode->hdr.last_index != last_idx) {
+        write_unlock(parent_inode->version);
         return true;
     }
 
@@ -452,6 +577,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
                                 parent_inode->gps[i].covered_nodes);
         }
         ckptLog->batcher().addFull(entry);
+        write_unlock(parent_inode->version);
         return true;
     }
     
@@ -467,6 +593,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
                                 parent_inode->gps[i].covered_nodes);
         }
         ckptLog->batcher().addFull(entry);
+        write_unlock(parent_inode->version);
         return true;
     } else {
         for (size_t i = 1; i < updates.size(); ++i) {
@@ -474,6 +601,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         }
         assert(parent_inode->hdr.last_index == fanout / 2 - 1);
         addToRebalanceQueue(parent_inode);
+        write_unlock(parent_inode->version);
         return true;
     }
 }

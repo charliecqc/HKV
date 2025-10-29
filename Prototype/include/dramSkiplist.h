@@ -23,6 +23,21 @@ public:
     mutable std::shared_mutex mtx; // 读多写少：读共享，写独占
 };
 
+struct InodeSnapShort {
+    int      last_index{-1};
+    int      next{-1};
+    int16_t  idx{-1};
+    Key_t    gp_key{0};
+    int      gp_value{-1};
+
+    // 命中槽位区间（用于验证 key 是否仍命中该槽）
+    Key_t    lb_key{0};
+    Key_t    ub_key{std::numeric_limits<Key_t>::max()};
+
+    // 新增：在“确定 current 的那一瞬间”捕获的版本戳
+    uint64_t ver_snap{0};
+};
+
 class DramSkiplist {
 private:
     // 全局结构版本（split / rebalance 后 bump）
@@ -104,7 +119,17 @@ public:
     bool add(Vnode *targetVnode);
     // return the index in gps of the index node that poionts to the vnode
     Inode *lookup(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx);
-    Inode *lookupForInsert(Key_t key, Inode * &current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates);
+    //Inode *lookupForInsert(Key_t key, Inode * &current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx, std::vector<Inode *> &updates);
+    Inode* lookupForInsert(Key_t key, Inode* &start, int level, int& idx, std::vector<Inode*>& updates);
+    Inode* lookupForInsertWithSnap(Key_t key, Inode* &start,
+                                   int currentHighestLevelIndex,
+                                   int &idx,
+                                   std::vector<Inode*> &updates,
+                                   InodeSnapShort &snap);
+
+    // 新：强校验，带 key，且优先用 ver_snap 快速判定
+    bool validateSnapShort(Inode* n, const InodeSnapShort& s, Key_t key) const;
+
     Inode *getHeader();
     Inode *getHeader(int level);
     void getPivotNodesForInsert(Key_t key, Inode* updates[]);
@@ -135,6 +160,8 @@ public:
     Inode* getParentInode(Inode* &child);
     void removeInodeRelation(Inode* &child);
     void acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<std::unique_lock<std::shared_mutex>>& locks);
+    void acquireWriteLocksInOrderByVersion(std::vector<Inode*>& nodes);
+    void releaseWriteLocksInOrderByVersion(std::vector<Inode*>& nodes);
     int fastRebalance(Inode* &inode, Inode* &parent_inode);
     dram_log_entry_t *create_log_entry(Inode *inode);
     bool isTail(uint32_t id) {
@@ -164,5 +191,14 @@ public:
     void ckpt_log_single_slot_delta(CkptLog *log, Inode *inode, int16_t slot);
     void ckpt_log_multi_slots_delta(CkptLog *log, Inode *inode, const std::vector<int16_t> &slots);
 #endif
+
+    // 原有接口（可能被其他地方使用），保留
+    //Inode* lookupForInsert(Key_t key, Inode* start, int level, int& idx, std::vector<Inode*>& updates);
+
+    // 新增：带短快照的查找接口
+    
+
+    // 校验短快照是否仍然匹配当前 inode 状态（返回 true 表示未被并发修改）
+    bool validateSnapShort(Inode* n, const InodeSnapShort& s) const;
 
 };
