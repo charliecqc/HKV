@@ -333,9 +333,12 @@ bool DramSkiplist::add(Vnode *targetVnode)
     Inode* updates[MAX_LEVEL];
     {
         BloomFilter *bloom = &valueList->bf[targetVnode->hdr.id];
-        std::shared_lock<std::shared_mutex> lock(bloom->vnode_mtx);
+        targetKey = read_consistent(bloom->version, [&]() {
+            return bloom->getMinKey();
+        });
+        //std::shared_lock<std::shared_mutex> lock(bloom->vnode_mtx);
         //targetKey = reinterpret_cast<Vnode *>(targetVnode)->getMinKey();
-        targetKey = bloom->getMinKey();
+        //targetKey = bloom->getMinKey();
     }
     int newlevel = generateRandomLevel();
     bool level_grew = false;          // 新增：记录是否提升层数
@@ -1032,6 +1035,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
     return ret;
 }
 
+#if 0
 int DramSkiplist::rebalanceIdx(Vnode &targetVnode, Key_t targetKey) 
 {
     // targetVnode is still locked with shared lock
@@ -1182,6 +1186,7 @@ int DramSkiplist::rebalanceIdx(Vnode &targetVnode, Key_t targetKey)
 
     return true;
 }
+#endif
 
 void DramSkiplist::setLevel(int level)
 {

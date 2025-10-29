@@ -16,17 +16,15 @@ ValueList::ValueList() {
 
 }   
 
+//This function will only be called once upon the first insert, curNode is always
+//header vnode and write lock is hold in the caller
 bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 {
-    //std::unique_lock<std::shared_mutex> lock(curNode->hdr.mtx);
-    BloomFilter *leftBloom = &bf[curNode->hdr.id];
-    write_start(leftBloom->version);
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
     unsigned long hdr_flush = PmemManager::align_uint_to_cacheline(sizeof(vnodeHeader));
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(&nextNode->hdr), hdr_flush);
     PmemManager::flushToNVM(0, reinterpret_cast<char *>(&curNode->hdr), hdr_flush);
-    write_end(leftBloom->version);
     return true;
 }
 
@@ -95,8 +93,6 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     // 构建 nextNode：写入对应槽位并置位 bitmap；curNode 仅清除位（不清空数据）
     BloomFilter *srcBloom = &bf[curNode->hdr.id];
     BloomFilter *dstBloom = &bf[nextNode->hdr.id];
-    write_start(srcBloom->version);
-    //write_start(dstBloom->version);
 
     nextNode->hdr.bitmap = 0;
     for (uint32_t mm = move_mask; mm; mm &= (mm - 1)) {
@@ -110,7 +106,6 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
 
     // 重建 Bloom（简单起见全量重建，也可按位增量更新）
     {
-        
         srcBloom->clear();
         for (uint32_t bm = curNode->hdr.bitmap; bm; bm &= (bm - 1)) {
             int i = __builtin_ctz(bm);
@@ -140,7 +135,6 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
 
     dstBloom->setNextId(nextNode->hdr.next);
     srcBloom->setNextId(nextNode->getId());
-    write_end(srcBloom->version);
 
     return true;
 }
@@ -182,26 +176,5 @@ return true;
 bool ValueList::recovery()
 {
     return true;
-}
-
-Vnode *ValueList::getNext(Vnode *curNode)
-{
-    //shared_lock<std::shared_mutex> lock(curNode->hdr.mtx);
-    BloomFilter *bloom = &bf[curNode->hdr.id];
-    std::shared_lock<std::shared_mutex> lock(bloom->vnode_mtx);
-    return pmemVnodePool->at(curNode->hdr.next);
-}
-
-int ValueList::getKeyPos(Key_t key)
-{
-    Vnode *curNode = head;
-    while(true) {
-        if(curNode->getMaxKey() < key) {
-            curNode = getNext(curNode);
-            continue;
-        }
-        break;
-    }
-    return curNode->getKeyPos(key);
 }
 

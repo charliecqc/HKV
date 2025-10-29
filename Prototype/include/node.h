@@ -30,7 +30,7 @@ public:
     alignas(64) int32_t next_id{-1};
 
     alignas(64) std::atomic<uint64_t> version{0}; // 独占 cacheline
-    alignas(64) std::shared_mutex vnode_mtx;      // 与 version 分离，避免伪共享
+    //alignas(64) std::shared_mutex vnode_mtx;      // 与 version 分离，避免伪共享
     alignas(64) Key_t min_key{std::numeric_limits<Key_t>::max()};
 public:
     // 哈希函数，返回位置
@@ -850,4 +850,28 @@ auto read_consistent(const std::atomic<uint64_t>& v, Fn&& fn) -> decltype(fn()) 
         uint64_t b = v.load(std::memory_order_acquire);
         if (a == b) return out;
     }
+}
+
+inline void write_lock(std::atomic<uint64_t>& v) {
+    uint64_t exp = v.load(std::memory_order_relaxed);
+    for (;;) {
+        // 等待到偶数（无写者）
+        while (exp & 1u) {
+#if defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#endif
+            exp = v.load(std::memory_order_acquire);
+        }
+        // 尝试偶数->奇数，占有写锁
+        if (v.compare_exchange_weak(exp, exp + 1,
+                                    std::memory_order_acq_rel,
+                                    std::memory_order_acquire)) {
+            break;
+        }
+        // 失败则 exp 已被更新，继续循环
+    }
+}
+
+inline void write_unlock(std::atomic<uint64_t>& v) {
+    v.fetch_add(1, std::memory_order_release); // 偶数：退出写区间
 }
