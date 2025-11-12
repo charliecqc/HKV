@@ -1501,7 +1501,6 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
     return ret;
 }
 #endif
-#if 0
 
 #if 0
 int DramSkiplist::rebalanceIdx(Vnode &targetVnode, Key_t targetKey) 
