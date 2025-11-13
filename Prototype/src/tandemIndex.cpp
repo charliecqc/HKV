@@ -198,8 +198,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 
         // 新：lookup 时当场捕获叶子的短快照
         InodeSnapShort snap{};
-        Inode *parent_inode =
-            mainIndex->lookupForInsertWithSnap(key, header, current_level - 1, idx, updates, snap);
+        Inode *parent_inode = mainIndex->lookupForInsertWithSnap(key, header, current_level - 1, idx, updates, snap);
         
         // 空结构（只 header）
         if (parent_inode == nullptr) {
@@ -221,7 +220,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
             continue; // 并发修改导致失效，整条路径重试
         }
-        //cout << "this is target inode " << target_inode->getId() << " " << idx << " " << target_inode->hdr.last_index << " " << target_inode->getMinKey() << " " << target_inode->getMaxKey() << endl;
+        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
 
         assert(parent_inode->hdr.level == 0); // 叶子层
 
@@ -608,6 +607,88 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
 
 Val_t TandemIndex::lookup(Key_t key)
 {
+    for(;;) {
+        int idx = -1;
+        int current_level = mainIndex->getLevel();
+        if(current_level <= 0) {
+            return -1;
+        }
+
+        Inode *header = mainIndex->getHeader(current_level - 1);
+        if(header == nullptr) {
+            return -1;
+        }
+        InodeSnapShort snap{};
+        Inode *parent_inode = mainIndex->lookup(key, header, current_level - 1, idx, snap);
+        if(parent_inode == nullptr) {
+            cout << " Failed to lookup the key in the main index." << endl;
+            return -1;
+        }
+        if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
+            continue; // 并发修改导致失效，重试
+        }
+        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
+
+        const int start_vnode_id = snap.gp_value;
+        const int current_last_idx = snap.last_index;
+
+        Vnode *start_vnode = valueList->pmemVnodePool->at(start_vnode_id);
+        BloomFilter *bloom = &valueList->bf[start_vnode->getId()];
+        if(bloom == nullptr) {
+            return -1;
+        }
+        int current_vnode_id = start_vnode_id;
+        for (;;) {
+            struct Snap {
+                Val_t out{};
+                bool can_move{false};
+                int  next_id{-1};
+            };
+
+            Snap s = read_consistent(bloom->version, [&]() -> Snap {
+                Snap res;
+
+                // (b) Decide whether we should move right
+                int next = bloom->next_id;
+                if(next == -1) {
+                    return res;
+                }
+                BloomFilter* nb = &valueList->bf[next]; // 新增：右节点的版本源
+                if(!nb) {
+                    return res;
+                }
+
+                Key_t next_min = read_consistent(nb->version, [&]() {
+                    return nb->getMinKey();
+                });
+                res.can_move = (key >= next_min);
+                res.next_id = next;
+                if(!res.can_move) {
+                // (c) Try to lookup in the current vnode
+                    Val_t tmp;
+                    Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
+                    if (vnode->lookupWithoutFilter(key, tmp, bloom)) {
+                        res.out = tmp;
+                    } else {
+                        res.out = -1;
+                    }
+                }
+                return res;
+            });
+            if(s.can_move == false) {
+                return s.out;
+            }
+
+            BloomFilter* next_bloom = &valueList->bf[s.next_id];
+            bloom = next_bloom;
+            current_vnode_id = s.next_id;
+        } 
+    }
+}
+
+#if 0
+Val_t TandemIndex::lookup(Key_t key)
+{
     int idx = -1;
 
     // 获取起始层级和header节点
@@ -625,7 +706,8 @@ Val_t TandemIndex::lookup(Key_t key)
     std::shared_lock<std::shared_mutex> header_lock(mainIndex->inode_locks[header->getId()]);
     
     // use mainIndex to lookup the key, header_lock is now locked
-    Inode *target = mainIndex->lookup(key, header, current_level - 1, header_lock, idx);
+    InodeSnapShort snap{};
+    Inode *target = mainIndex->lookup(key, header, current_level - 1, idx, snap);
     if(target == nullptr) {
         return -1;
     }
@@ -686,6 +768,7 @@ Val_t TandemIndex::lookup(Key_t key)
         current_vnode_id = s.next_id;
     }
 }
+#endif
 
 void TandemIndex::createLogFlushThread()
 {
