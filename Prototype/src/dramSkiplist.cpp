@@ -1105,13 +1105,13 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
         };
 
         auto commit_down = [&](Inode* parent, uint64_t snap_p,
-                               uint32_t child_id, Key_t lb, Key_t ub) -> bool {
+                               uint32_t child_id, Key_t lb, Key_t ub, int leaf_pos) -> bool {
             Inode* child = dramInodePool->at(child_id);
             if (!child) {
                 cout << "child is null for key: " << key << " lb: " << lb << " ub: " << ub << endl;
                 return false;
             }
-
+#if 0
             bool child_ok = read_consistent(child->version, [&]() -> bool {
                 Key_t child_min = child->getMinKey();
                 if (child_min == std::numeric_limits<Key_t>::max()) return false;
@@ -1121,8 +1121,29 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
                 cout << "child_ok failed for key: " << key << " lb: " << lb << " ub: " << ub << endl;
                 return false;
             }
+#endif
 
-            if (!validate_snapshot(parent->version, snap_p)) return false;
+            if (!validate_snapshot(parent->version, snap_p)) {
+#if 0
+                bool still_in_range = read_consistent(parent->version, [&]() -> bool {
+                    Key_t range_start = parent->gps[leaf_pos].key;
+                    Key_t range_end = leaf_pos == parent->hdr.last_index
+                                        ? std::numeric_limits<Key_t>::max()
+                                        : parent->gps[leaf_pos + 1].key;
+                    return (range_start<= key) && (key < ub);
+                });
+#endif
+                Key_t range_start = parent->gps[leaf_pos].key;
+                Key_t range_end =(leaf_pos == parent->hdr.last_index)
+                                    ? std::numeric_limits<Key_t>::max()
+                                    : parent->gps[leaf_pos + 1].key;
+                bool still_in_range = (range_start <= key) && (key < range_end);
+                if(!still_in_range) {
+                    // 父已变化且 key 不在新范围内
+                    //cout << "parent changed and key out of range for key: " << key << " lb: " << lb << " ub: " << ub << endl;
+                    return false;
+                }
+            }
 
             current = child; // 提交
             return true;
@@ -1155,6 +1176,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
                     int pos = cur->isHeader() ? 0 : cur->findKeyPos(key);
                     x.child_id = cur->gps[pos].value;
                     x.lb = cur->isHeader() ? cur->gps[0].key : cur->gps[pos].key;
+                    x.leaf_pos = pos;
                     if (pos + 1 <= cur->hdr.last_index) {
                         x.ub = cur->gps[pos + 1].key;
                     } else {
@@ -1216,7 +1238,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
         }
 
         // 下探提交（带二次验证）
-        if (!commit_down(current, snap_parent, dec.child_id, dec.lb, dec.ub)) {
+        if (!commit_down(current, snap_parent, dec.child_id, dec.lb, dec.ub, dec.leaf_pos)) {
             // 父或子失效，重试该层
             ++lvl; // no-op trick: 继续 while(true)
             //cout << "retry for key: " << key << " at level " << lvl << endl;
@@ -2425,13 +2447,13 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
         };
 
         auto commit_down = [&](Inode* parent, uint64_t snap_p,
-                               uint32_t child_id, Key_t lb, Key_t ub) -> bool {
+                               uint32_t child_id, Key_t lb, Key_t ub, int leaf_pos) -> bool {
             Inode* child = dramInodePool->at(child_id);
             if (!child) {
                 cout << "child is null for key: " << key << " lb: " << lb << " ub: " << ub << endl;
                 return false;
             }
-
+#if 0
             bool child_ok = read_consistent(child->version, [&]() -> bool {
                 Key_t child_min = child->getMinKey();
                 if (child_min == std::numeric_limits<Key_t>::max()) return false;
@@ -2441,8 +2463,28 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                 cout << "child_ok failed for key: " << key << " lb: " << lb << " ub: " << ub << endl;
                 return false;
             }
-
-            if (!validate_snapshot(parent->version, snap_p)) return false;
+#endif
+            if (!validate_snapshot(parent->version, snap_p)) {
+#if 0
+                bool still_in_range = read_consistent(parent->version, [&]() -> bool {
+                    Key_t range_start = parent->gps[leaf_pos].key;
+                    Key_t range_end = leaf_pos == parent->hdr.last_index
+                                        ? std::numeric_limits<Key_t>::max()
+                                        : parent->gps[leaf_pos + 1].key;
+                    return (range_start<= key) && (key < ub);
+                });
+#endif
+                Key_t range_start = parent->gps[leaf_pos].key;
+                Key_t range_end =(leaf_pos == parent->hdr.last_index)
+                                    ? std::numeric_limits<Key_t>::max()
+                                    : parent->gps[leaf_pos + 1].key;
+                bool still_in_range = (range_start <= key) && (key < range_end);
+                if(!still_in_range) {
+                    // 父已变化且 key 不在新范围内
+                    //cout << "parent changed and key out of range for key: " << key << " lb: " << lb << " ub: " << ub << endl;
+                    return false;
+                }
+            }
 
             current = child; // 提交
             return true;
@@ -2474,6 +2516,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                     }
                     int pos = cur->isHeader() ? 0 : cur->findKeyPos(key);
                     x.child_id = cur->gps[pos].value;
+                    x.leaf_pos = pos;
                     x.lb = cur->isHeader() ? cur->gps[0].key : cur->gps[pos].key;
                     if (pos + 1 <= cur->hdr.last_index) {
                         x.ub = cur->gps[pos + 1].key;
@@ -2539,7 +2582,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
         }
 
         // 下探提交（带二次验证）
-        if (!commit_down(current, snap_parent, dec.child_id, dec.lb, dec.ub)) {
+        if (!commit_down(current, snap_parent, dec.child_id, dec.lb, dec.ub, dec.leaf_pos)) {
             // 父或子失效，重试该层
             updates.pop_back();
             ++lvl; // no-op trick: 继续 while(true)

@@ -636,11 +636,6 @@ void CkptLog::enqBatch(const std::vector<dram_log_entry_t*>& entries) {
         auto* out = reinterpret_cast<nvm_log_entry_t*>(
             reinterpret_cast<unsigned char*>(hdr) + sizeof(log_entry_hdr));
         for (int k = 0; k < entries[i]->hdr.count; ++k) {
-            if(entries[i]->hdr.id == 40 && entries[i]->hdr.next == 39 && entries[i]->hdr.parent_id == -1 && entries[i]->hdr.last_index == 0 && entries[i]->hdr.count == 1 && entries[i]->key[0] == 0 && entries[i]->value[0] == 1 && entries[i]->covered_nodes[0] == 1) {
-                cout << "enqBatch: id=" << entries[i]->hdr.id << ", last_index=" << entries[i]->hdr.last_index
-                     << ", next=" << entries[i]->hdr.next << ", level=" << entries[i]->hdr.level
-                     << ", parent_id=" << entries[i]->hdr.parent_id << ", count=" << entries[i]->hdr.count << endl;
-            }
             out[k].gp_idx        = entries[i]->gp_idx[k];
             out[k].key           = entries[i]->key[k];
             out[k].value         = entries[i]->value[k];
