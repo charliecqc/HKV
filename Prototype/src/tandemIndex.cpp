@@ -624,16 +624,17 @@ Val_t TandemIndex::lookup(Key_t key)
             cout << " Failed to lookup the key in the main index." << endl;
             return -1;
         }
+
         if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
+            cout << " Snap validation failed during lookup for key: " << key << endl;
             continue; // 并发修改导致失效，重试
         }
-        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
 
+        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
         const int start_vnode_id = snap.gp_value;
         const int current_last_idx = snap.last_index;
 
-        Vnode *start_vnode = valueList->pmemVnodePool->at(start_vnode_id);
-        BloomFilter *bloom = &valueList->bf[start_vnode->getId()];
+        BloomFilter *bloom = &valueList->bf[start_vnode_id];
         if(bloom == nullptr) {
             return -1;
         }

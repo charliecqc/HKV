@@ -1084,9 +1084,19 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
             uint32_t observed_next{std::numeric_limits<uint32_t>::max()};
             uint64_t snap2{0};
             std::tie(observed_next, snap2) =
-                read_consistent_with_snap(parent->version, [&]() { return parent->hdr.next; });
-            if (!validate_snapshot(parent->version, snap2)) return false;
-            if (observed_next != expected_next_id) return false;
+                read_consistent_with_snap(parent->version, [&]() { 
+                    return parent->hdr.next; 
+                });
+#if 0
+            if (!validate_snapshot(parent->version, snap2)) {
+                cout << "parent changed before commit right for key: " << key << endl;
+                return false;
+            }
+#endif
+            if (observed_next != expected_next_id) {
+                cout << "parent next changed before commit right for key: " << key << endl;
+                return false;
+            }
 
             // 2) 在 next 的稳定快照下确认仍可右移
             Inode* nxt = dramInodePool->at(observed_next);
@@ -1095,11 +1105,17 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
             Key_t next_min{std::numeric_limits<Key_t>::max()};
             std::tie(next_min, snap_next) =
                 read_consistent_with_snap(nxt->version, [&]() { return nxt->getMinKey(); });
-            if (next_min == std::numeric_limits<Key_t>::max() || key < next_min) return false;
-
+            if (next_min == std::numeric_limits<Key_t>::max() || key < next_min) {
+                cout << "cannot move right anymore for key: " << key << endl;
+                return false;
+            }
+#if 0
             // 3) 提交前最后一次验证父快照仍有效
-            if (!validate_snapshot(parent->version, snap_p)) return false;
-
+            if (!validate_snapshot(parent->version, snap_p)) {
+                cout << "parent changed before final commit right for key: " << key << endl;
+                return false;
+            }
+#endif
             current = nxt; // 提交
             return true;
         };
@@ -2427,8 +2443,16 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
             uint64_t snap2{0};
             std::tie(observed_next, snap2) =
                 read_consistent_with_snap(parent->version, [&]() { return parent->hdr.next; });
-            if (!validate_snapshot(parent->version, snap2)) return false;
-            if (observed_next != expected_next_id) return false;
+#if 0
+            if (!validate_snapshot(parent->version, snap2)) {
+                cout << "validate snapshot for key: " << key << " failedi " <<endl;
+                return false;
+            }
+#endif
+            if (observed_next != expected_next_id) {
+                cout << "observe_next != expected_next_id" << endl;
+                return false;
+            }
 
             // 2) 在 next 的稳定快照下确认仍可右移
             Inode* nxt = dramInodePool->at(observed_next);
@@ -2440,8 +2464,14 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
             if (next_min == std::numeric_limits<Key_t>::max() || key < next_min) return false;
 
             // 3) 提交前最后一次验证父快照仍有效
-            if (!validate_snapshot(parent->version, snap_p)) return false;
-
+#if 0
+            if (!validate_snapshot(parent->version, snap_p)) {
+                if(parent->version & 1u) {
+                    cout << " final validate failed for key: " << key << endl; 
+                    return false;
+                }
+            }
+#endif
             current = nxt; // 提交
             return true;
         };
