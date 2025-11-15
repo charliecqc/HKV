@@ -648,7 +648,6 @@ Val_t TandemIndex::lookup(Key_t key)
 
             Snap s = read_consistent(bloom->version, [&]() -> Snap {
                 Snap res;
-
                 // (b) Decide whether we should move right
                 int next = bloom->next_id;
                 if(next == -1) {
