@@ -1068,8 +1068,6 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
             bool move_right{false};
             uint32_t next_id{std::numeric_limits<uint32_t>::max()};
             uint32_t child_id{std::numeric_limits<uint32_t>::max()};
-            Key_t lb{std::numeric_limits<Key_t>::min()};
-            Key_t ub{std::numeric_limits<Key_t>::max()};
             int leaf_pos{-1};
             bool ok{false};
             int64_t snap_version{0};
@@ -1087,12 +1085,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
                 read_consistent_with_snap(parent->version, [&]() { 
                     return parent->hdr.next; 
                 });
-#if 0
-            if (!validate_snapshot(parent->version, snap2)) {
-                cout << "parent changed before commit right for key: " << key << endl;
-                return false;
-            }
-#endif
+
             if (observed_next != expected_next_id) {
                 cout << "parent next changed before commit right for key: " << key << endl;
                 return false;
@@ -1109,13 +1102,6 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
                 cout << "cannot move right anymore for key: " << key << endl;
                 return false;
             }
-#if 0
-            // 3) 提交前最后一次验证父快照仍有效
-            if (!validate_snapshot(parent->version, snap_p)) {
-                cout << "parent changed before final commit right for key: " << key << endl;
-                return false;
-            }
-#endif
             current = nxt; // 提交
             return true;
         };
@@ -1170,19 +1156,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
                     }
                     int pos = cur->isHeader() ? 0 : cur->findKeyPos(key);
                     x.child_id = cur->gps[pos].value;
-                    x.lb = cur->isHeader() ? cur->gps[0].key : cur->gps[pos].key;
                     x.leaf_pos = pos;
-                    if (pos + 1 <= cur->hdr.last_index) {
-                        x.ub = cur->gps[pos + 1].key;
-                    } else {
-                        uint32_t nid2 = cur->hdr.next;
-                        if (!isTail(nid2)) {
-                            Inode* nxt2 = dramInodePool->at(nid2);
-                            if (nxt2) {
-                                x.ub = read_consistent(nxt2->version, [&]() { return nxt2->getMinKey(); });
-                            }
-                        }
-                    }
                     x.ok = true;
                     return x;
                 });
@@ -2405,8 +2379,6 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
             bool move_right{false};
             uint32_t next_id{std::numeric_limits<uint32_t>::max()};
             uint32_t child_id{std::numeric_limits<uint32_t>::max()};
-            Key_t lb{std::numeric_limits<Key_t>::min()};
-            Key_t ub{std::numeric_limits<Key_t>::max()};
             int leaf_pos{-1};
             bool ok{false};
             int64_t snap_version{0};
@@ -2419,8 +2391,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
         auto commit_right = [&](Inode* parent, uint64_t snap_p, uint32_t expected_next_id) -> bool {
             // 1) 父下一指针必须在一个稳定快照下等于期望
             uint32_t observed_next{std::numeric_limits<uint32_t>::max()};
-            uint64_t snap2{0};
-            std::tie(observed_next, snap2) =
+            std::tie(observed_next, std::ignore) =
                 read_consistent_with_snap(parent->version, [&]() { return parent->hdr.next; });
 
             if (observed_next != expected_next_id) {
@@ -2431,22 +2402,12 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
             // 2) 在 next 的稳定快照下确认仍可右移
             Inode* nxt = dramInodePool->at(observed_next);
             if (!nxt) return false;
-            uint64_t snap_next{0};
             Key_t next_min{std::numeric_limits<Key_t>::max()};
-            std::tie(next_min, snap_next) =
+            std::tie(next_min, std::ignore) =
                 read_consistent_with_snap(nxt->version, [&]() { return nxt->getMinKey(); });
             if (next_min == std::numeric_limits<Key_t>::max() || key < next_min) return false;
 
-            // 3) 提交前最后一次验证父快照仍有效
-#if 0
-            if (!validate_snapshot(parent->version, snap_p)) {
-                if(parent->version & 1u) {
-                    cout << " final validate failed for key: " << key << endl; 
-                    return false;
-                }
-            }
-#endif
-            current = nxt; // 提交
+            current = nxt; //commit
             return true;
         };
 
@@ -2500,18 +2461,6 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                     int pos = cur->isHeader() ? 0 : cur->findKeyPos(key);
                     x.child_id = cur->gps[pos].value;
                     x.leaf_pos = pos;
-                    x.lb = cur->isHeader() ? cur->gps[0].key : cur->gps[pos].key;
-                    if (pos + 1 <= cur->hdr.last_index) {
-                        x.ub = cur->gps[pos + 1].key;
-                    } else {
-                        uint32_t nid2 = cur->hdr.next;
-                        if (!isTail(nid2)) {
-                            Inode* nxt2 = dramInodePool->at(nid2);
-                            if (nxt2) {
-                                x.ub = read_consistent(nxt2->version, [&]() { return nxt2->getMinKey(); });
-                            }
-                        }
-                    }
                     x.ok = true;
                     return x;
                 });
@@ -2522,7 +2471,10 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                 return decide(current);
             });
             if (!dec.ok) continue;
-            if (dec.snap_version != snap_parent) continue;
+            if (dec.snap_version != snap_parent) {
+                cout << "snap_version != snap_parent for key: " << key << endl;
+                continue;
+            }
 
             if (dec.move_right) {
                 if (!commit_right(current, snap_parent, dec.next_id)) {

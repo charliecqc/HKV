@@ -146,12 +146,12 @@ public:
 
 class header {
 public:
-    int32_t id;
-    int16_t level;
-    int32_t next;
-    int16_t last_index;
-    int16_t last_sgp; 
-    int32_t parent_id;              // 新增
+    int32_t id; //4B
+    int32_t next;//4B
+    int16_t level;//2B
+    int16_t last_index;//2B
+    int16_t last_sgp; //2B
+    int32_t parent_id;//4B
 public:
     header() : id(0), level(0), next(0), last_index(-1), last_sgp(-1), parent_id(-1) {}
     friend class Inode;
