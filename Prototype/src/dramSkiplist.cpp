@@ -2391,8 +2391,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
         auto commit_right = [&](Inode* parent, uint64_t snap_p, uint32_t expected_next_id) -> bool {
             // 1) 父下一指针必须在一个稳定快照下等于期望
             uint32_t observed_next{std::numeric_limits<uint32_t>::max()};
-            std::tie(observed_next, std::ignore) =
-                read_consistent_with_snap(parent->version, [&]() { return parent->hdr.next; });
+            observed_next = read_consistent(parent->version, [&]() { return parent->hdr.next; });
 
             if (observed_next != expected_next_id) {
                 cout << "observe_next != expected_next_id" << endl;
@@ -2403,8 +2402,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
             Inode* nxt = dramInodePool->at(observed_next);
             if (!nxt) return false;
             Key_t next_min{std::numeric_limits<Key_t>::max()};
-            std::tie(next_min, std::ignore) =
-                read_consistent_with_snap(nxt->version, [&]() { return nxt->getMinKey(); });
+            next_min = read_consistent(nxt->version, [&]() { return nxt->getMinKey(); });
             if (next_min == std::numeric_limits<Key_t>::max() || key < next_min) return false;
 
             current = nxt; //commit
@@ -2542,17 +2540,46 @@ bool DramSkiplist::validateSnapShort(Inode* n, const InodeSnapShort& s, Key_t ke
 {
     if (!n) return false;
 
-    // 1) 首先用版本戳做快速、强一致校验：不变则直接通过
+    // 1.verify snapshot token first (fast path)
     if (s.ver_snap != 0 && validate_snapshot(n->version, s.ver_snap)) {
-        // 可选：最小代价的健全性检查（idx 合法）
-        return (s.idx >= 0 && s.idx <= s.last_index);
+        bool ret = (s.idx >= 0 && s.idx <= s.last_index);
+        if (!ret) {
+            cout << "validateSnapShort: invalid idx " << s.idx << " for last_index " << s.last_index << endl;
+        }
+        return ret;
     }
 
     // 2) 若版本戳已失效，退化为字段/区间的严格比对（较慢，但安全）
     return read_consistent(n->version, [&]() -> bool {
-        if (n->hdr.last_index != s.last_index) return false;
-        if (n->hdr.next       != s.next)       return false;
-        if (s.idx < 0 || s.idx > n->hdr.last_index) return false;
+        Key_t cur_lb = n->gps[0].key;
+        Key_t cur_ub = std::numeric_limits<Key_t>::max();
+        int next_id = n->hdr.next;
+        Inode *next_inode = dramInodePool->at(next_id);
+        if(!next_inode->isTail()) {
+            cur_ub = read_consistent(next_inode->version, [&]() -> Key_t {
+                return next_inode->getMinKey();
+            });
+        }
+        if(key < cur_lb || key >= cur_ub) {
+            cout << "validateSnapShort: key " << key << " out of bounds [" << cur_lb << ", " << cur_ub << ")" << endl;
+            return false;
+        }
+
+        return true;
+#if 0
+        if (n->hdr.last_index != s.last_index) {
+            cout << "validateSnapShort: last_index mismatch " << n->hdr.last_index << " vs " << s.last_index << endl;
+            return false;
+        }
+        if (n->hdr.next != s.next){       
+            cout << "validateSnapShort: next mismatch " << n->hdr.next << " vs " << s.next << endl;
+            return false;
+        }
+        if (s.idx < 0 || s.idx > n->hdr.last_index) {
+            cout << "validateSnapShort: idx out of bounds " << s.idx << " for last_index " << s.last_index << endl;
+            return false;
+        }
+
 
         // 当前边界
         Key_t cur_lb = n->gps[s.idx].key;
@@ -2561,14 +2588,30 @@ bool DramSkiplist::validateSnapShort(Inode* n, const InodeSnapShort& s, Key_t ke
                        : std::numeric_limits<Key_t>::max();
 
         // 边界与快照一致，且 key 仍命中该槽位
-        if (cur_lb != s.lb_key) return false;
-        if ((s.idx < s.last_index) && (cur_ub != s.ub_key)) return false;
-        if (!(key >= cur_lb && key < cur_ub)) return false;
+        if (cur_lb != s.lb_key) {
+            cout << "validateSnapShort: lb_key mismatch " << cur_lb << " vs " << s.lb_key << endl;
+            return false;
+        }
+        if ((s.idx < s.last_index) && (cur_ub != s.ub_key)) {
+            cout << "validateSnapShort: ub_key mismatch " << cur_ub << " vs " << s.ub_key << endl;
+            return false;
+        }
+        if (!(key >= cur_lb && key < cur_ub)) {
+            cout << "validateSnapShort: key " << key << " out of bounds [" << cur_lb << ", " << cur_ub << ")" << endl;
+            return false;
+        }
 
         // 槽位内容一致（尤其是 value=vnode id）
-        if (n->gps[s.idx].key   != s.gp_key)   return false;
-        if (n->gps[s.idx].value != s.gp_value) return false;
+        if (n->gps[s.idx].key   != s.gp_key){   
+            cout << "validateSnapShort: gp_key mismatch " << n->gps[s.idx].key << " vs " << s.gp_key << endl;
+            return false;
+        }
+        if (n->gps[s.idx].value != s.gp_value){ 
+            cout << "validateSnapShort: gp_value mismatch " << n->gps[s.idx].value << " vs " << s.gp_value << endl;
+            return false;
+        }
 
         return true;
+#endif
     });
 }

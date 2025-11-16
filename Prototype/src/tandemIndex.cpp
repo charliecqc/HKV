@@ -218,6 +218,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 
         // 使用短快照快速验证（优先用 ver_snap）
         if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
+            //cout << "SnapShort validation failed for key: " << key << endl;
             continue; // 并发修改导致失效，整条路径重试
         }
         //mainIndex->populate_cache_shards(key, parent_inode, current_level);
@@ -235,7 +236,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         target_vnode = start_vnode;
         BloomFilter *target_vnode_bloom = &valueList->bf[target_vnode->getId()];
 
-        Vnode *start_vnode_replica = new Vnode(*start_vnode); // create a replica of the target vnode for validation
+        //Vnode *start_vnode_replica = new Vnode(*start_vnode); // create a replica of the target vnode for validation
 
         // 快路径：尝试直接插入
         if (insertInVnodeChain(target_vnode, target_vnode_bloom, key, value)) {
@@ -626,7 +627,6 @@ Val_t TandemIndex::lookup(Key_t key)
         }
 
         if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
-            cout << " Snap validation failed during lookup for key: " << key << endl;
             continue; // 并发修改导致失效，重试
         }
 
