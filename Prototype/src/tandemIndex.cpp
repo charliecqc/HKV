@@ -183,7 +183,6 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         }
     }
 #endif
-
     for (;;) { // 重试环
         int idx = -1;
         Vnode *target_vnode = nullptr;
@@ -930,10 +929,89 @@ bool TandemIndex::getFromRebalanceQueue(Inode* &inode)
     return true;
 }
 
+bool TandemIndex::update(Key_t key, Val_t value)
+{
+    for (;;) { // 重试环
+        int idx = -1;
+        Vnode *target_vnode = nullptr;
+        std::vector<Inode *> updates;
+        updates.reserve(MAX_LEVEL);
 
+        int current_level = mainIndex->getLevel();
+        if (current_level <= 0) return false;
+
+        Inode *header = mainIndex->getHeader(current_level - 1);
+        if (!header) return false;
+
+        // 新：lookup 时当场捕获叶子的短快照
+        InodeSnapShort snap{};
+        Inode *parent_inode = mainIndex->lookupForInsertWithSnap(key, header, current_level - 1, idx, updates, snap);
+        
+        // 空结构（只 header）
+        if (parent_inode == nullptr) {
+            bool ret = insertWithNewInodes(key, value, target_vnode);
+            if (!ret) {
+                std::cerr << "Failed to insert with new inodes." << std::endl;
+                return false;
+            }
+            if (target_vnode != nullptr) {
+                ret = mainIndex->add(target_vnode);
+                if (!ret) {
+                    std::cout << "There is smaller key already inserted in the index." << std::endl;
+                }
+            }
+            return true;
+        }
+
+        // 使用短快照快速验证（优先用 ver_snap）
+        if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
+            //cout << "SnapShort validation failed for key: " << key << endl;
+            continue; // 并发修改导致失效，整条路径重试
+        }
+        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
+
+        assert(parent_inode->hdr.level == 0); // 叶子层
+
+        const int start_vnode_id = snap.gp_value; //start vnode of the chain that contains the target vnode
+        const int current_last_idx = snap.last_index; // the last index of the target inode at the time of lookup
+
+        Vnode *start_vnode = valueList->pmemVnodePool->at(start_vnode_id);
+        if (!start_vnode) {
+            std::cerr << "Failed to get vnode (id=" << start_vnode_id << ")." << std::endl;
+            return false;
+        }
+        target_vnode = start_vnode;
+        BloomFilter *target_vnode_bloom = &valueList->bf[target_vnode->getId()];
+
+        //Vnode *start_vnode_replica = new Vnode(*start_vnode); // create a replica of the target vnode for validation
+
+        // 快路径：尝试直接插入
+        if (insertInVnodeChain(target_vnode, target_vnode_bloom, key, value)) {
+            return true;
+        }
+
+        // 慢路径：节点满 -> split
+        Vnode* new_vnode = nullptr; //new_vnode and target_vnode share the contents of old target_vnode before split
+        BloomFilter* new_bloom = nullptr;
+        if (!handleNodeFullAndSplit(target_vnode, target_vnode_bloom, key, value, new_vnode, new_bloom)) {
+            std::cerr << "Failed to handle node full and split." << std::endl;
+            return false;
+        }
+
+        // 分裂后更新父节点（内部会短写锁再次核对 last_index）
+        int last_idx_mut = current_last_idx;
+        if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx)) {
+            std::cerr << "Failed to update the parent inode after split." << std::endl;
+            return false;
+        }
+        return true;
+    } // for retry
+}
+
+
+#if 0
 void TandemIndex::update(Key_t key, Val_t value)
 {
-#if 0
     int idx = -1;
     Key_t targetKey;
     Vnode *targetVnode = nullptr; // new vnode to be inserted
@@ -1019,12 +1097,108 @@ void TandemIndex::update(Key_t key, Val_t value)
         }
     } 
     // 重平衡现在通过队列异步处理
+    
+}
 #endif
+
+bool TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &result)
+{
+    for(;;) {
+        int idx = -1;
+        int current_level = mainIndex->getLevel();
+        if(current_level <= 0) {
+            return -1;
+        }
+
+        Inode *header = mainIndex->getHeader(current_level - 1);
+        if(header == nullptr) {
+            return -1;
+        }
+        InodeSnapShort snap{};
+        Inode *parent_inode = mainIndex->lookup(key, header, current_level - 1, idx, snap);
+        if(parent_inode == nullptr) {
+            cout << " Failed to lookup the key in the main index." << endl;
+            return -1;
+        }
+
+        if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
+            continue; // 并发修改导致失效，重试
+        }
+
+        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
+        const int start_vnode_id = snap.gp_value;
+        const int current_last_idx = snap.last_index;
+
+        BloomFilter *bloom = &valueList->bf[start_vnode_id];
+        if(bloom == nullptr) {
+            return -1;
+        }
+        int current_vnode_id = start_vnode_id;
+        int remaining_range = range;
+        for (;;) {
+            struct Snap {
+                std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> out;
+                bool can_move{false};
+                int  next_id{-1};
+            };
+
+            Snap s = read_consistent(bloom->version, [&]() -> Snap {
+                Snap res;
+                // (b) Decide whether we should move right
+                int next = bloom->next_id;
+                if(next == -1) {
+                    return res;
+                }
+                BloomFilter* nb = &valueList->bf[next]; // 新增：右节点的版本源
+                if(!nb) {
+                    return res;
+                }
+
+                Key_t next_min = read_consistent(nb->version, [&]() {
+                    return nb->getMinKey();
+                });
+                res.can_move = (key >= next_min);
+                res.next_id = next;
+                if(!res.can_move) {
+                // (c) Try to lookup in the current vnode
+                    Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
+                    if (vnode->scan(key, remaining_range, res.out)) {
+                        //do nothing
+                    }else {
+                        res.out.push(-1);
+                    }
+                }
+                return res;
+            });
+            mergeScanResults(s.out, result);
+            if(remaining_range <= 0 || s.can_move == false) {
+                return true;
+            }
+
+            BloomFilter* next_bloom = &valueList->bf[s.next_id];
+            bloom = next_bloom;
+            current_vnode_id = s.next_id;
+        } 
+    }
 }
 
+void TandemIndex::mergeScanResults(std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &src,
+                                 std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &dest)
+{
+    while(!src.empty()) {
+        Key_t key = src.top();
+        src.pop();
+        if(key == -1) {
+            continue;
+        }
+        dest.push(key);
+    }
+}
+
+#if 0
 void TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &result)
 {
-#if 0
+    
     int idx = -1;
     Inode *inode = mainIndex->lookup(key, idx);
     Vnode *vnode = nullptr;
@@ -1051,8 +1225,8 @@ void TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
             return;
         }
     }
-#endif
 }
+#endif
 
 struct AnchorParams {
   double inserts_per_anchor = 64.0; // how many future inserts justify one SGP
