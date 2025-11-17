@@ -2423,7 +2423,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                 bool still_in_range = (range_start <= key) && (key < range_end);
                 if(!still_in_range) {
                     // 父已变化且 key 不在新范围内
-                    cout << "parent changed and key out of range for key: " << key << " range_start :" << range_start << " range_end: "<< range_end << endl;
+                    //cout << "parent changed and key out of range for key: " << key << " range_start :" << range_start << " range_end: "<< range_end << endl;
                     return false;
                 }
             }
@@ -2561,7 +2561,7 @@ bool DramSkiplist::validateSnapShort(Inode* n, const InodeSnapShort& s, Key_t ke
             });
         }
         if(key < cur_lb || key >= cur_ub) {
-            cout << "validateSnapShort: key " << key << " out of bounds [" << cur_lb << ", " << cur_ub << ")" << endl;
+            //cout << "validateSnapShort: key " << key << " out of bounds [" << cur_lb << ", " << cur_ub << ")" << endl;
             return false;
         }
 

@@ -146,12 +146,13 @@ public:
 
 class header {
 public:
-    int32_t id; //4B
     int32_t next;//4B
+    int32_t id; //4B
+    int32_t parent_id;//4B
     int16_t level;//2B
     int16_t last_index;//2B
     int16_t last_sgp; //2B
-    int32_t parent_id;//4B
+    
 public:
     header() : id(0), level(0), next(0), last_index(-1), last_sgp(-1), parent_id(-1) {}
     friend class Inode;
@@ -300,15 +301,29 @@ public:
 
     int findInsertKeyPos(Key_t key)
     {
-        //handle the boundary cases
-        if (hdr.last_index < 0) return 0;
-        if (key < gps[0].key) return 0;
-        if (key >= gps[hdr.last_index].key) return hdr.last_index + 1;
-        
-        // binary search for the position
-        int left = 0, right = hdr.last_index;
+        // 约定：返回 upper_bound(key)，即第一个 > key 的位置
+        const int li = hdr.last_index;
+        if (li < 0) return 0;
+
+        // 缓存首/末位，避免重复访问
+        const Key_t first_key = gps[0].key;
+        if (key < first_key) return 0;
+
+        const Key_t tail_key = gps[li].key;
+        if (key >= tail_key) return li + 1;
+
+        // 小 n 线性：找第一个 > key 的位置
+        if (li < 6) {
+            for (int i = 0; i <= li; ++i) {
+                if (key < gps[i].key) return i;
+            }
+            return li + 1; // 理论上不会走到这里（已由边界处理）
+        }
+
+        // 大 n 二分：upper_bound(key)
+        int left = 0, right = li;
         while (left < right) {
-            int mid = left + (right - left) / 2;
+            int mid = left + ((right - left) >> 1);
             if (gps[mid].key <= key) {
                 left = mid + 1;
             } else {
@@ -320,27 +335,38 @@ public:
 
     int findKeyPos(Key_t key)
     {
-        // empty inode
-        if (hdr.last_index < 0) return 0;
-        
-        // handle the boundary cases
-        if (key < gps[0].key) return 0;
-        if (key >= gps[hdr.last_index].key) return hdr.last_index;
-        
-        // binary search for the position
-        int left = 0, right = hdr.last_index;
-        int result = 0;
-        
+        // 约定：返回最大 i 使得 gps[i].key <= key
+        const int li = hdr.last_index;
+        if (li <= 0) return 0;
+
+        const Key_t first_key = gps[0].key;
+        if (key < first_key) return 0;
+
+        const Key_t tail_key = gps[li].key;
+        if (key >= tail_key) return li;
+
+        // 小 n 线性：向前推进直到第一个 > key，返回其前一个
+        if (li < 6) {
+            int pos = 0;
+            for (int i = 1; i <= li; ++i) {
+                if (gps[i].key <= key) pos = i;
+                else break;
+            }
+            return pos;
+        }
+
+        // 大 n 二分：upper_bound(key) - 1
+        int left = 0, right = li, result = 0;
         while (left <= right) {
-            int mid = left + (right - left) / 2;
+            int mid = left + ((right - left) >> 1);
             if (gps[mid].key <= key) {
-                result = mid;  // record the last position where gps[mid].key <= key
+                result = mid;
                 left = mid + 1;
             } else {
                 right = mid - 1;
             }
         }
-        return result; 
+        return result;
     }
 
     bool shift(int oldIdx) { // shift data from oldIdx to newIdx
@@ -571,10 +597,11 @@ public:
 
 class vnodeHeader {
 public:
-    uint32_t id; //4 bytes
-    int next; //4 bytes 
-    // used to keep track of the keys are valid or not in the vnode
     uint32_t bitmap; // 4 bytes
+    int next; //4 bytes 
+    uint32_t id; //4 bytes
+    // used to keep track of the keys are valid or not in the vnode
+    
     //std::shared_mutex mtx;
     vnodeHeader() {
         id = 0;
