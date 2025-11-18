@@ -471,13 +471,19 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
                                          Key_t key, Val_t value, Vnode* &right_vnode, BloomFilter* &right_bloom)
 {
     write_lock(left_bloom->version);
+#if 0
     right_vnode = valueList->pmemVnodePool->getNextNode();
     if (!right_vnode) {
         write_unlock(left_bloom->version);
         return false;
     }
-
+#endif
     valueList->split(left_vnode, right_vnode);
+    if(right_vnode == nullptr) { // this is the case that all the keys in left vnode are the same. we don't split but invalid all the other keys except one key.
+        bool ok = left_vnode->insert(key, value, left_bloom);
+        write_unlock(left_bloom->version);
+        return ok;
+    }
     right_bloom = &valueList->bf[right_vnode->getId()];
 
     // 3) Decide which node should receive (key,value), Read nextVnode’s min under its own version to avoid torn reads.
@@ -493,14 +499,14 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
         if(key < left_bloom->getMinKey()) {
             left_bloom->setMinKey(key);
         }
-#endif
+        
         Key_t left_min_key = left_vnode->getMinKey();
         assert(left_min_key== left_bloom->min_key);
         assert(key >= left_bloom->min_key);
+#endif
         write_unlock(left_bloom->version);
     } else {
         // Insert into RIGHT (new) vnode
-        //BloomFilter* right_bloom = &valueList->bf[right_vnode->getId()];
         write_lock(right_bloom->version);
         write_unlock(left_bloom->version);
         ok = right_vnode->insert(key, value, right_bloom);
@@ -508,14 +514,16 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
         if(key < right_bloom->getMinKey()) {
             right_bloom->setMinKey(key);
         }
-#endif
+        
         Key_t right_min_key = right_vnode->getMinKey();
         assert(right_min_key== right_bloom->min_key);
         assert(key >= right_bloom->min_key);
+#endif
         write_unlock(right_bloom->version);
     }
     if (!ok) return false;
-    
+   
+#if 0
     Key_t left_min_key = read_consistent(left_bloom->version, [&](){
         return left_vnode->getMinKey();
     });
@@ -529,7 +537,7 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
     if(right_vnode->getMinKey() != right_bloom->min_key) {
         cout<< "next min key mismatch after split: " << right_min_key << " " << right_bloom->min_key << endl;
     }
-
+#endif
     return true;
 }
 
@@ -997,6 +1005,9 @@ bool TandemIndex::update(Key_t key, Val_t value)
             std::cerr << "Failed to handle node full and split." << std::endl;
             return false;
         }
+        if(new_vnode == nullptr) {// no split happened, all keys are the same.
+            return true;
+        }
 
         // 分裂后更新父节点（内部会短写锁再次核对 last_index）
         int last_idx_mut = current_last_idx;
@@ -1170,7 +1181,7 @@ bool TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
                 }
                 return res;
             });
-            mergeScanResults(s.out, result);
+            mergeScanResultsPQ(s.out, result);
             if(remaining_range <= 0 || s.can_move == false) {
                 return true;
             }
@@ -1182,7 +1193,126 @@ bool TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
     }
 }
 
-void TandemIndex::mergeScanResults(std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &src,
+bool TandemIndex::scan(Key_t key, size_t range,
+                         std::vector<Key_t> &result)
+{
+    for(;;) {
+        int idx = -1;
+        int current_level = mainIndex->getLevel();
+        if(current_level <= 0) {
+            return -1;
+        }
+
+        Inode *header = mainIndex->getHeader(current_level - 1);
+        if(header == nullptr) {
+            return -1;
+        }
+        InodeSnapShort snap{};
+        Inode *parent_inode = mainIndex->lookup(key, header, current_level - 1, idx, snap);
+        if(parent_inode == nullptr) {
+            cout << " Failed to lookup the key in the main index." << endl;
+            return -1;
+        }
+
+        if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
+            continue; // 并发修改导致失效，重试
+        }
+
+        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
+        const int start_vnode_id = snap.gp_value;
+        const int current_last_idx = snap.last_index;
+
+        BloomFilter *bloom = &valueList->bf[start_vnode_id];
+        if(bloom == nullptr) {
+            return -1;
+        }
+        int current_vnode_id = start_vnode_id;
+        int remaining_range = range;
+        for (;;) {
+            struct Snap {
+                int ret_id{-1};
+                bool can_move{false};
+                int  next_id{-1};
+            };
+
+            Snap s = read_consistent(bloom->version, [&]() -> Snap {
+                Snap res;
+                // (b) Decide whether we should move right
+                int next_id = bloom->next_id;
+                if(next_id == -1) {
+                    res.can_move = false;
+                    res.ret_id = current_vnode_id;
+                    return res;
+                }
+                BloomFilter* nb = &valueList->bf[next_id]; // 新增：右节点的版本源
+                if(!nb) {
+                    return res;
+                }
+
+                Key_t next_min = read_consistent(nb->version, [&]() {
+                    return nb->getMinKey();
+                });
+                res.can_move = (key >= next_min);
+                res.next_id = next_id;
+                if(!res.can_move) {
+                // (c) Try to lookup in the current vnode
+                    res.ret_id = current_vnode_id;
+                    if(res.ret_id == -1) {
+                        std::cerr << "Failed to get vnode id during scan." << std::endl;
+                    }
+                }
+                if(res.ret_id == -1 && res.can_move == false && res.next_id == -1) {
+                    std::cerr << "Both ret_id and can_move are invalid during scan." << std::endl;
+                }
+                return res;
+            });
+            if(!s.can_move) {
+                Vnode* vnode = valueList->pmemVnodePool->at(s.ret_id);
+                if(vnode == nullptr) {
+                    std::cerr << "Failed to get vnode during scan. id: " << s.ret_id << std::endl;
+                    return false;
+                }
+                   // 将扫描动作与 BloomFilter 的版本快照绑定，避免 torn-read
+                struct ScanPack { int rem; std::vector<Key_t> out; };
+                ScanPack pack = read_consistent(bloom->version, [&]() -> ScanPack {
+                    ScanPack r;
+                    r.out.reserve(remaining_range);
+                    int want = remaining_range; // 使用本地副本
+                    r.rem = vnode->scan(key, want, r.out);
+                    return r;
+                });
+
+                // 合并一次快照内的结果，再更新剩余需求
+                mergeScanResultsVec(pack.out, result);
+                remaining_range = pack.rem;
+
+                if (remaining_range <= 0) return true;   // 已满足
+                if (s.next_id == -1)    return true;     // 无右邻居，结束
+
+                BloomFilter* next_bloom = &valueList->bf[s.next_id];
+                bloom = next_bloom;
+                current_vnode_id = s.next_id;
+                continue;
+            }
+
+            BloomFilter* next_bloom = &valueList->bf[s.next_id];
+            current_vnode_id = s.next_id;
+            bloom = next_bloom;
+        }
+    }
+}
+
+void TandemIndex::mergeScanResultsVec(std::vector<Key_t> &src, std::vector<Key_t> &dest)
+{
+    for(auto key : src) {
+        if(key == -1) {
+            continue;
+        }
+        dest.emplace_back(key);
+    }
+}
+
+void TandemIndex::mergeScanResultsPQ(std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &src,
                                  std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &dest)
 {
     while(!src.empty()) {

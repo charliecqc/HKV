@@ -26,6 +26,7 @@ class TandemIndex {
         //void remove(int key);
         bool update(Key_t key, Val_t value);
         bool scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &result);
+        bool scan(Key_t key, size_t range, std::vector<Val_t> &result);
         //void print();
         Val_t lookup(Key_t key);
         void recover(Key_t key);
@@ -49,8 +50,10 @@ class TandemIndex {
         void createLogFlushThread();
         void createLogMergeThread();
         void createRebalanceThread();
-        void mergeScanResults(std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &dst,
+        void mergeScanResultsPQ(std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &dst,
                               std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &src);
+        void mergeScanResultsVec(std::vector<Key_t> &dst,
+                              std::vector<Key_t> &src);
         void rebalanceThreadExec(int id);
         void logFlushThreadExec(int id);
         void logMergeThreadExec(int id);

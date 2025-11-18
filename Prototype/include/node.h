@@ -20,6 +20,8 @@
 #endif
 const int32_t fanout = 28;
 const int32_t vnode_fanout =28;
+constexpr uint32_t VNODE_FULL_MASK =
+    (vnode_fanout >= 32u) ? 0xFFFF'FFFFu : ((1u << vnode_fanout) - 1u);
 
 class BloomFilter {
 public:
@@ -756,6 +758,15 @@ non_simd:
         return validKeys[mid]; // return the median key
     }
 
+    template <class F>
+    inline void for_each_set_bit_desc(uint32_t bm, F&& f) {
+        while (bm) {
+            int idx = 31 - __builtin_clz(bm); // 最高置位
+            f(idx);
+            bm &= ~(1u << idx);               // 清除最高置位
+        }
+    }
+
     //return remaining number of keys need to be scanned
     int scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &pq) {
         size_t remaining_range = range;
@@ -775,6 +786,22 @@ non_simd:
                 break;
             }
         }
+        return remaining_range;
+    }
+
+    int scan(Key_t key, size_t range, std::vector<Key_t> &result) {
+        size_t remaining_range = range;
+        uint32_t bm = hdr.bitmap & VNODE_FULL_MASK;
+
+        for_each_set_bit_desc(bm, [&](int idx){
+            if (remaining_range == 0) return;
+            const Key_t k = records[idx].key;
+            if (k == std::numeric_limits<Key_t>::max()) return;
+            if (k < key) return;
+            // 与原接口保持一致（原实现向 result emplace_back(key, value)）
+            result.emplace_back(records[idx].key);
+            remaining_range--;
+        });
         return remaining_range;
     }
 

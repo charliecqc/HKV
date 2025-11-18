@@ -28,9 +28,9 @@ bool ValueList::append(Vnode *curNode, Vnode *nextNode)
     return true;
 }
 
-bool ValueList::split(Vnode *curNode, Vnode *nextNode)
+bool ValueList::split(Vnode* &curNode, Vnode* &nextNode)
 {
-    assert(nextNode->isEmpty());
+    //assert(nextNode->isEmpty());
 
     // 仅遍历已用槽位
     uint32_t used_mask = curNode->hdr.bitmap;
@@ -54,8 +54,11 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
         if (k < gmin) gmin = k;
         if (k > gmax) gmax = k;
     }
-    // 全部键相同，无法满足 prev.max < next.min
-    if (gmin == gmax) return false;
+    //all keys are the same, no need to split, unset all but one bit
+    if (gmin == gmax) {
+        curNode->hdr.bitmap &= 1u;
+        return true;
+    }
 
     // 选取“右半起点”的键作为 pivot，构造严格阈值 right_min_key
     const size_t right_begin_rank = items.size() / 2;
@@ -103,6 +106,7 @@ bool ValueList::split(Vnode *curNode, Vnode *nextNode)
     int left_cnt  = used - right_cnt;
     if (right_cnt == 0 || left_cnt == 0) return false;
 
+    nextNode = pmemVnodePool->getNextNode();
     // 构建 nextNode：写入对应槽位并置位 bitmap；curNode 仅清除位（不清空数据）
     BloomFilter *srcBloom = &bf[curNode->hdr.id];
     BloomFilter *dstBloom = &bf[nextNode->hdr.id];
