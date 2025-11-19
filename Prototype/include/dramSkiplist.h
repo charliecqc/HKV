@@ -38,6 +38,58 @@ struct InodeSnapShort {
     uint64_t ver_snap{0};
 };
 
+struct CachedVnodeImage {
+    uint32_t bitmap;
+    vnode_entry records[vnode_fanout];
+};
+
+// 线程本地缓存槽位
+struct TlsVnodeCopyEntry {
+    int           vnode_id{-1};
+    BloomFilter*  bf{nullptr};
+    uint64_t      bf_ver{0};
+    Key_t         lb{0};
+    Key_t         ub{std::numeric_limits<Key_t>::max()};
+    CachedVnodeImage* img{nullptr};
+    uint64_t      last_use{0}; // 新增: LRU 时间戳
+};
+
+// 线程本地缓存容器（环形替换）
+struct TlsVnodeCopyCache {
+    static constexpr size_t kCap = 8;
+
+    // 预分配：每线程固定 kCap 份镜像缓冲，避免运行期 malloc
+    alignas(64) CachedVnodeImage images[kCap];
+
+    TlsVnodeCopyEntry slots[kCap];
+    size_t hand{0};
+
+    // 构造时把每个 slot 的 img 绑定到预分配缓冲
+    TlsVnodeCopyCache() {
+        for (size_t i = 0; i < kCap; ++i) {
+            slots[i].vnode_id = -1;
+            slots[i].bf       = nullptr;
+            slots[i].bf_ver   = 0;
+            slots[i].lb       = 0;
+            slots[i].ub       = std::numeric_limits<Key_t>::max();
+            slots[i].img      = &images[i];
+            slots[i].last_use = 0;
+            images[i].bitmap  = 0;
+        }
+    }
+
+    // 可选：复位某个槽（不释放内存）
+    void reset_slot(size_t i) {
+        slots[i].vnode_id = -1;
+        slots[i].bf       = nullptr;
+        slots[i].bf_ver   = 0;
+        slots[i].lb       = 0;
+        slots[i].ub       = std::numeric_limits<Key_t>::max();
+        slots[i].last_use = 0;
+        images[i].bitmap  = 0;
+    }
+};
+
 class DramSkiplist {
 private:
     // 全局结构版本（split / rebalance 后 bump）
@@ -100,6 +152,9 @@ private:
     // 线程本地路标（跨函数共享）
     static thread_local Key_t  tls_pivot_key_;
     static thread_local Inode* tls_pivot_node_;
+    // 新增：线程本地 vnode 深拷贝缓存
+    static thread_local TlsVnodeCopyCache tls_vnode_copy_cache_;
+    static thread_local uint64_t          tls_vnode_copy_lru_clock_; // 新增: LRU 时钟
 
     // 维护接口
     void invalidate_tls_pivot();
@@ -200,5 +255,14 @@ public:
 
     // 校验短快照是否仍然匹配当前 inode 状态（返回 true 表示未被并发修改）
     bool validateSnapShort(Inode* n, const InodeSnapShort& s) const;
+
+    // 尝试用 key 命中 TLS 缓存；命中返回 true，并输出镜像指针与 vnode_id
+    bool tryGetVnodeCopyForKey(Key_t key, int& vnode_id, const CachedVnodeImage*& img);
+
+    // 在 lookup 得到快照后，将对应 vnode 深拷贝进 TLS 缓存
+    void rememberVnodeCopyAfterLookup(Key_t key, Vnode* vnode);
+
+    // 可选：在镜像上直接探测 key 对应的 value（线性扫描，常数很小）
+    bool probeVnodeCopyValue(const CachedVnodeImage* img, Key_t key, Val_t& value) const;
 
 };

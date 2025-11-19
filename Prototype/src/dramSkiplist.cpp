@@ -40,6 +40,15 @@
 thread_local Key_t  DramSkiplist::tls_pivot_key_  = std::numeric_limits<Key_t>::min();
 thread_local Inode* DramSkiplist::tls_pivot_node_ = nullptr;
 thread_local decltype(DramSkiplist::tls_pivot_set_) DramSkiplist::tls_pivot_set_{ {}, 0 };
+thread_local TlsVnodeCopyCache DramSkiplist::tls_vnode_copy_cache_{};
+// 新增: LRU 时钟定义
+thread_local uint64_t DramSkiplist::tls_vnode_copy_lru_clock_ = 1;
+
+// 简单乘法哈希（kCap 为 8，取低 3 比特）
+static inline size_t vnode_cache_hash(Key_t k) {
+    constexpr uint64_t A = 11400714819323198485ull; // golden ratio
+    return static_cast<size_t>((k * A) >> (64 - 3)) & (TlsVnodeCopyCache::kCap - 1);
+}
 
 namespace {
 #ifdef DBG_CACHE
@@ -502,447 +511,6 @@ void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
     }
 }
 
-Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current,
-                                     int currentHighestLevelIndex,
-                                     int &idx,
-                                     std::vector<Inode *> &updates)
-{
-
-
-    int start_level = currentHighestLevelIndex;
-
-    for (int lvl = start_level; lvl >= 0; --lvl) {
-        struct Decision {
-            bool move_right{false};
-            uint32_t next_id{std::numeric_limits<uint32_t>::max()};
-            uint32_t child_id{std::numeric_limits<uint32_t>::max()};
-            Key_t lb{std::numeric_limits<Key_t>::min()};
-            Key_t ub{std::numeric_limits<Key_t>::max()};
-            int leaf_pos{-1};
-            bool ok{false};
-        };
-        struct Decision dec;
-        uint64_t snap_parent;
-
-        while (true) {
-            auto decide = [&](Inode* cur) -> Decision {
-                return read_consistent(cur->version, [&]() -> Decision {
-                    Decision d;
-                    uint32_t next_id = cur->hdr.next;
-                    if (!isTail(next_id)) {
-                        Inode* next = dramInodePool->at(next_id);
-                        bool move = read_consistent(next->version, [&]() -> bool {
-                            Key_t next_min = next->getMinKey();
-                            if (next_min == std::numeric_limits<Key_t>::max()) 
-                                return false; // tail
-                            return key >= next_min;
-                        });
-                        if (move) {
-                            d.move_right = true;
-                            d.next_id = next_id;
-                            d.ok = true;
-                            return d;
-                        }
-                    }
-
-                    // 不横移：准备“向下”所需数据（或在叶层输出 leaf_pos）
-                    if (lvl == 0) {
-                        d.leaf_pos = cur->findKeyPos(key);
-                        d.ok = true;
-                        return d;
-                    }
-
-                    int pos = cur->isHeader() ? 0 : cur->findKeyPos(key);
-                    d.child_id = cur->gps[pos].value;
-                    d.lb = cur->isHeader() ? cur->gps[0].key : cur->gps[pos].key;
-                    if (pos + 1 <= cur->hdr.last_index) {
-                        d.ub = cur->gps[pos + 1].key;
-                    } else {
-                        // 末槽：上界取父右兄弟的最小键
-                        uint32_t nid2 = cur->hdr.next;
-                        if (nid2 != std::numeric_limits<uint32_t>::max()) {
-                            Inode* nxt2 = dramInodePool->at(nid2);
-                            if (nxt2) {
-                                d.ub = read_consistent(nxt2->version, [&]() -> Key_t {
-                                    return nxt2->getMinKey();
-                                });
-                            }
-                        }
-                    }
-                    d.ok = true;
-                    return d;
-                });
-            };
-
-            std::tie(dec, snap_parent) = read_consistent_with_snap(current->version, [&]() {
-                return decide(current);
-            });
-            if (!dec.ok) continue;
-
-            // 新增：在使用决策前先验证父节点快照是否仍然有效
-            if (!validate_snapshot(current->version, snap_parent)) {
-                continue; // 父已变化，重试本层
-            }
-
-            if (dec.move_right) {
-                // 读取父的 next 并绑定父快照
-                uint64_t snap2 = 0;
-                uint32_t observed_next = std::numeric_limits<uint32_t>::max();
-                std::tie(observed_next, snap2) =
-                    read_consistent_with_snap(current->version, [&]() {
-                        return current->hdr.next;
-                    });
-
-                if (!validate_snapshot(current->version, snap2)) {
-                    continue; // 父已变，重试本层
-                }
-                if (observed_next != dec.next_id) {
-                    continue; // 父视图与决策不一致，重试
-                }
-
-                Inode* nxt = dramInodePool->at(observed_next);
-                if (!nxt) continue;
-
-                // 新增：在 next 的一致性快照中复核 “key >= next_min”
-                uint64_t snap_next = 0;
-                Key_t next_min = std::numeric_limits<Key_t>::max();
-                std::tie(next_min, snap_next) =
-                    read_consistent_with_snap(nxt->version, [&]() {
-                        return nxt->getMinKey();
-                    });
-
-                if (next_min == std::numeric_limits<Key_t>::max() || key < next_min) {
-                    // tail 或者 next_min 上跳导致不能右移，重试当前层
-                    continue;
-                }
-
-                // 可选：在赋值前最后一次确认父未变
-                if (!validate_snapshot(current->version, snap2)) {
-                    continue;
-                }
-
-                current = nxt;
-                continue; // 继续本层横移/判断
-            } else {
-                break;
-            }
-        }
-
-        updates.push_back(current);
-
-        if (lvl == 0)
-            break;
-
-        Inode* child = dramInodePool->at(dec.child_id);
-        if (!child) continue;
-
-        bool child_ok = read_consistent(child->version, [&]() -> bool {
-            Key_t child_min = child->getMinKey();
-            if (child_min == std::numeric_limits<Key_t>::max()) return false;
-            return (child_min >= dec.lb) && (child_min < dec.ub);
-        });
-        if (!child_ok) continue;
-
-        // 已有：下探前再次验证父快照，避免“横移决策和下探之间”的并发修改
-        if (!validate_snapshot(current->version, snap_parent)) {
-            continue;
-        }
-
-        current = child;
-    }
-
-    // 叶层 header 判空（理论上不会落在 header）
-    if (current->isHeader()) {
-        idx = -1;
-        return nullptr;
-    }
-    // 最终安全：再次一致快照计算 idx（可选）
-    idx = read_consistent(current->version, [&]() {
-        //std::shared_lock<std::shared_mutex> lock_current(inode_locks[current->getId()]);
-        //current_lock = move(lock_current); 
-        return current->findKeyPos(key);
-    });
-    return current;
-}
-
-#if 0
-Inode *DramSkiplist::lookupForInsert(Key_t key, Inode * &current,
-                                     int currentHighestLevelIndex,
-                                     std::shared_lock<std::shared_mutex> &current_lock,
-                                     int &idx,
-                                     std::vector<Inode *> &updates)
-{
-    int  start_level = -1;
-    bool cache_hit_and_verified = false;
-    int  current_total_level = currentHighestLevelIndex + 1;
-
-    // 步骤 1: 尝试从缓存获取起点
-    Inode *start_node = find_start_node_from_cache_shards(key, start_level);
-
-    if (start_node != nullptr) {
-        std::shared_lock<std::shared_mutex> lock_start(inode_locks[start_node->getId()]);
-        Key_t lower_bound = start_node->getMinKey();
-        Key_t upper_bound = get_node_upper_bound(start_node);
-
-        // 软前推允许的最大横移步数（固定 2，不做动态调整）
-        constexpr int SOFT_MAX_STEPS = 4;
-
-        if (key < lower_bound) {
-            // Hard fail：缓存起点在 key 右侧 -> 视为严重失效
-#ifdef DBG_CACHE
-            g_lfi_start_node_verify_failures.fetch_add(1, std::memory_order_relaxed);
-#endif
-            tls_mark_fail(start_node->getMinKey());
-            // 回退到原始 temp_start，不采用该缓存节点
-        } else {
-            // key >= lower_bound：可以把 start_node 当作一个“候选起点”
-            // 如果 key 已经在区间内，直接接受；否则尝试向右最多 SOFT_MAX_STEPS 步
-            Inode *probe = start_node;
-            std::shared_lock<std::shared_mutex> probe_lock = std::move(lock_start);
-            if (key >= upper_bound) {
-                int soft_steps = 0;
-                while (soft_steps < SOFT_MAX_STEPS && key >= upper_bound) {
-                    Inode *next_node = dramInodePool->at(probe->hdr.next);
-                    if (!next_node || next_node->isTail()) break;
-
-                    // 预判：如果下一节点最小键仍大于 key，则无需再前推
-                    Key_t next_min = next_node->getMinKey();
-                    if (key < next_min) break;
-
-                    // 锁传递：先锁 next，再释放当前
-                    std::shared_lock<std::shared_mutex> next_lock(inode_locks[next_node->getId()]);
-                    probe_lock.unlock();
-                    probe = next_node;
-                    probe_lock = std::move(next_lock);
-                    upper_bound = get_node_upper_bound(probe);
-                    ++soft_steps;
-                }
-
-                // 若软前推后仍未覆盖 key，则放弃此次缓存使用（不记失败，不惩罚 pivot）
-                if (key >= upper_bound) {
-                    probe_lock.unlock();
-                    probe = nullptr;
-                }
-
-            }
-            if (probe) {
-                // 接受（无论是直接 exact 还是 soft 前推后）
-                current = probe;
-                start_level = probe->hdr.level;
-                cache_hit_and_verified = true;
-                tls_record_pivot(probe);  // 仅记录起点，不在此调用 findKeyPos
-                current_lock.unlock();
-                current_lock = std::move(probe_lock);
-            }
-        }
-    }
-
-    // 步骤 2: 若缓存未命中或未被接受，则从最高层重新开始
-    if (!cache_hit_and_verified) {
-        start_level = currentHighestLevelIndex;
-    }
-
-    // 步骤 3: 正常自顶向下搜索（最终的 idx 在最底层统一计算）
-    for (int i = start_level; i >= 0; --i) {
-#ifdef DBG_SEARCH_STABILITY
-        uint32_t horizontal_steps = 0;
-#endif
-        while (true) {
-            assert(current != nullptr);
-            Inode *next = dramInodePool->at(current->hdr.next);
-            __builtin_prefetch(&next->hdr, 0, 1);
-            __builtin_prefetch(next->gps,  0, 1);
-            std::shared_lock<std::shared_mutex> next_h_lock(inode_locks[next->getId()]);
-            if (!next->isTail() && key >= next->getMinKey()) {
-                assert(current->getMaxKey() <= next->getMinKey());
-                current = next;
-                current_lock.unlock();
-                current_lock = std::move(next_h_lock);
-#ifdef DBG_SEARCH_STABILITY
-                ++horizontal_steps;
-#endif
-            } else {
-                break;
-            }
-        }
-#ifdef DBG_SEARCH_STABILITY
-        {
-            const int threshold = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[i] + 1.0;
-            if (horizontal_steps > (uint32_t)threshold) {
-                record_horizontal_excess(key, i, horizontal_steps);
-            }
-        }
-#endif
-        if (i == 0) break;
-
-        uint32_t next_level_node_id;
-        if (current->isHeader()) {
-            next_level_node_id = current->gps[0].value;
-        } else {
-            int temp_pos = current->findKeyPos(key);
-            next_level_node_id = current->gps[temp_pos].value;
-        }
-        Inode *down = dramInodePool->at(next_level_node_id);
-        assert(down != nullptr);
-        std::shared_lock<std::shared_mutex> next_v_lock(inode_locks[down->getId()]);
-        updates.push_back(current);
-        current = down;
-        current_lock.unlock();
-        current_lock = std::move(next_v_lock);
-    }
-
-    // **步骤 4: 底层判空**
-    if (current->isHeader()) {
-        idx = -1;
-        return nullptr;
-    }
-
-    // 步骤 5: 填充缓存（使用叶子 + 总层数信息）
-    populate_cache_shards(key, current, current_total_level);
-
-    // 步骤 6: 最终定位 idx（只在此处调用 findKeyPos）
-    assert(current->hdr.last_index >= 0);
-    idx = current->findKeyPos(key);
-    return current;
-}
-
-Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx)
-{
-    int start_level = -1;
-    bool cache_hit_and_verified = false;
-    int current_total_level = currentHighestLevelIndex + 1; // 保存总层数
-
-    // **步骤 1: 尝试从缓存获取起点**
-    Inode *start_node = find_start_node_from_cache(key, start_level);
-
-    // **步骤 2: 如果缓存命中，验证并返回结果
-    if (start_node != nullptr) {
-        std::shared_lock<std::shared_mutex> lock_start(inode_locks[start_node->getId()]);
-
-        Key_t lower_bound = start_node->getMinKey();
-        Key_t upper_bound = get_node_upper_bound(start_node);
-
-        constexpr int SOFT_MAX_STEPS = 4; // max soft steps
-
-        if(key < lower_bound) {
-            // Hard fail: the cached start node is to the right of the key
-#ifdef DBG_CACHE
-            g_lfi_start_node_verify_failures.fetch_add(1, std::memory_order_relaxed);
-#endif
-            tls_mark_fail(start_node->getMinKey());
-        }else {
-            Inode *probe = start_node;
-            std::shared_lock<std::shared_mutex> probe_lock = std::move(lock_start);
-            if(key >= upper_bound) {
-                int soft_steps = 0;
-                while(soft_steps < SOFT_MAX_STEPS && key >= upper_bound) {
-                    Inode *next_node = dramInodePool->at(probe->hdr.next);
-                    if(!next_node || next_node->isTail()) break;
-
-                    Key_t next_min = next_node->getMinKey();
-                    if(key < next_min) break;
-
-                    std::shared_lock<std::shared_mutex> next_lock(inode_locks[next_node->getId()]);
-                    probe_lock.unlock();
-                    probe = next_node;
-                    probe_lock = std::move(next_lock);
-                    upper_bound = get_node_upper_bound(probe);
-                    ++soft_steps;
-                }
-
-                if(key >= upper_bound) {
-                    probe_lock.unlock();
-                    probe = nullptr;
-                }
-            }
-            if(probe) {
-                current = probe;
-                start_level = probe->hdr.level;
-                cache_hit_and_verified = true;
-                tls_record_pivot(probe); // only record the start node, do not call findKeyPos here
-                current_lock.unlock();
-                current_lock = std::move(probe_lock);
-            }
-        }
-    }
-
-    // **步骤 3: 如果缓存未命中，则执行完整查找**
-    if (!cache_hit_and_verified) {
-        start_level = currentHighestLevelIndex;
-    }
-
-    for(int i = start_level; i >= 0; i--) {
-        // no real index nodes between header and tail
-        //search among the nodes in the current level
-#ifdef DBG_SEARCH_STABILITY
-        uint32_t horizontal_steps = 0;
-#endif
-        while(true) {
-            assert(current != nullptr);
-            {
-                Inode *next = dramInodePool->at(current->hdr.next);
-                __builtin_prefetch(&next->hdr, 0, 3);
-                __builtin_prefetch(next->gps,  0, 3);
-                std::shared_lock<std::shared_mutex> next_horizental_lock(inode_locks[next->getId()]);
-                if(!next->isTail() && key >= next->getMinKey()) {
-                    assert(current->getMaxKey() <= next->getMinKey());
-                    current = next;
-                    current_lock.unlock();
-                    current_lock = std::move(next_horizental_lock);
-#ifdef DBG_SEARCH_STABILITY
-                    ++horizontal_steps;
-#endif
-                } else {
-                    // found the node in this level, escape the look and go to the next level
-                    break;
-                }
-            }
-        }
-#ifdef DBG_SEARCH_STABILITY
-        {
-            const int threshold = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[i] + 1.0;
-            if (horizontal_steps > (uint32_t)threshold) {
-                record_horizontal_excess(key, i, horizontal_steps);     
-            }
-        }
-#endif
-        //if already on the last level, return the current node
-        if(i == 0) break;
-        
-        uint32_t next_level_node_id;
-        if(current->isHeader()) {
-            next_level_node_id = current->gps[0].value;            
-        }else {
-            int temp_idx = current->findKeyPos(key);
-            next_level_node_id = current->gps[temp_idx].value;
-        }
-
-        Inode *down = dramInodePool->at(next_level_node_id);
-        assert(down != nullptr);
-        //lock passing for the next level node
-        std::shared_lock<std::shared_mutex> next_vertical_lock(inode_locks[down->getId()]);
-        current = down;
-        current_lock.unlock();
-        current_lock = std::move(next_vertical_lock);
-    }
-
-    // at this point, current is the node in the last level
-    //if current is a header node, nothing exists.
-    if(current->isHeader()) {
-        idx = -1;
-        return nullptr;
-    }
-    // **步骤 5: 填充缓存并返回结果**
-    // **修改：传递当前总层数给 populate_cache**
-    populate_cache_shards(key, current, current_total_level);
-
-    // 步骤 6: 最终定位 idx（只在此处调用 findKeyPos）
-    assert(current->hdr.last_index >= 0);
-    idx = current->findKeyPos(key);
-    return current;
-}
-#endif
-
 Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIndex, int &idx, InodeSnapShort &snap)
 {
     int  start_level = -1;
@@ -1059,6 +627,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
         }
     }
     // 步骤 2: 若缓存未命中或未被接受，则从最高层重新开始
+
     if (!cache_hit_and_verified) {
         start_level = currentHighestLevelIndex;
     }
@@ -1080,29 +649,21 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
         auto commit_right = [&](Inode* parent, uint64_t snap_p, uint32_t expected_next_id) -> bool {
             // 1) 父下一指针必须在一个稳定快照下等于期望
             uint32_t observed_next{std::numeric_limits<uint32_t>::max()};
-            uint64_t snap2{0};
-            std::tie(observed_next, snap2) =
-                read_consistent_with_snap(parent->version, [&]() { 
-                    return parent->hdr.next; 
-                });
+            observed_next = read_consistent(parent->version, [&]() { return parent->hdr.next; });
 
             if (observed_next != expected_next_id) {
-                cout << "parent next changed before commit right for key: " << key << endl;
+                cout << "observe_next != expected_next_id" << endl;
                 return false;
             }
 
             // 2) 在 next 的稳定快照下确认仍可右移
             Inode* nxt = dramInodePool->at(observed_next);
             if (!nxt) return false;
-            uint64_t snap_next{0};
             Key_t next_min{std::numeric_limits<Key_t>::max()};
-            std::tie(next_min, snap_next) =
-                read_consistent_with_snap(nxt->version, [&]() { return nxt->getMinKey(); });
-            if (next_min == std::numeric_limits<Key_t>::max() || key < next_min) {
-                cout << "cannot move right anymore for key: " << key << endl;
-                return false;
-            }
-            current = nxt; // 提交
+            next_min = read_consistent(nxt->version, [&]() { return nxt->getMinKey(); });
+            if (next_min == std::numeric_limits<Key_t>::max() || key < next_min) return false;
+
+            current = nxt; //commit
             return true;
         };
 
@@ -1112,7 +673,6 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
             if (!child) {
                 return false;
             }
-
             if (!validate_snapshot(parent->version, snap_p)) {
                 Key_t range_start = parent->gps[leaf_pos].key;
                 Key_t range_end =(leaf_pos == parent->hdr.last_index)
@@ -1121,7 +681,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
                 bool still_in_range = (range_start <= key) && (key < range_end);
                 if(!still_in_range) {
                     // 父已变化且 key 不在新范围内
-                    //cout << "parent changed and key out of range for key: " << key << " lb: " << lb << " ub: " << ub << endl;
+                    //cout << "parent changed and key out of range for key: " << key << " range_start :" << range_start << " range_end: "<< range_end << endl;
                     return false;
                 }
             }
@@ -1167,7 +727,10 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
                 return decide(current);
             });
             if (!dec.ok) continue;
-            if (dec.snap_version != snap_parent) continue;
+            if (dec.snap_version != snap_parent) {
+                cout << "snap_version != snap_parent for key: " << key << endl;
+                continue;
+            }
 
             if (dec.move_right) {
                 if (!commit_right(current, snap_parent, dec.next_id)) {
@@ -1219,7 +782,6 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
         idx = -1;
         return nullptr;
     }
-
     assert(current->hdr.level == 0);
     return current;
 }
@@ -1489,204 +1051,6 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
     }
     return ret;
 }
-
-#if 0
-int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint) 
-{
-    int ret = 0;
-    bool created_parent = false;
-
-    // 预分配新节点
-    Inode *next_node = dramInodePool->getNextNode();
-    if (!next_node) return 0;
-    next_node->hdr.level = inode->hdr.level;
-
-    while (true) {
-        Inode* candidate_parent = nullptr;
-        Inode* candidate_next   = nullptr;
-        Inode* header_above     = nullptr;
-
-        // 如有 hint，优先尝试；否则从上一层 header 线性定位
-        find_and_verify_candidate_parent(inode, parent_inode_hint,
-                                         candidate_parent, candidate_next, header_above);
-
-        // 收集需加锁节点（过滤空指针）
-        std::vector<Inode*> nodes_to_lock;
-        nodes_to_lock.reserve(4);
-        if (inode)           nodes_to_lock.push_back(inode);
-        if (next_node)       nodes_to_lock.push_back(next_node);
-        if (candidate_parent) nodes_to_lock.push_back(candidate_parent);
-        if (header_above)     nodes_to_lock.push_back(header_above);
-
-        std::vector<std::unique_lock<std::shared_mutex>> acquired_locks;
-        acquireLocksInOrder(nodes_to_lock, acquired_locks);
-
-        // 若已被其它线程平衡则退出
-        if (inode->hdr.last_index < fanout / 2 - 1) {
-            return 0;
-        }
-
-        // 验证父节点是否仍覆盖 (candidate_parent -> candidate_next)
-        Inode* verified_parent = nullptr;
-        if (candidate_parent) {
-            if (dramInodePool->at(candidate_parent->hdr.next) == candidate_next) {
-                verified_parent = candidate_parent;
-            } else {
-                continue; // 父的后继变化，重试
-            }
-        }
-
-        // 如无已验证父，且上一层 head 后为 tail，则可创建新父
-        dram_log_entry_t *verified_parent_entry = nullptr;
-        dram_log_entry_t *header_above_entry    = nullptr;
-        if (!verified_parent && header_above) {
-            if (isTail(header_above->hdr.next)) {
-                verified_parent = dramInodePool->getNextNode();
-                if (!verified_parent) return 0;
-
-                verified_parent->hdr.level = inode->hdr.level + 1;
-                verified_parent->hdr.next  = header_above->hdr.next;
-                header_above->hdr.next     = verified_parent->getId();
-
-                // 新父接入：首槽指向当前 inode，覆盖 1
-                verified_parent->insertAtPos(inode->getMinKey(), inode->getId(), 0, 1);
-                inode->setParent(verified_parent->getId());
-                increaseLevel();
-                created_parent = true;
-
-                // FULL 日志：新父与上一层 header
-                verified_parent_entry = new dram_log_entry_t(
-                    verified_parent->getId(),
-                    verified_parent->hdr.last_index,
-                    verified_parent->hdr.next,
-                    verified_parent->hdr.level,
-                    verified_parent->hdr.parent_id);
-                verified_parent_entry->setKeyVal(
-                    0,
-                    verified_parent->gps[0].key,
-                    verified_parent->gps[0].value,
-                    verified_parent->gps[0].covered_nodes);
-
-                header_above_entry = new dram_log_entry_t(
-                    header_above->getId(),
-                    header_above->hdr.last_index,
-                    header_above->hdr.next,
-                    header_above->hdr.level,
-                    header_above->hdr.parent_id);
-                header_above_entry->setKeyVal(
-                    0,
-                    header_above->gps[0].key,
-                    header_above->gps[0].value,
-                    header_above->gps[0].covered_nodes);
-            } else {
-                continue; // 上层水平链已改变，重试
-            }
-        }
-
-        // 分裂当前节点：把 next_node 插到 inode 之后
-        next_node->hdr.next = inode->hdr.next;
-        inode->hdr.next     = next_node->getId();
-        inode->split(next_node);
-        //inode->splitWithSGP(next_node);
-        const Key_t new_min_key = next_node->getMinKey();
-
-        // 通用 FULL 日志提交
-        auto commit_full_logs = [&](){
-            auto next_entry  = this->create_log_entry(next_node);
-            auto inode_entry = this->create_log_entry(inode);
-            ckpt_log->batcher().addFull(next_entry);
-            ckpt_log->batcher().addFull(inode_entry);
-            if (verified_parent_entry) ckpt_log->batcher().addFull(verified_parent_entry);
-            if (header_above_entry)    ckpt_log->batcher().addFull(header_above_entry);
-        };
-
-        // 顶层无父：只写两节点 FULL 日志即可
-        if (!verified_parent) {
-            commit_full_logs();
-            ret = 1;
-            parent_inode_hint = nullptr;
-            break;
-        }
-
-        // 有父：定位 pos，并保证父子关系
-        int pos = verified_parent->findKeyPos(inode->getMinKey());
-        assert(pos >= 0 && pos <= verified_parent->hdr.last_index);
-        if (inode->getParent() != verified_parent->getId()) {
-            inode->setParent(verified_parent->getId());
-        }
-
-        // 情况 A：父在 pos 处平衡 -> 仅 covered_nodes++，完成
-        if (!verified_parent->isUnbalanced(pos)) {
-            verified_parent->gps[pos].covered_nodes++;
-            next_node->setParent(verified_parent->getId());
-            commit_full_logs();
-#if ENABLE_DELTA_LOG
-            ckpt_log_single_slot_delta(ckpt_log, verified_parent, static_cast<int16_t>(pos));
-#endif
-            ret = 1;
-        }
-        // 情况 B：父不平衡且已满 -> 不能激活 GP，先落盘，后续慢路径处理
-        else if (verified_parent->isFull()) {
-            verified_parent->gps[pos].covered_nodes++;
-            next_node->setParent(verified_parent->getId());
-            commit_full_logs();
-#if ENABLE_DELTA_LOG
-            ckpt_log_single_slot_delta(ckpt_log, verified_parent, static_cast<int16_t>(pos));
-#endif
-            ret = 2;
-        }
-        // 情况 C：父不平衡但可激活 GP
-        else {
-            verified_parent->gps[pos].covered_nodes++;
-
-            // 计算 relative_pos（在 pos 段内从首子到 inode 的偏移）
-            int16_t relative_pos = 0;
-            {
-                Inode *cur = dramInodePool->at(verified_parent->gps[pos].value);
-                int idx = 0;
-                Key_t upper_bound_key =
-                    (pos + 1 <= verified_parent->hdr.last_index)
-                    ? verified_parent->gps[pos + 1].key
-                    : dramInodePool->at(verified_parent->hdr.next)->getMinKey();
-
-                while (cur && !isTail(cur->getId())) {
-                    if (cur->getId() == inode->getId()) {
-                        relative_pos = static_cast<int16_t>(idx);
-                        break;
-                    }
-                    if (cur->getMinKey() >= upper_bound_key) break;
-                    cur = dramInodePool->at(cur->hdr.next);
-                    ++idx;
-                }
-            }
-
-            int temp_pos = -1;
-            if (verified_parent->activateGP(new_min_key, next_node->getId(), temp_pos, relative_pos)) {
-                next_node->setParent(verified_parent->getId());
-                commit_full_logs();
-#if ENABLE_DELTA_LOG
-                auto new_verified_entry = create_log_entry(verified_parent);
-                ckpt_log->batcher().addFull(new_verified_entry);
-#endif
-                ret = 1;
-            } else {
-                // 激活失败：保守落盘，交给后续慢路径
-                next_node->setParent(verified_parent->getId());
-                commit_full_logs();
-                ret = 2;
-            }
-        }
-
-        parent_inode_hint = verified_parent;
-        break; // 成功路径退出重试循环
-    }
-
-    if (created_parent) {
-        bump_epoch();
-    }
-    return ret;
-}
-#endif
 
 #if 0
 int DramSkiplist::rebalanceIdx(Vnode &targetVnode, Key_t targetKey) 
@@ -2370,6 +1734,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
         }
     }
     // 步骤 2: 若缓存未命中或未被接受，则从最高层重新开始
+
     if (!cache_hit_and_verified) {
         start_level = currentHighestLevelIndex;
     }
@@ -2614,4 +1979,130 @@ bool DramSkiplist::validateSnapShort(Inode* n, const InodeSnapShort& s, Key_t ke
         return true;
 #endif
     });
+}
+
+bool DramSkiplist::tryGetVnodeCopyForKey(Key_t key, int& vnode_id, const CachedVnodeImage*& img)
+{
+     // 哈希直接槽尝试 + 简单遍历其它槽 (保持 O(kCap))
+    size_t h = vnode_cache_hash(key);
+    uint64_t now = ++tls_vnode_copy_lru_clock_;
+    // 先看哈希槽
+    TlsVnodeCopyEntry &c0 = tls_vnode_copy_cache_.slots[h];
+    if (c0.vnode_id >= 0 && c0.img && c0.bf &&
+        key >= c0.lb && key < c0.ub &&
+        c0.bf->version.load(std::memory_order_relaxed) == c0.bf_ver) {
+        c0.last_use = now;
+        vnode_id = c0.vnode_id;
+        img = c0.img;
+        return true;
+    }
+    // 退化: 少量槽线性检查 (仍然很小)
+    for (size_t i = 0; i < TlsVnodeCopyCache::kCap; ++i) {
+        if (i == h) continue;
+        auto &e = tls_vnode_copy_cache_.slots[i];
+        if (e.vnode_id < 0 || !e.img || !e.bf) continue;
+        if (key < e.lb || key >= e.ub) continue;
+        if (e.bf->version.load(std::memory_order_relaxed) != e.bf_ver) continue;
+        e.last_use = now;
+        vnode_id = e.vnode_id;
+        img = e.img;
+        return true;
+    }
+    return false;
+}
+
+void DramSkiplist::rememberVnodeCopyAfterLookup(Key_t key, Vnode* vnode)
+{
+    if (!vnode) return;
+
+    const int vid = vnode->getId();
+    BloomFilter* bf = &valueList->bf[vid];
+    if (!bf) return;
+
+    const uint64_t ver = bf->version.load(std::memory_order_acquire);
+
+    const size_t h = vnode_cache_hash(key);
+    TlsVnodeCopyEntry &slot = tls_vnode_copy_cache_.slots[h];
+
+    // 已有同 vnode 且版本未变：严格不做任何变动
+    if (slot.img != nullptr &&
+        slot.vnode_id == vid &&
+        slot.bf == bf &&
+        slot.bf_ver == ver) {
+        return;
+    }
+
+    // 其它槽若已有同 vnode 同版本，仅更新时间戳后返回（避免重复 memcpy）
+    for (size_t i = 0; i < TlsVnodeCopyCache::kCap; ++i) {
+        if (i == h) continue;
+        auto &e = tls_vnode_copy_cache_.slots[i];
+        if (e.img && e.vnode_id == vid && e.bf == bf && e.bf_ver == ver) {
+            e.last_use = ++tls_vnode_copy_lru_clock_;
+            return;
+        }
+    }
+
+    // 仅在真正要填充时，计算区间边界
+    Key_t lb = bf->min_key;
+    Key_t ub = std::numeric_limits<Key_t>::max();
+    int next_id = bf->next_id;
+    if (next_id != -1) {
+        BloomFilter* nb = &valueList->bf[next_id];
+        if (nb) {
+            ub = read_consistent(nb->version, [&]() { return nb->getMinKey(); });
+            if (ub <= lb) ub = std::numeric_limits<Key_t>::max();
+        }
+    }
+
+    // 选择目标槽：优先哈希槽，否则找全局 LRU/空槽
+    TlsVnodeCopyEntry* dst = nullptr;
+    if (slot.vnode_id < 0 || slot.vnode_id == vid) {
+        dst = &slot;
+    } else {
+        size_t victim = h;
+        uint64_t oldest = std::numeric_limits<uint64_t>::max();
+        for (size_t i = 0; i < TlsVnodeCopyCache::kCap; ++i) {
+            auto &e = tls_vnode_copy_cache_.slots[i];
+            if (e.vnode_id < 0) { victim = i; break; }
+            if (e.last_use < oldest) {
+                oldest = e.last_use;
+                victim = i;
+            }
+        }
+        dst = &tls_vnode_copy_cache_.slots[victim];
+    }
+
+    // 不再 malloc：dst->img 已在 TLS 构造期绑定到预分配缓冲
+    // 若极端情况下为空（理论不会发生），回退到对应 images 槽
+    if (dst->img == nullptr) {
+        size_t idx = static_cast<size_t>(dst - tls_vnode_copy_cache_.slots);
+        dst->img = &tls_vnode_copy_cache_.images[idx];
+    }
+
+    // 拷贝 vnode 内容（bitmap + records）
+    dst->img->bitmap = vnode->hdr.bitmap & VNODE_FULL_MASK;
+    std::memcpy(dst->img->records, vnode->records, sizeof(dst->img->records));
+
+    dst->vnode_id = vid;
+    dst->bf       = bf;
+    dst->bf_ver   = ver;
+    dst->lb       = lb;
+    dst->ub       = ub;
+    dst->last_use = ++tls_vnode_copy_lru_clock_;
+}
+
+bool DramSkiplist::probeVnodeCopyValue(const CachedVnodeImage* img, Key_t key, Val_t& value) const
+{
+    if (!img) return false;
+    // 降序扫描置位位（也可用升序，复杂度相同）
+    uint32_t bm = img->bitmap & VNODE_FULL_MASK;
+    while (bm) {
+        int idx = 31 - __builtin_clz(bm);
+        bm &= ~(1u << idx);
+        if (img->records[idx].key == key) {
+            value = img->records[idx].value;
+            return true;
+        }
+    }
+    return false;
 }

@@ -626,6 +626,16 @@ Val_t TandemIndex::lookup(Key_t key)
         if(header == nullptr) {
             return -1;
         }
+
+#if 0
+        int vnode_id; const CachedVnodeImage* img = nullptr;
+        if(mainIndex->tryGetVnodeCopyForKey(key, vnode_id, img) && img) {
+            Val_t v;
+            if(mainIndex->probeVnodeCopyValue(img, key, v)) {
+                return v;
+            }
+        }
+#endif
         InodeSnapShort snap{};
         Inode *parent_inode = mainIndex->lookup(key, header, current_level - 1, idx, snap);
         if(parent_inode == nullptr) {
@@ -676,6 +686,7 @@ Val_t TandemIndex::lookup(Key_t key)
                     Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
                     if (vnode->lookupWithoutFilter(key, tmp, bloom)) {
                         res.out = tmp;
+                        //mainIndex->rememberVnodeCopyAfterLookup(key, vnode);
                     } else {
                         res.out = -1;
                     }
@@ -683,6 +694,7 @@ Val_t TandemIndex::lookup(Key_t key)
                 return res;
             });
             if(s.can_move == false) {
+                //mainIndex->rememberVnodeCopyAfterLookup(key, valueList->pmemVnodePool->at(current_vnode_id));
                 return s.out;
             }
 
