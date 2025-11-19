@@ -6,6 +6,7 @@
 #include "workerThread.h"
 #include "checkpoint.h"
 #include "common.h"
+#include "concurrentqueue/concurrentqueue.h"
 #include <sys/syscall.h>
 #include "insert_tracker.h"
 #include <iomanip>
@@ -19,7 +20,112 @@ volatile bool mgInitialized = false;
 std::atomic<bool> g_endTandem;
 SpinLock g_spinLock;
 
+class AsyncSampler {
+public:
+    // Constructor now takes shared_ptr
+    AsyncSampler(std::shared_ptr<tl::InsertTracker> tracker, size_t num_threads = 1)
+        : tracker_(std::move(tracker)), stop_flag_(false) {
+        for (size_t i = 0; i < num_threads; ++i) {
+            workers_.emplace_back([this]() { WorkerLoop(); });
+        }
+    }
+
+    ~AsyncSampler() {
+        Stop();
+    }
+
+    void Submit(uint64_t key) {
+        queue_.enqueue(key);  // Non-blocking enqueue
+    }
+
+    void Stop() {
+        stop_flag_ = true;
+        for (auto& w : workers_) {
+            if (w.joinable()) w.join();
+        }
+    }
+
+private:
+    void WorkerLoop() {
+        uint64_t key;
+        while (!stop_flag_) {
+            if (queue_.try_dequeue(key)) {
+                if (tracker_) tracker_->Add(key);  // use -> for shared_ptr
+            } else {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
+        }
+    }
+
+    std::shared_ptr<tl::InsertTracker> tracker_;           // shared_ptr to tracker
+    moodycamel::ConcurrentQueue<uint64_t> queue_;          // queue member added
+    std::vector<std::thread> workers_;
+    std::atomic<bool> stop_flag_;
+};
+
+class AsyncSpeculator {
+public:
+    AsyncSpeculator() : stop_flag_(false) {
+        worker_ = std::thread([this](){ WorkerLoop(); });
+    }
+
+    ~AsyncSpeculator() { Stop(); }
+
+    // Called by insert threads
+    bool TrySubmit() {
+        bool expected = false;
+        if (speculation_running_.compare_exchange_strong(
+                expected, true,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+        {
+            // only leader schedules job
+            queue_.enqueue(1);
+            return true;
+        }
+        return false;  // speculation already running
+    }
+
+    void SetTask(const std::function<void()>& t) { task_ = t; }
+
+    void Stop() {
+        stop_flag_.store(true, std::memory_order_release);
+        queue_.enqueue(1); // wake thread
+        if (worker_.joinable()) worker_.join();
+    }
+
+private:
+    void WorkerLoop() {
+        int _;
+        while (!stop_flag_.load(std::memory_order_acquire)) {
+            if (queue_.try_dequeue(_)) {
+                if (task_) task_();
+
+                // speculation finished → allow new tasks
+                speculation_running_.store(false, std::memory_order_release);
+            } else {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+        }
+    }
+
+    moodycamel::ConcurrentQueue<int> queue_;
+
+    std::thread worker_;
+    std::function<void()> task_;
+
+public:
+    std::atomic<bool> speculation_running_{false};
+
+private:
+    std::atomic<bool> stop_flag_;
+};
+
+
 std::shared_ptr<tl::InsertTracker> tracker_;
+std::unique_ptr<AsyncSampler> sampler_;
+std::unique_ptr<AsyncSpeculator> speculator_;
+
 
 
 struct InsertForecastingOptions {
@@ -101,13 +207,21 @@ TandemIndex::TandemIndex() {
         forecasting.num_partitions,
         forecasting.sample_size,
         forecasting.random_seed);
+        sampler_ = std::make_unique<AsyncSampler>(tracker_, 2);
+        speculator_ = std::make_unique<AsyncSpeculator>();
+        speculator_->SetTask([this]() { 
+            this->maybeActivateHotRegion();
+        });
     } else {
         tracker_.reset(); // or leave null
+        sampler_.reset();
     }
     if(is_data_loaded == false) {
         insert(0,1); 
         ckptLog->drainAndPersistOnce();
     }
+    
+
 }
 
 TandemIndex::~TandemIndex() {
@@ -169,6 +283,11 @@ TandemIndex::~TandemIndex() {
     mainIndex->printStats();
 
     tracker_.reset();
+    if (sampler_) {
+        sampler_->Stop();
+        sampler_.reset();
+    }
+    if (speculator_) speculator_->Stop();
     
 }
 
@@ -490,6 +609,12 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
     Key_t next_right_min = read_consistent(right_bloom->version, [&](){
         return right_bloom->getMinKey();
     });
+#if 0
+    if (sampler_) {sampler_->Submit(next_right_min);} //sample split
+    if (tracker_->LastEpochHistogramValid()) { //TODO: currently one thread speculating per round
+        speculator_->TrySubmit();   // TODO: optimize: avoid double atomic ops
+    }
+#endif
 
     bool ok = false;
     if (key < next_right_min) {
@@ -1374,7 +1499,7 @@ struct AnchorParams {
   double inserts_per_anchor = 64.0; // how many future inserts justify one SGP
   int    max_per_node       = 8;    // cap [remaining empty slots in SGP array]
   size_t future_epochs      = 1;    // forecast horizon
-  size_t window_buckets     = 16;   // hot-region width for GetHottestRegion
+  size_t window_buckets     = 30;   // hot-region width for GetHottestRegion
 };
 
 // tiny helper for pretty-printing vectors
@@ -1393,13 +1518,13 @@ void TandemIndex::maybeActivateHotRegion() {
     // Choose a window of buckets to represent the “region” (e.g., 16 buckets)
     
     tl::Region hot{};
-    const size_t window = 16;
+    const size_t window = 20;
     if (!tracker_->GetHottestRegion(window, &hot)) {
         //std::cout << "[SGP] no completed epoch yet; skip activation\n";
         return;  // no completed epoch yet
     }
     //std::cout << "[SGP] hottest region = [" << hot.start << ", " << hot.end << ") (window=" << window << ")\n";
-
+#if 0
     // Forecast one future epoch
     double forecast = 0.0;
     if (!tracker_->GetNumInsertsInKeyRangeForNumFutureEpochs(
@@ -1407,7 +1532,7 @@ void TandemIndex::maybeActivateHotRegion() {
         //std::cout << "[SGP] forecast failed at GetNumInsertsInKeyRangeForNumFutureEpochs; skip\n";
         return;
     }
-    //std::cout << std::fixed << std::setprecision(1) << "[SGP] forecast in hot region (next epoch) ≈ " << forecast << "\n";
+    std::cout << std::fixed << std::setprecision(1) << "[SGP] forecast in hot region (next epoch) ≈ " << forecast << "\n";
 
     // Map to covering nodes at an appropriate level
     int L = 0; // TODO start from lowest level [propagate to parent?]
@@ -1483,6 +1608,7 @@ void TandemIndex::maybeActivateHotRegion() {
         }
         
     }*/ 
+#endif
     // clear current epoch histogram
     tracker_->DropLastEpochHistogram();
     //std::cout << "[SGP] Speculation completed, dropping last epoch histogram\n";
