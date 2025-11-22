@@ -12,7 +12,7 @@
 #define numNodesInPool 10000000
 
 #ifndef ENABLE_CACHE_STATS
-#define ENABLE_CACHE_STATS 1
+#define ENABLE_CACHE_STATS 0
 #endif
 
 #ifndef ENABLE_PARENT_RELATION
@@ -36,19 +36,61 @@
 #define DBG_CACHE 1
 #endif
 
-// 线程本地路标定义
-thread_local Key_t  DramSkiplist::tls_pivot_key_  = std::numeric_limits<Key_t>::min();
-thread_local Inode* DramSkiplist::tls_pivot_node_ = nullptr;
-thread_local decltype(DramSkiplist::tls_pivot_set_) DramSkiplist::tls_pivot_set_{ {}, 0 };
-thread_local TlsVnodeCopyCache DramSkiplist::tls_vnode_copy_cache_{};
-// 新增: LRU 时钟定义
-thread_local uint64_t DramSkiplist::tls_vnode_copy_lru_clock_ = 1;
+#ifndef ENABLE_TLS_SHADOW_STATS
+#define ENABLE_TLS_SHADOW_STATS 1
+#endif
 
-// 简单乘法哈希（kCap 为 8，取低 3 比特）
+#ifndef TLS_SHADOW_ENSURE_FREQ_THRESHOLD
+#define TLS_SHADOW_ENSURE_FREQ_THRESHOLD 5   // 同线程访问同一 vnode 达到阈值才复制
+#endif
+
+#ifndef TLS_SHADOW_ENSURE_SAMPLE_MASK
+#define TLS_SHADOW_ENSURE_SAMPLE_MASK 0xFF   // 1/64 采样复制首次冷 vnode
+#endif
+
+#ifndef TLS_SHADOW_MIN_DENSITY
+#define TLS_SHADOW_MIN_DENSITY 14             // bitmap popcount 小于此值不缓存
+#endif
+
+#if ENABLE_TLS_SHADOW_STATS
+// 改为线程本地计数，析构时聚合
+thread_local uint64_t tl_attempts = 0;
+thread_local uint64_t tl_hits = 0;
+std::atomic<uint64_t> g_tlsShadowAttempts{0};
+std::atomic<uint64_t> g_tlsShadowHits{0};
+#endif
+
+// 线程本地热度计数
+thread_local int g_last_vnode_id = -1;
+thread_local int g_last_vnode_freq = 0;
+thread_local uint64_t g_shadow_sample_counter = 0;
+
+#if ENABLE_VNODE_SHADOW_CACHE
+struct TlsLastVnodeSlot {
+    int vnode_id{-1};
+    uint64_t version{0};
+    TLSVnodeShadowSlot* ptr{nullptr};
+};
+thread_local TlsLastVnodeSlot tls_last_vnode;
+
+inline bool tls_should_ensure(int vnode_id, uint32_t popcnt) {
+    if (popcnt < TLS_SHADOW_MIN_DENSITY) return false;
+    if (g_last_vnode_id == vnode_id) {
+        ++g_last_vnode_freq;
+    } else {
+        g_last_vnode_id = vnode_id;
+        g_last_vnode_freq = 1;
+    }
+    if (g_last_vnode_freq >= TLS_SHADOW_ENSURE_FREQ_THRESHOLD) return true;
+    // 低频阶段采用采样
+    return ((++g_shadow_sample_counter & TLS_SHADOW_ENSURE_SAMPLE_MASK) == 0);
+}
+
 static inline size_t vnode_cache_hash(Key_t k) {
     constexpr uint64_t A = 11400714819323198485ull; // golden ratio
     return static_cast<size_t>((k * A) >> (64 - 3)) & (TlsVnodeCopyCache::kCap - 1);
 }
+#endif
 
 namespace {
 #ifdef DBG_CACHE
@@ -782,6 +824,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
         idx = -1;
         return nullptr;
     }
+
     assert(current->hdr.level == 0);
     return current;
 }
@@ -1327,6 +1370,14 @@ void DramSkiplist::releaseWriteLocksInOrderByVersion(std::vector<Inode*>& nodes)
     }
 }
 
+// 线程本地缓存定义（类内静态成员的实体）
+thread_local TlsVnodeCopyCache DramSkiplist::tls_vnode_copy_cache_{};
+thread_local uint64_t DramSkiplist::tls_vnode_copy_lru_clock_{};
+
+#if ENABLE_VNODE_SHADOW_CACHE
+thread_local TLSVnodeShadowCache DramSkiplist::tls_shadow_cache_{};
+#endif
+
 // **新增实现：从缓存中查找起点**
 Inode* DramSkiplist::find_start_node_from_cache(Key_t key, int& start_level) {
 
@@ -1548,9 +1599,6 @@ void DramSkiplist::populate_cache(Key_t key, Inode* leaf_node, int current_total
         lookup_cache[cache_key] = node_to_cache;
     }
 }
-
-// filepath: /home/charliecqc/0612/HKV/Prototype/src/dramSkiplist.cpp
-// ...existing code (includes)...
 
 #ifndef ENABLE_DELTA_LOG
 #define ENABLE_DELTA_LOG 1
@@ -1981,128 +2029,79 @@ bool DramSkiplist::validateSnapShort(Inode* n, const InodeSnapShort& s, Key_t ke
     });
 }
 
-bool DramSkiplist::tryGetVnodeCopyForKey(Key_t key, int& vnode_id, const CachedVnodeImage*& img)
+// 查找：版本匹配 + bitmap 遍历
+bool DramSkiplist::tlsShadowLookup(int vnode_id, Key_t key, Val_t &out,
+                                   BloomFilter* bloom, Vnode* vnode)
 {
-     // 哈希直接槽尝试 + 简单遍历其它槽 (保持 O(kCap))
-    size_t h = vnode_cache_hash(key);
-    uint64_t now = ++tls_vnode_copy_lru_clock_;
-    // 先看哈希槽
-    TlsVnodeCopyEntry &c0 = tls_vnode_copy_cache_.slots[h];
-    if (c0.vnode_id >= 0 && c0.img && c0.bf &&
-        key >= c0.lb && key < c0.ub &&
-        c0.bf->version.load(std::memory_order_relaxed) == c0.bf_ver) {
-        c0.last_use = now;
-        vnode_id = c0.vnode_id;
-        img = c0.img;
-        return true;
-    }
-    // 退化: 少量槽线性检查 (仍然很小)
-    for (size_t i = 0; i < TlsVnodeCopyCache::kCap; ++i) {
-        if (i == h) continue;
-        auto &e = tls_vnode_copy_cache_.slots[i];
-        if (e.vnode_id < 0 || !e.img || !e.bf) continue;
-        if (key < e.lb || key >= e.ub) continue;
-        if (e.bf->version.load(std::memory_order_relaxed) != e.bf_ver) continue;
-        e.last_use = now;
-        vnode_id = e.vnode_id;
-        img = e.img;
-        return true;
-    }
+#if !ENABLE_VNODE_SHADOW_CACHE
     return false;
-}
+#else
+    if (!bloom || !vnode) return false;
+    uint64_t ver = bloom->version.load(std::memory_order_acquire);
+    TLSVnodeShadowSlot* slot = tls_shadow_cache_.probe(vnode_id, ver);
+    if (!slot) return false;
 
-void DramSkiplist::rememberVnodeCopyAfterLookup(Key_t key, Vnode* vnode)
-{
-    if (!vnode) return;
-
-    const int vid = vnode->getId();
-    BloomFilter* bf = &valueList->bf[vid];
-    if (!bf) return;
-
-    const uint64_t ver = bf->version.load(std::memory_order_acquire);
-
-    const size_t h = vnode_cache_hash(key);
-    TlsVnodeCopyEntry &slot = tls_vnode_copy_cache_.slots[h];
-
-    // 已有同 vnode 且版本未变：严格不做任何变动
-    if (slot.img != nullptr &&
-        slot.vnode_id == vid &&
-        slot.bf == bf &&
-        slot.bf_ver == ver) {
-        return;
-    }
-
-    // 其它槽若已有同 vnode 同版本，仅更新时间戳后返回（避免重复 memcpy）
-    for (size_t i = 0; i < TlsVnodeCopyCache::kCap; ++i) {
-        if (i == h) continue;
-        auto &e = tls_vnode_copy_cache_.slots[i];
-        if (e.img && e.vnode_id == vid && e.bf == bf && e.bf_ver == ver) {
-            e.last_use = ++tls_vnode_copy_lru_clock_;
-            return;
-        }
-    }
-
-    // 仅在真正要填充时，计算区间边界
-    Key_t lb = bf->min_key;
-    Key_t ub = std::numeric_limits<Key_t>::max();
-    int next_id = bf->next_id;
-    if (next_id != -1) {
-        BloomFilter* nb = &valueList->bf[next_id];
-        if (nb) {
-            ub = read_consistent(nb->version, [&]() { return nb->getMinKey(); });
-            if (ub <= lb) ub = std::numeric_limits<Key_t>::max();
-        }
-    }
-
-    // 选择目标槽：优先哈希槽，否则找全局 LRU/空槽
-    TlsVnodeCopyEntry* dst = nullptr;
-    if (slot.vnode_id < 0 || slot.vnode_id == vid) {
-        dst = &slot;
-    } else {
-        size_t victim = h;
-        uint64_t oldest = std::numeric_limits<uint64_t>::max();
-        for (size_t i = 0; i < TlsVnodeCopyCache::kCap; ++i) {
-            auto &e = tls_vnode_copy_cache_.slots[i];
-            if (e.vnode_id < 0) { victim = i; break; }
-            if (e.last_use < oldest) {
-                oldest = e.last_use;
-                victim = i;
-            }
-        }
-        dst = &tls_vnode_copy_cache_.slots[victim];
-    }
-
-    // 不再 malloc：dst->img 已在 TLS 构造期绑定到预分配缓冲
-    // 若极端情况下为空（理论不会发生），回退到对应 images 槽
-    if (dst->img == nullptr) {
-        size_t idx = static_cast<size_t>(dst - tls_vnode_copy_cache_.slots);
-        dst->img = &tls_vnode_copy_cache_.images[idx];
-    }
-
-    // 拷贝 vnode 内容（bitmap + records）
-    dst->img->bitmap = vnode->hdr.bitmap & VNODE_FULL_MASK;
-    std::memcpy(dst->img->records, vnode->records, sizeof(dst->img->records));
-
-    dst->vnode_id = vid;
-    dst->bf       = bf;
-    dst->bf_ver   = ver;
-    dst->lb       = lb;
-    dst->ub       = ub;
-    dst->last_use = ++tls_vnode_copy_lru_clock_;
-}
-
-bool DramSkiplist::probeVnodeCopyValue(const CachedVnodeImage* img, Key_t key, Val_t& value) const
-{
-    if (!img) return false;
-    // 降序扫描置位位（也可用升序，复杂度相同）
-    uint32_t bm = img->bitmap & VNODE_FULL_MASK;
-    while (bm) {
-        int idx = 31 - __builtin_clz(bm);
-        bm &= ~(1u << idx);
-        if (img->records[idx].key == key) {
-            value = img->records[idx].value;
+    // 紧凑数组快速匹配：tag 先过滤，再比 key
+    const uint8_t tag = static_cast<uint8_t>(key);
+    auto* arr = slot->packed;
+    const uint16_t n = slot->count;
+    for (uint16_t i = 0; i < n; ++i) {
+        if (arr[i].tag != tag) continue;
+        if (arr[i].key == key) {
+            out = arr[i].value;
+            slot->last_use = ++tls_shadow_cache_.clock;
             return true;
         }
     }
+    slot->last_use = ++tls_shadow_cache_.clock;
     return false;
+#endif
+}
+
+void DramSkiplist::tlsShadowEnsure(int vnode_id, BloomFilter* bloom, Vnode* vnode)
+{
+#if !ENABLE_VNODE_SHADOW_CACHE
+    return;
+#else
+    if (!bloom || !vnode) return;
+    const uint64_t ver_snap = bloom->version.load(std::memory_order_acquire);
+    if (auto* ex = tls_shadow_cache_.probe(vnode_id, ver_snap)) {
+        ex->last_use = ++tls_shadow_cache_.clock;
+        return;
+    }
+
+    // 复制前先拿快照位图，用于紧凑复制
+    const uint32_t bm_snapshot = vnode->hdr.bitmap & VNODE_FULL_MASK;
+    TLSVnodeShadowSlot* slot = tls_shadow_cache_.victim(vnode_id);
+
+    const uint64_t v1 = bloom->version.load(std::memory_order_acquire);
+    __builtin_prefetch(vnode->records, 0, 3);
+
+    // 仅拷贝 bitmap=1 的条目，构建 tag
+    uint16_t cnt = 0;
+    uint32_t bm = bm_snapshot;
+    while (bm) {
+        const int idx = 31 - __builtin_clz(bm);
+        bm &= ~(1u << idx);
+        const auto& r = vnode->records[idx];
+        slot->packed[cnt].key   = r.key;
+        slot->packed[cnt].value = r.value;
+        slot->packed[cnt].tag   = static_cast<uint8_t>(r.key);
+        ++cnt;
+    }
+
+    const uint64_t v2 = bloom->version.load(std::memory_order_acquire);
+    if (v1 != v2) return; // 版本跳变，放弃
+
+    slot->vnode_id = vnode_id;
+    slot->version  = v2;
+    slot->bitmap   = bm_snapshot;
+    slot->count    = cnt;
+    slot->last_use = ++tls_shadow_cache_.clock;
+
+    // 成功后回填 L0
+    tls_last_vnode.vnode_id = vnode_id;
+    tls_last_vnode.version  = slot->version;
+    tls_last_vnode.ptr      = slot;
+#endif
 }

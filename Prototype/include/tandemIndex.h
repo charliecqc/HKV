@@ -29,6 +29,7 @@ class TandemIndex {
         bool scan(Key_t key, size_t range, std::vector<Val_t> &result);
         //void print();
         Val_t lookup(Key_t key);
+        Val_t lookup_old(Key_t key);
         void recover(Key_t key);
         bool insertWithNewInodes(Key_t key, Val_t value);
 

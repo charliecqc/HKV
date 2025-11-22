@@ -9,8 +9,80 @@
 #include <sys/syscall.h>
 #include "insert_tracker.h"
 #include <iomanip>
-#include <numeric>   // std::accumulate
+#include <numeric>
 #include <sstream>
+#include <atomic>
+#include <cstdint>
+
+// ========= 线程本地 Key Cache（极简热点 key 缓存） =========
+#ifndef ENABLE_THREAD_KEY_CACHE
+#define ENABLE_THREAD_KEY_CACHE 1
+#endif
+
+#ifndef THREAD_KEY_CACHE_CAP
+#define THREAD_KEY_CACHE_CAP 384   // 可调：64 / 128 / 256
+#endif
+
+#if ENABLE_THREAD_KEY_CACHE
+struct ThreadKeyCacheEntry {
+    Key_t key;
+    Val_t val;
+    uint8_t used;
+};
+
+struct ThreadKeyCache {
+    ThreadKeyCacheEntry entries[THREAD_KEY_CACHE_CAP];
+    int hand;
+
+    ThreadKeyCache() : hand(0) {
+        for (int i = 0; i < THREAD_KEY_CACHE_CAP; ++i) {
+            entries[i].used = 0;
+        }
+    }
+
+    inline bool get(Key_t k, Val_t &out) {
+        // 线性扫描（CAP 很小，可接受）
+        for (int i = 0; i < THREAD_KEY_CACHE_CAP; ++i) {
+            if (entries[i].used && entries[i].key == k) {
+                out = entries[i].val;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    inline void put(Key_t k, Val_t v) {
+        // 命中更新，否则简单环形替换
+        for (int i = 0; i < THREAD_KEY_CACHE_CAP; ++i) {
+            if (entries[i].used && entries[i].key == k) {
+                entries[i].val = v;
+                return;
+            }
+        }
+        int idx = hand++;
+        if (idx >= THREAD_KEY_CACHE_CAP) {
+            hand = 1;
+            idx = 0;
+        }
+        entries[idx].key  = k;
+        entries[idx].val  = v;
+        entries[idx].used = 1;
+    }
+};
+
+thread_local ThreadKeyCache g_threadKeyCache;
+#endif // ENABLE_THREAD_KEY_CACHE
+
+#ifndef ENABLE_TLS_SHADOW_STATS
+#define ENABLE_TLS_SHADOW_STATS 1
+#endif
+
+#if ENABLE_TLS_SHADOW_STATS
+#include <atomic>
+extern std::atomic<uint64_t> g_tlsShadowAttempts;
+extern std::atomic<uint64_t> g_tlsShadowHits;
+#endif
+// （删除之前的 static g_tlsShadowAttempts / g_tlsShadowHits 定义）
 
 std::queue<CheckpointVector *> g_checkpointQueue;
 bool wqReady[WORKERQUEUE_NUM] = {false};
@@ -168,6 +240,17 @@ TandemIndex::~TandemIndex() {
     cout << "vnode count: " << valueList->pmemVnodePool->getCurrentIdx() << endl;
     mainIndex->printStats();
 
+#if ENABLE_TLS_SHADOW_STATS
+    {
+        uint64_t attempts = g_tlsShadowAttempts.load(std::memory_order_relaxed);
+        uint64_t hits     = g_tlsShadowHits.load(std::memory_order_relaxed);
+        double rate = attempts ? (100.0 * (double)hits / (double)attempts) : 0.0;
+        std::cout << std::fixed << std::setprecision(2)
+                  << "tlsShadowLookup hit-rate: " << hits << "/" << attempts
+                  << " (" << rate << "%)" << std::endl;
+    }
+#endif
+
     tracker_.reset();
     
 }
@@ -259,90 +342,6 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         return true;
     } // for retry
 }
-
-#if 0
-bool TandemIndex::insert(Key_t key, Val_t value)
-{
-#if 0
-    tracker_->Add(key); //TODO: sampling out of the critical section
-    if (tracker_->LastEpochHistogramValid()) {
-        SpeculationToken tok(speculation_running_); 
-        if (tok.is_leader) {
-            maybeActivateHotRegion();
-        }
-    }
-#endif
-    int idx = -1;
-    bool ret = false;
-    Vnode *target_vnode = nullptr;
-    std::vector<Inode *> updates;
-    updates.reserve(MAX_LEVEL);
-
-    int current_level = mainIndex->getLevel();
-    Inode *header = mainIndex->getHeader(current_level - 1);
-
-    std::shared_lock<std::shared_mutex> header_lock(mainIndex->inode_locks[header->getId()]);
-    Inode *target_inode = mainIndex->lookupForInsert(key, header, current_level - 1, header_lock, idx, updates);
-
-    if(target_inode == nullptr) {
-        //header_lock is still the shared lock for the header inode
-        header_lock.unlock();
-        ret = insertWithNewInodes(key, value, target_vnode);
-        if(!ret) {
-            std::cerr << "Failed to insert with new j knodes." << std::endl;
-            return false;
-        }
-        if(target_vnode != nullptr) {
-            ret = mainIndex->add(target_vnode);
-            if(ret == false)
-            {
-                cout << "There is smaller key already inserted in the index." << endl;
-            }
-        } 
-        return true;
-    }   
-
-    // target should not be nullptr, because the smallest key is always in the header
-    assert(target_inode != nullptr);
-#ifdef RB_DEBUG
-    Inode *temp_inode = new Inode(*target_inode); // create a copy of the target inode
-    Inode *next_temp_inode = new Inode (*dramInodePool->at(temp_inode->hdr.next));
-    
-    if(temp_inode->getMaxKey() > next_temp_inode->getMinKey()) {
-        cout << "id: " << target_inode->getId() << " idx: " << idx << " last_index: " << target_inode->hdr.last_index << " min: "<< target_inode->getMinKey() << " max: " << target_inode->getMaxKey()<< endl;
-        cout << "next id: " << next_temp_inode->getId() <<" last_index: " << next_temp_inode->hdr.last_index << " min: " <<next_temp_inode->getMinKey() << " max: " << next_temp_inode->getMaxKey()<< endl;
-    }
-#endif
-
-    int current_last_idx = target_inode->hdr.last_index;
-    int vnode_id = target_inode->gps[idx].value;
-
-    header_lock.unlock();
-    target_vnode = valueList->pmemVnodePool->at(vnode_id);
-    if(target_vnode == nullptr) {
-        std::cout << "Failed to get the vnode from the pmemVnodePool." << std::endl;
-        return false;
-    }
-    BloomFilter *bloom = &valueList->bf[target_vnode->getId()];
-
-    if (insertInVnodeChain(target_vnode, bloom, key, value)) {
-        return true;
-    }
-    // 6) Slow path: vnode full → split (versioned writes inside split), then update parent
-    Vnode* new_vnode = nullptr;
-    if (!handleNodeFullAndSplit(target_vnode, bloom, key, value, new_vnode)) {
-        std::cerr << "Failed to handle node full and split." << std::endl;
-        return false;
-    }
-
-    // 7) Patch parent inode (short exclusive lock inside updateParentInodeAfterSplit)
-    if (!updateParentInodeAfterSplit(target_inode, new_vnode, updates, current_last_idx, idx)) {
-        std::cerr << "Failed to update the parent inode after split." << std::endl;
-        return false;
-    }
-    return true;
-}
-#endif
 
 bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vnode)
 {
@@ -471,13 +470,6 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
                                          Key_t key, Val_t value, Vnode* &right_vnode, BloomFilter* &right_bloom)
 {
     write_lock(left_bloom->version);
-#if 0
-    right_vnode = valueList->pmemVnodePool->getNextNode();
-    if (!right_vnode) {
-        write_unlock(left_bloom->version);
-        return false;
-    }
-#endif
     valueList->split(left_vnode, right_vnode);
     if(right_vnode == nullptr) { // this is the case that all the keys in left vnode are the same. we don't split but invalid all the other keys except one key.
         bool ok = left_vnode->insert(key, value, left_bloom);
@@ -494,50 +486,15 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
     bool ok = false;
     if (key < next_right_min) {
         ok = left_vnode->insert(key, value, left_bloom);
-
-#if 0
-        if(key < left_bloom->getMinKey()) {
-            left_bloom->setMinKey(key);
-        }
-        
-        Key_t left_min_key = left_vnode->getMinKey();
-        assert(left_min_key== left_bloom->min_key);
-        assert(key >= left_bloom->min_key);
-#endif
         write_unlock(left_bloom->version);
     } else {
         // Insert into RIGHT (new) vnode
         write_lock(right_bloom->version);
         write_unlock(left_bloom->version);
         ok = right_vnode->insert(key, value, right_bloom);
-#if 0
-        if(key < right_bloom->getMinKey()) {
-            right_bloom->setMinKey(key);
-        }
-        
-        Key_t right_min_key = right_vnode->getMinKey();
-        assert(right_min_key== right_bloom->min_key);
-        assert(key >= right_bloom->min_key);
-#endif
         write_unlock(right_bloom->version);
     }
     if (!ok) return false;
-   
-#if 0
-    Key_t left_min_key = read_consistent(left_bloom->version, [&](){
-        return left_vnode->getMinKey();
-    });
-    if(left_min_key != left_bloom->min_key) {
-        cout<< "min key mismatch after split: " << left_min_key << " " << left_bloom->min_key << endl;
-    }
-
-    Key_t right_min_key = read_consistent(right_bloom->version, [&](){
-        return right_vnode->getMinKey();
-    });
-    if(right_vnode->getMinKey() != right_bloom->min_key) {
-        cout<< "next min key mismatch after split: " << right_min_key << " " << right_bloom->min_key << endl;
-    }
-#endif
     return true;
 }
 
@@ -613,7 +570,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     }
 }
 
-Val_t TandemIndex::lookup(Key_t key)
+Val_t TandemIndex::lookup_old(Key_t key)
 {
     for(;;) {
         int idx = -1;
@@ -627,15 +584,6 @@ Val_t TandemIndex::lookup(Key_t key)
             return -1;
         }
 
-#if 0
-        int vnode_id; const CachedVnodeImage* img = nullptr;
-        if(mainIndex->tryGetVnodeCopyForKey(key, vnode_id, img) && img) {
-            Val_t v;
-            if(mainIndex->probeVnodeCopyValue(img, key, v)) {
-                return v;
-            }
-        }
-#endif
         InodeSnapShort snap{};
         Inode *parent_inode = mainIndex->lookup(key, header, current_level - 1, idx, snap);
         if(parent_inode == nullptr) {
@@ -661,42 +609,90 @@ Val_t TandemIndex::lookup(Key_t key)
                 Val_t out{};
                 bool can_move{false};
                 int  next_id{-1};
+#if ENABLE_TLS_SHADOW_STATS
+                bool tried_tls{false};
+                bool hit_tls{false};
+#endif
             };
 
             Snap s = read_consistent(bloom->version, [&]() -> Snap {
                 Snap res;
-                // (b) Decide whether we should move right
                 int next = bloom->next_id;
                 if(next == -1) {
                     return res;
                 }
-                BloomFilter* nb = &valueList->bf[next]; // 新增：右节点的版本源
+                BloomFilter* nb = &valueList->bf[next];
                 if(!nb) {
                     return res;
                 }
-
+#if ENABLE_OPT_TLS_OUTSIDE_CLOSURE
+                // 缩减闭包：只做路由判断
+                Key_t next_min = read_consistent(nb->version, [&]() {
+                    return nb->getMinKey();
+                res.can_move = (key >= next_min);
+                res.next_id = next;
+                if(!res.can_move) {
+                    // 不在闭包里做 TLS 与 vnode 查找
+                    res.out = -1;
+                }
+                return res;
+#else
                 Key_t next_min = read_consistent(nb->version, [&]() {
                     return nb->getMinKey();
                 });
                 res.can_move = (key >= next_min);
                 res.next_id = next;
                 if(!res.can_move) {
-                // (c) Try to lookup in the current vnode
                     Val_t tmp;
                     Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
-                    if (vnode->lookupWithoutFilter(key, tmp, bloom)) {
+#if ENABLE_TLS_SHADOW_STATS
+                    res.tried_tls = true;
+#endif
+                    if(mainIndex->tlsShadowLookup(current_vnode_id, key, tmp, bloom, vnode)){
+#if ENABLE_TLS_SHADOW_STATS
+                        res.hit_tls = true;
+#endif
                         res.out = tmp;
-                        //mainIndex->rememberVnodeCopyAfterLookup(key, vnode);
                     } else {
-                        res.out = -1;
+                        if (vnode->lookupWithoutFilter(key, tmp, bloom)) {
+                            res.out = tmp;
+                            mainIndex->tlsShadowEnsure(current_vnode_id, bloom, vnode);
+                        } else {
+                            res.out = -1;
+                        }
                     }
                 }
                 return res;
+#endif
             });
+
+#if ENABLE_OPT_TLS_OUTSIDE_CLOSURE
+            if(!s.can_move) {
+                if(s.out != -1) return s.out; // 早期保守
+                // 闭包未执行 vnode 查找，这里补做
+                Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
+                if(!vnode) return -1;
+                Val_t tmp;
+                if(vnode->lookupWithoutFilter(key, tmp, bloom)) {
+             //       mainIndex->tlsShadowEnsure(current_vnode_id, bloom, vnode);
+                    return tmp;
+                }
+                return -1;
+            }
+#else
+// 原路径统计仍保留
+#if ENABLE_TLS_SHADOW_STATS
+            if (!s.can_move && s.tried_tls) {
+                g_tlsShadowAttempts.fetch_add(1, std::memory_order_relaxed);
+                if (s.hit_tls) {
+                    g_tlsShadowHits.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+#endif
             if(s.can_move == false) {
-                //mainIndex->rememberVnodeCopyAfterLookup(key, valueList->pmemVnodePool->at(current_vnode_id));
                 return s.out;
             }
+#endif
 
             BloomFilter* next_bloom = &valueList->bf[s.next_id];
             bloom = next_bloom;
@@ -705,89 +701,113 @@ Val_t TandemIndex::lookup(Key_t key)
     }
 }
 
-#if 0
 Val_t TandemIndex::lookup(Key_t key)
 {
-    int idx = -1;
-
-    // 获取起始层级和header节点
-    int current_level = mainIndex->getLevel();
-    if(current_level <= 0) {
-        return -1;
+#if ENABLE_THREAD_KEY_CACHE
+    {
+        Val_t cached;
+        if (g_threadKeyCache.get(key, cached)) {
+            return cached;
+        }
     }
-    
-    Inode *header = mainIndex->getHeader(current_level - 1);
-    if(header == nullptr) {
-        return -1;
-    }
-    
-    // lock on the header
-    std::shared_lock<std::shared_mutex> header_lock(mainIndex->inode_locks[header->getId()]);
-    
-    // use mainIndex to lookup the key, header_lock is now locked
-    InodeSnapShort snap{};
-    Inode *target = mainIndex->lookup(key, header, current_level - 1, idx, snap);
-    if(target == nullptr) {
-        return -1;
-    }
-    
-    // now header_lock is still held, as lock of target
-    int vnode_id = target->gps[idx].value;
-    header_lock.unlock();
-    BloomFilter *bloom = &valueList->bf[vnode_id];
-    if(bloom == nullptr) {
-        return -1;
-    }
-    // ----- 3) Lock-free traversal of vnode chain -----
-    int current_vnode_id = vnode_id;
-    for (;;) {
-        struct Snap {
-            Val_t out{};
-            bool can_move{false};
-            int  next_id{-1};
-        };
-        
-
-        Snap s = read_consistent(bloom->version, [&]() -> Snap {
-            Snap res;
-
-            // (b) Decide whether we should move right
-            int next = bloom->next_id;
-            if(next == -1) {
-                return res;
-            }
-            BloomFilter* nb = &valueList->bf[next]; // 新增：右节点的版本源
-            if(!nb) {
-                return res;
-            }
-
-            Key_t next_min = read_consistent(nb->version, [&]() {
-                return nb->getMinKey();
-            });
-            res.can_move = (key >= next_min);
-            res.next_id = next;
-            if(!res.can_move) {
-                // (c) Try to lookup in the current vnode
-                Val_t tmp;
-                Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
-                if (vnode->lookupWithoutFilter(key, tmp, bloom)) {
-                    res.out = tmp;
-                } else {
-                    res.out = -1;
-                }
-            }
-            return res;
-        });
-        if(s.can_move == false) {
-            return s.out;
+#endif
+    for(;;) {
+        int idx = -1;
+        int current_level = mainIndex->getLevel();
+        if(current_level <= 0) {
+            return -1;
         }
 
-        BloomFilter* next_bloom = &valueList->bf[s.next_id];
-        bloom = next_bloom;
-        current_vnode_id = s.next_id;
+        Inode *header = mainIndex->getHeader(current_level - 1);
+        if(header == nullptr) {
+            return -1;
+        }
+
+        InodeSnapShort snap{};
+        Inode *parent_inode = mainIndex->lookup(key, header, current_level - 1, idx, snap);
+        if(parent_inode == nullptr) {
+            cout << " Failed to lookup the key in the main index." << endl;
+            return -1;
+        }
+
+        if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
+            continue; // 并发修改导致失效，重试
+        }
+
+        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
+        const int start_vnode_id = snap.gp_value;
+        const int current_last_idx = snap.last_index;
+
+        BloomFilter *bloom = &valueList->bf[start_vnode_id];
+        if(bloom == nullptr) {
+            return -1;
+        }
+        int current_vnode_id = start_vnode_id;
+        for (;;) {
+            struct Snap {
+                Val_t out{};
+                bool can_move{false};
+                int  next_id{-1};
+#if ENABLE_TLS_SHADOW_STATS
+                bool tried_tls{false};
+                bool hit_tls{false};
+#endif
+            };
+
+            Snap s = read_consistent(bloom->version, [&]() -> Snap {
+                Snap res;
+                int next = bloom->next_id;
+                if(next == -1) {
+                    return res;
+                }
+                BloomFilter* nb = &valueList->bf[next];
+                if(!nb) {
+                    return res;
+                }
+                // 缩减闭包：只做路由判断
+                Key_t next_min = read_consistent(nb->version, [&]() {
+                    return nb->getMinKey();
+                });
+                res.can_move = (key >= next_min);
+                res.next_id = next;
+                if(!res.can_move) {
+                    // 不在闭包里做 TLS 与 vnode 查找
+                    res.out = -1;
+                }
+                return res;
+            });
+
+            if(!s.can_move) {
+                if(s.out != -1) return s.out; // 早期保守
+                // 闭包未执行 vnode 查找，这里补做
+                Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
+                if(!vnode) return -1;
+                Val_t tmp;
+#if ENABLE_TLS_SHADOW_STATS
+                g_tlsShadowAttempts.fetch_add(1, std::memory_order_relaxed);
+#endif
+                if(mainIndex->tlsShadowLookup(current_vnode_id, key, tmp, bloom, vnode)){
+#if ENABLE_TLS_SHADOW_STATS
+                    g_tlsShadowHits.fetch_add(1, std::memory_order_relaxed);
+#endif
+                    return tmp;
+                }
+                if(vnode->lookupWithoutFilter(key, tmp, bloom)) {
+#if ENABLE_THREAD_KEY_CACHE
+                    g_threadKeyCache.put(key, tmp);
+#endif
+                    mainIndex->tlsShadowEnsure(current_vnode_id, bloom, vnode);
+                    return tmp;
+                }
+                return -1;
+            }
+
+            BloomFilter* next_bloom = &valueList->bf[s.next_id];
+            bloom = next_bloom;
+            current_vnode_id = s.next_id;
+        } 
     }
 }
-#endif
 
 void TandemIndex::createLogFlushThread()
 {
@@ -899,13 +919,6 @@ void TandemIndex::rebalanceThreadExec(int id)
             int ret = mainIndex->fastRebalance(inode, parent_inode);
             if(ret == 2) {
                 assert(parent_inode->hdr.last_index == fanout / 2 - 1);
-#if 0
-                cout << " in Rebalance, Parent inode needs rebalancing. id: " << parent_inode->getId()<< endl;
-                
-                for(int i = 0; i < parent_inode->hdr.last_index; i++) {
-                    cout << " gp " << i << " key: " << parent_inode->gps[i].key << " value: " << parent_inode->gps[i].value << " covered_nodes: " << parent_inode->gps[i].covered_nodes << endl;
-                }
-#endif
                 addToRebalanceQueue(parent_inode); // added to rebalance queue
             }
             
@@ -1337,39 +1350,6 @@ void TandemIndex::mergeScanResultsPQ(std::priority_queue<Key_t, std::vector<Key_
     }
 }
 
-#if 0
-void TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &result)
-{
-    
-    int idx = -1;
-    Inode *inode = mainIndex->lookup(key, idx);
-    Vnode *vnode = nullptr;
-    if(inode == nullptr) {
-        std::cout << "Failed to find the inode for the key: " << key << std::endl;
-        return;
-    }
-    {
-        std::shared_lock<std::shared_mutex> lock(mainIndex->inode_locks[inode->getId()]);
-        vnode = valueList->pmemVnodePool->at(inode->gps[idx].value);
-    }
-    int remaining_range = range;
-    while(true) {
-        //std::shared_lock<std::shared_mutex> lock(vnode->hdr.mtx);
-        BloomFilter *bloom = &valueList->bf[vnode->hdr.id];
-        std::shared_lock<std::shared_mutex> lock(bloom->vnode_mtx);
-        remaining_range=vnode->scan(key, remaining_range, result);
-        if(remaining_range > 0 && vnode->hdr.next != -1) {
-            vnode = valueList->pmemVnodePool->at(vnode->hdr.next);
-        }else {
-            if(remaining_range > 0) {
-                std::cout << "Failed to scan key: " << key << " with range: " << range <<" remaining_range: " << remaining_range << std::endl;
-            }
-            return;
-        }
-    }
-}
-#endif
-
 struct AnchorParams {
   double inserts_per_anchor = 64.0; // how many future inserts justify one SGP
   int    max_per_node       = 8;    // cap [remaining empty slots in SGP array]
@@ -1486,7 +1466,6 @@ void TandemIndex::maybeActivateHotRegion() {
     // clear current epoch histogram
     tracker_->DropLastEpochHistogram();
     //std::cout << "[SGP] Speculation completed, dropping last epoch histogram\n";
-
 }
 
 #if 0
