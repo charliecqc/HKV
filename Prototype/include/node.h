@@ -645,7 +645,7 @@ public:
 
     bool lookupWithoutFilter(Key_t key, Val_t &value, BloomFilter *bloom) 
     {
-#ifdef __AVX2__
+#if 0
         // 如果没有 bloom filter，则退回非 SIMD 的线性扫描
         if (bloom == nullptr) {
             goto non_simd;

@@ -10,6 +10,8 @@
 #include <unordered_map>   // 新增
 #pragma once
 
+#define TLS_PIVOT_MAX 2   // 扩容：3 -> 8
+
 class CacheShard {
 public:
     std::map<Key_t, Inode*> table;
@@ -190,7 +192,7 @@ private:
         uint16_t hit_cnt{0};          // 新增：命中次数
     };
     static thread_local struct {
-        TlsPivot pivots[8];            // 扩容：3 -> 8
+        TlsPivot pivots[TLS_PIVOT_MAX];            // 扩容：3 -> 8
         int used;
     } tls_pivot_set_;
 
@@ -264,6 +266,7 @@ public:
     // return the index in gps of the index node that poionts to the vnode
     //Inode *lookup(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx);
     Inode *lookup(Key_t key, Inode *current, int currentHighestLevelIndex, int &idx, InodeSnapShort &snap);
+    Inode *lookup_lambda(Key_t key, Inode *current, int currentHighestLevelIndex, int &idx, InodeSnapShort &snap);
     Inode* lookupForInsert(Key_t key, Inode* &start, int level, int& idx, std::vector<Inode*>& updates);
     Inode* lookupForInsertWithSnap(Key_t key, Inode* &start,
                                    int currentHighestLevelIndex,

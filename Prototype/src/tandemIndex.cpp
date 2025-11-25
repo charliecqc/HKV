@@ -20,8 +20,12 @@
 #endif
 
 #ifndef THREAD_KEY_CACHE_CAP
-#define THREAD_KEY_CACHE_CAP 384   // 可调：64 / 128 / 256
+#define THREAD_KEY_CACHE_CAP 512   // 可调：64 / 128 / 256
 #endif
+
+// 定义 Way 数量和 Set 数量
+#define THREAD_KEY_CACHE_WAYS 8
+#define THREAD_KEY_CACHE_SETS (THREAD_KEY_CACHE_CAP / THREAD_KEY_CACHE_WAYS)
 
 #if ENABLE_THREAD_KEY_CACHE
 struct ThreadKeyCacheEntry {
@@ -31,20 +35,31 @@ struct ThreadKeyCacheEntry {
 };
 
 struct ThreadKeyCache {
-    ThreadKeyCacheEntry entries[THREAD_KEY_CACHE_CAP];
-    int hand;
+    // 改为 [Set][Way] 的二维结构，利用 padding 避免伪共享(虽然是 thread_local 但对齐有好处)
+    ThreadKeyCacheEntry entries[THREAD_KEY_CACHE_SETS][THREAD_KEY_CACHE_WAYS];
+    uint8_t hands[THREAD_KEY_CACHE_SETS]; // 每个 Set 独立的替换指针
 
-    ThreadKeyCache() : hand(0) {
-        for (int i = 0; i < THREAD_KEY_CACHE_CAP; ++i) {
-            entries[i].used = 0;
+    ThreadKeyCache() {
+        for (int i = 0; i < THREAD_KEY_CACHE_SETS; ++i) {
+            hands[i] = 0;
+            for (int j = 0; j < THREAD_KEY_CACHE_WAYS; ++j) {
+                entries[i][j].used = 0;
+            }
         }
     }
 
+    // 简单的 Hash 函数将 key 映射到 Set
+    // 使用 Knuth's Multiplicative Hash 使得连续 key 也能均匀散列
+    inline size_t hash(Key_t k) {
+        return (static_cast<uint64_t>(k) * 11400714819323198485llu) % THREAD_KEY_CACHE_SETS;
+    }
+
     inline bool get(Key_t k, Val_t &out) {
-        // 线性扫描（CAP 很小，可接受）
-        for (int i = 0; i < THREAD_KEY_CACHE_CAP; ++i) {
-            if (entries[i].used && entries[i].key == k) {
-                out = entries[i].val;
+        size_t set_idx = hash(k);
+        // 在特定的 Set 中线性扫描 4 个 Way，编译器会自动展开循环
+        for (int i = 0; i < THREAD_KEY_CACHE_WAYS; ++i) {
+            if (entries[set_idx][i].used && entries[set_idx][i].key == k) {
+                out = entries[set_idx][i].val;
                 return true;
             }
         }
@@ -52,21 +67,24 @@ struct ThreadKeyCache {
     }
 
     inline void put(Key_t k, Val_t v) {
-        // 命中更新，否则简单环形替换
-        for (int i = 0; i < THREAD_KEY_CACHE_CAP; ++i) {
-            if (entries[i].used && entries[i].key == k) {
-                entries[i].val = v;
+        size_t set_idx = hash(k);
+        
+        // 1. 检查是否存在（命中则更新）
+        for (int i = 0; i < THREAD_KEY_CACHE_WAYS; ++i) {
+            if (entries[set_idx][i].used && entries[set_idx][i].key == k) {
+                entries[set_idx][i].val = v;
                 return;
             }
         }
-        int idx = hand++;
-        if (idx >= THREAD_KEY_CACHE_CAP) {
-            hand = 1;
-            idx = 0;
-        }
-        entries[idx].key  = k;
-        entries[idx].val  = v;
-        entries[idx].used = 1;
+
+        // 2. 不存在，执行替换（Set 内 Round-Robin）
+        int way_idx = hands[set_idx];
+        entries[set_idx][way_idx].key  = k;
+        entries[set_idx][way_idx].val  = v;
+        entries[set_idx][way_idx].used = 1;
+
+        // 更新该 Set 的替换指针
+        hands[set_idx] = (way_idx + 1) % THREAD_KEY_CACHE_WAYS;
     }
 };
 
@@ -733,8 +751,9 @@ Val_t TandemIndex::lookup(Key_t key)
         if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
             continue; // 并发修改导致失效，重试
         }
-
+#if ENABLE_L2_SHARD_CACHE
         //mainIndex->populate_cache_shards(key, parent_inode, current_level);
+#endif
         const int start_vnode_id = snap.gp_value;
         const int current_last_idx = snap.last_index;
 

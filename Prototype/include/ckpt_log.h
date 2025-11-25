@@ -388,7 +388,7 @@ public:
         // 阈值：可按压测调整
         static constexpr size_t  kMaxEntries   = 256;         // 事件条数阈值（FULL+DELTA）
         static constexpr size_t  kMaxBytes     = 512 * 1024; // 估算字节阈值
-        static constexpr int64_t kMaxDelayNs   = 400000;     // 400us
+        static constexpr int64_t kMaxDelayNs   = 400000;     // 400ms
 
         enum class Kind : uint8_t { Full, Delta };
 
