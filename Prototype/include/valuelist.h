@@ -6,6 +6,7 @@
 
 #pragma once
 // Value list class on pmem
+
 class ValueList {
 public:
     PmemVnodePool *pmemVnodePool;

@@ -22,6 +22,9 @@ private:
     int numNodes;
     std::atomic<int> currentIdx;
 public:
+#if ENABLE_PMEM_STATS
+    std::shared_mutex stats_mtx;
+#endif
     PmemInodePool(size_t nodeSize, size_t numNodes) : nodeSize(nodeSize), numNodes(numNodes){
         root_obj *root = nullptr;
         init(root);
@@ -80,4 +83,6 @@ public:
     }
 
     bool extend(PMEMobjpool *pop, size_t extendNumNodes);
+
+    void printStats(int level, long vnode_count);
 };

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <tuple>
+#include "valuelist.h"
 
 #pragma once
 
@@ -228,6 +229,8 @@ public:
             return -1;
         }
     }
+
+
 };
 
 struct alignas(64) AlignedAtomicSizeT {
@@ -240,6 +243,10 @@ public:
     std::shared_mutex mtx;
     int retry_count;
     CkptLogNVM *ckptlog;
+    ValueList *valueList;
+    int current_highest_level;
+    long current_inode_idx;
+    vector<int> inode_count_on_each_level;
 
     // 游标
     AlignedAtomicSizeT a_consumed_start; // use: a_consumed_start.v
@@ -250,9 +257,13 @@ public:
 
     std::atomic<int32_t> active_batchers{0};
 
-    // === 新增：构造 / 析构 ===
+    #if ENABLE_PMEM_STATS
+    explicit CkptLog(size_t logSize = MAX_CKP_LOG_ENTRIES, int current_highest_level = 0, ValueList *va_list = nullptr);
+    ~CkptLog();
+    #else
     explicit CkptLog(size_t logSize = MAX_CKP_LOG_ENTRIES);
     ~CkptLog();
+    #endif
 
     // 原有整块写
     void enq(dram_log_entry_t *entry);
@@ -261,10 +272,11 @@ public:
     log_entry_hdr *nvm_log_enq(size_t entry_size);
 
     bool flushOnce();
+    double calculatePmemSearchEfficiency(long vnode_count);
     inline void backgroundFlushLoopStep() { flushOnce(); }
 
     size_t reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes);
-    void reclaim(PmemInodePool *pmemInodePool);
+    void reclaim(double dramSearchEfficincy, long vnode_count, PmemInodePool *pmemInodePool);
     void forceReclaim(PmemInodePool *pmemInodePool);
 
     void waitDurable(size_t lsn);
@@ -295,9 +307,7 @@ public:
         b.flush();
         forcePersist();
     }
-    // 新增：写入增量日志
 #if ENABLE_DELTA_LOG
-    // **修改 appendDeltaLog 签名**
     bool appendDeltaLog(int32_t inode_id,
                         int32_t last_index,
                         int32_t next,
@@ -305,7 +315,6 @@ public:
                         const WalDeltaEntry *entries,
                         size_t entry_count);
 
-    // **修改 enqDelta 签名**
     void enqDelta(int32_t inode_id,
                   int32_t last_index,
                   int32_t next,
@@ -313,7 +322,6 @@ public:
                   const WalDeltaEntry *entries,
                   size_t entry_count);
 
-    // **修改 applyDeltaEntries 签名**
     void applyDeltaEntries(Inode *inode,
                            const WalDeltaEntry *entries,
                            size_t entry_count,
@@ -322,20 +330,16 @@ public:
                            int32_t new_parent_id);
 #endif // ENABLE_DELTA_LOG
 
-    // 查询队列间隙
-    size_t getDurableGap() const;   // durable - consumed，可回放的持久字节
-    size_t getProducedGap() const;  // produced - durable，已写未持久的小尾巴
-    size_t getBacklogGap() const;   // produced - consumed，总积压
+    size_t getDurableGap() const;   // durable - consumed, persisted bytes that can be reclaimed
+    size_t getProducedGap() const;  // produced - durable， bytes waiting to be persisted
+    size_t getBacklogGap() const;   // produced - consumed， bytes waiting to be processed
 
-    // 尝试刷一次（按阈值），仅在有小尾巴时推进 durable_end
-    bool tryFlushOnce();            // 封装内部 flushOnce()
+    //try to flush once to move the durable edge forward
+    bool tryFlushOnce();          
 
-    // 建议的单批回放字节（结合内部阈值）
     size_t suggestReclaimBatchBytes() const;
 
-    // 已有：forcePersist(), reclaimBatch(...), forceReclaim(...) 等
 
-    // 批量预留/提交（FULL/DELTA 通用）
     unsigned char* reserveChunk(size_t total_bytes_aligned);
     void commitChunk(size_t total_bytes_aligned);
     void enqBatch(const std::vector<dram_log_entry_t*>& entries);
@@ -345,7 +349,6 @@ public:
     };
     void enqDeltaBatch(const std::vector<DeltaPack>& packs);
 
-    // 线程本地批处理器：保证“捕获顺序”->“写入顺序”
     class Batcher {
     public:
         explicit Batcher(CkptLog* owner)
@@ -353,10 +356,8 @@ public:
             owner_->active_batchers.fetch_add(1, std::memory_order_acq_rel);
             }
 
-        // 捕获 FULL（保持最小改动）
         void addFull(dram_log_entry_t* e);
 
-        // 捕获单槽 DELTA（保持最小改动）
         void addDeltaSlot(int32_t inode_id,
                           int32_t last_index,
                           int32_t next,
@@ -366,13 +367,14 @@ public:
                           const Val_t& value,
                           int16_t covered);
 
-        void flush();              // 确保使用 move 并清空本地缓冲
+        void flush();
         void detach() noexcept { 
             if(!detached_) {
                 detached_ = true; 
                 owner_->active_batchers.fetch_sub(1, std::memory_order_acq_rel);
             }
-        }  // 禁止析构期再 flush
+        }
+
         ~Batcher() {
             if (!detached_) {
                 flush();
@@ -381,14 +383,11 @@ public:
         }
     private:
         using Clock = std::chrono::steady_clock;
-        bool detached_{false};     // 新增
-        // 假设持有指向所属 CkptLog 的指针（已有）
-        // CkptLog* owner_;
-        // std::vector<dram_log_entry_t*> buf_;
-        // 阈值：可按压测调整
-        static constexpr size_t  kMaxEntries   = 256;         // 事件条数阈值（FULL+DELTA）
-        static constexpr size_t  kMaxBytes     = 512 * 1024; // 估算字节阈值
-        static constexpr int64_t kMaxDelayNs   = 400000;     // 400ms
+        bool detached_{false}; 
+
+        static constexpr size_t  kMaxEntries   = 256;         //threshold of number of entries
+        static constexpr size_t  kMaxBytes     = 512 * 1024; //threshold of bytes
+        static constexpr int64_t kMaxDelayNs   = 400000;     //threshold of delay in nanoseconds
 
         enum class Kind : uint8_t { Full, Delta };
 

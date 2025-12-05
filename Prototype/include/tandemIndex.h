@@ -27,9 +27,7 @@ class TandemIndex {
         bool update(Key_t key, Val_t value);
         bool scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &result);
         bool scan(Key_t key, size_t range, std::vector<Val_t> &result);
-        //void print();
         Val_t lookup(Key_t key);
-        Val_t lookup_old(Key_t key);
         void recover(Key_t key);
         bool insertWithNewInodes(Key_t key, Val_t value);
 
@@ -77,6 +75,8 @@ class TandemIndex {
             is_data_loaded = loaded;
         }
 
+        void printStatus();
+
     private:
         DramSkiplist *mainIndex;
         DramInodePool *dramInodePool;
@@ -92,7 +92,8 @@ class TandemIndex {
         // 重平衡队列相关成员
         std::queue<Inode *> rebalanceQueue;
         std::mutex rebalanceQueueMutex;
-        std::mutex printMutex;
+        //std::mutex printMutex;
+        std::shared_mutex printMutex;
         std::unordered_set<Inode *> rebalancingInodes;
         std::unordered_set<Inode *> nodesInRebalanceProcess;
 };

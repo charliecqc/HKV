@@ -33,9 +33,9 @@ LogMergeThread::~LogMergeThread() {
     }
 }
 
-void LogMergeThread::logMergeOperation() {
+void LogMergeThread::logMergeOperation(double dram_search_efficiency, long vnode_count) {
     try {
-        ckptLog->reclaim(pmemInodePool);
+        ckptLog->reclaim(dram_search_efficiency, vnode_count, pmemInodePool);
     } catch (std::exception &e) {
         std::cout << "Exception in logMergeOperation: " << e.what() << std::endl;
     }

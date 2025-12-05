@@ -46,7 +46,7 @@ inline void load(int wl,
     std::string init_file;
     std::string txn_file;
 
-    workload_dir = "workloads/5M";
+    workload_dir = "workloads/250M";
     init_file = workload_dir + "/load.trace";
 
     if (kt == RAND_KEY && wl == WORKLOAD_A)
@@ -72,10 +72,6 @@ inline void load(int wl,
     else if (kt == RAND_KEY && wl == WORKLOAD_F)
     {
         txn_file = workload_dir + "/txnsf_zipf.trace";
-    }
-    else if (kt == RAND_KEY && wl == WORKLOAD_G)
-    {
-        txn_file = workload_dir + "/txnsg_zipf.trace";
     }
     else if (kt == MONO_KEY && wl == WORKLOAD_A)
     {
@@ -341,7 +337,7 @@ inline void exec(int wl,
 
                 // 仅由线程 0 负责打印，避免输出混乱
                 if (thread_id == 0) {
-                    if (now - last_print_time >= 0.1) {
+                    if (now - last_print_time >= 1.0) {
                         double interval_elapsed = now - last_print_time;
                         size_t current_total = total_inserts.load(std::memory_order_relaxed);
                         uint64_t current_total_latency = total_insert_latency_ns.load(std::memory_order_relaxed);
@@ -362,16 +358,10 @@ inline void exec(int wl,
                         last_total_latency_ns = current_total_latency;
                     }
                 }
-#if 1
-                if (now - start_run_time > 40) { //4.8 is 48573
+
+                if (now - start_run_time > 60.0) {
                     break;
                 }
-#endif
-#if 0
-                if(total_inserts.load(std::memory_order_relaxed) >= 5000000) {
-                    break;
-                }
-#endif
             }
 
             auto t1 = std::chrono::high_resolution_clock::now();
@@ -451,20 +441,16 @@ inline void exec(int wl,
     // 添加原子计数器用于统计全局延迟 (纳秒)
     std::atomic<uint64_t> total_txn_latency_ns{0};
 
-    // 新增：专门统计 READ(lookup) 的操作数和延迟
-    std::atomic<size_t> total_lookup_ops{0};
-    std::atomic<uint64_t> total_lookup_latency_ns{0};
-
     auto func4 = [num_thread,
                   idx, index_type,
+                  //&read_miss_counter,
+                  //&read_hit_counter,
                   &keys,
                   &values,
                   &ranges,
                   &ops,
                   &total_ops,
-                  &total_txn_latency_ns,
-                  &total_lookup_ops,
-                  &total_lookup_latency_ns](uint64_t thread_id)
+                  &total_txn_latency_ns](uint64_t thread_id)
     {
         size_t total_num_op = ops.size();
         size_t op_per_thread = total_num_op / num_thread;
@@ -484,59 +470,44 @@ inline void exec(int wl,
         int op_cnt = 0;
         size_t local_ops = 0;
         uint64_t local_latency_ns = 0;
-        size_t last_total_lookup_ops = 0;          // 上一次打印时的 READ 总操作数
-        uint64_t last_total_lookup_latency_ns = 0; // 上一次打印时的 READ 总延迟
-
-
-        // 新增：只针对 READ 的局部统计
-        size_t local_lookup_ops = 0;
-        uint64_t local_read_latency_ns = 0;
 
         // declare_periodic_count;
         for (size_t i = start_index; i < end_index; i++)
         {
-            if (local_lookup_ops > 0 && (local_lookup_ops % 512 == 0))
-            {
-                // 聚合到全局原子，只统计 READ
-                total_lookup_ops.fetch_add(local_lookup_ops, std::memory_order_relaxed);
-                total_lookup_latency_ns.fetch_add(local_read_latency_ns, std::memory_order_relaxed);
-
-                local_lookup_ops = 0;
-                local_read_latency_ns = 0;
-
+            // 每 1024 次操作检查一次时间，避免频繁调用 get_now() 影响性能
+            if ((local_ops % 1024) == 0 && local_ops > 0) {
+                // 更新全局计数（使用 relaxed 内存序以减少开销）
+                total_ops.fetch_add(1024, std::memory_order_relaxed);
+                total_txn_latency_ns.fetch_add(local_latency_ns, std::memory_order_relaxed);
+                local_latency_ns = 0;
+                
                 double now = get_now();
 
-                if (thread_id == 0)
-                {
-                    if (now - last_print_time >= 0.1)
-                    {
+                // 仅由线程 0 负责打印，避免输出混乱
+                if (thread_id == 0) {
+                    if (now - last_print_time >= 1.0) {
                         double interval_elapsed = now - last_print_time;
-                        size_t current_total_lookup = total_lookup_ops.load(std::memory_order_relaxed);
-                        uint64_t current_total_lookup_lat = total_lookup_latency_ns.load(std::memory_order_relaxed);
+                        size_t current_total = total_ops.load(std::memory_order_relaxed);
+                        uint64_t current_total_latency = total_txn_latency_ns.load(std::memory_order_relaxed);
 
-                        size_t interval_ops = current_total_lookup - last_total_lookup_ops;
-                        uint64_t interval_latency = current_total_lookup_lat - last_total_lookup_latency_ns;
+                        // 计算间隔内的增量
+                        size_t interval_ops = current_total - last_total_ops;
+                        uint64_t interval_latency = current_total_latency - last_total_latency_ns;
 
-                        double interval_thp = (interval_elapsed > 0)
-                                                  ? (interval_ops / interval_elapsed)
-                                                  : 0.0;
-                        double interval_avg_lat_us = (interval_ops > 0)
-                                                         ? ((double)interval_latency / interval_ops / 1000.0)
-                                                         : 0.0;
+                        double interval_thp = interval_ops / interval_elapsed;
+                        double interval_avg_lat_us = (interval_ops > 0) ? ((double)interval_latency / interval_ops / 1000.0) : 0.0;
 
-                        std::cout << "[Running Lookup] Time: " << (now - start_run_time)
-                                  << "s, Interval Throughput: " << interval_thp
-                                  << " lookups/sec, Interval Avg Latency: "
+                        std::cout << "[Running Txn] Time: " << (now - start_run_time) << "s, Interval Throughput: " 
+                                  << interval_thp << " ops/sec, Interval Avg Latency: " 
                                   << interval_avg_lat_us << " us" << std::endl;
-
+                        
                         last_print_time = now;
-                        last_total_lookup_ops = current_total_lookup;
-                        last_total_lookup_latency_ns = current_total_lookup_lat;
+                        last_total_ops = current_total;
+                        last_total_latency_ns = current_total_latency;
                     }
                 }
 
-                if (now - start_run_time > 10.0)
-                {
+                if (now - start_run_time > 60.0) {
                     break;
                 }
             }
@@ -549,12 +520,8 @@ inline void exec(int wl,
             }
             else if (op == OP_READ)
             { // READ
-                auto t1 = std::chrono::high_resolution_clock::now();
                 v.clear();
                 idx->lookup(keys[i]);
-                 auto t2 = std::chrono::high_resolution_clock::now();
-                local_read_latency_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
-                local_lookup_ops++;
             }
             else if (op == OP_UPSERT)
             { // UPDATE
@@ -580,7 +547,7 @@ inline void exec(int wl,
     startThreads(idx, num_thread, func4);
     end_time = get_now();
 
-    tput = total_ops.load(std::memory_order_relaxed) / (end_time - start_time);
+    tput = txn_num / (end_time - start_time);
     elapsed_time = end_time - start_time;
     //---------------------------------------------------------------------------------------------------
 
@@ -612,11 +579,6 @@ inline void exec(int wl,
     else if (wl == WORKLOAD_F)
     {
         std::cout << "YCSB_F throughput " << (tput + (sum - sum)) << std::endl;
-        std::cout << "Elapsed_time " << elapsed_time;
-    }
-    else if (wl == WORKLOAD_G)
-    {
-        std::cout << "YCSB_G throughput " << (tput + (sum - sum)) << std::endl;
         std::cout << "Elapsed_time " << elapsed_time;
     }
     else
@@ -674,10 +636,6 @@ int main(int argc, char *argv[])
     else if (strcmp(argv[1], "f") == 0)
     {
         wl = WORKLOAD_F;
-    }
-    else if (strcmp(argv[1], "g") == 0)
-    {
-        wl = WORKLOAD_G;
     }
     else
     {

@@ -56,6 +56,7 @@ public:
             cout << "No more nodes in the pool." << endl;
             return nullptr;
         }
+        pmemVnodePool[numNodes - 1]->hdr.next = idx;
         return pmemVnodePool[idx];
     }
 

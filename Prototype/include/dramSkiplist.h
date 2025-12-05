@@ -180,7 +180,7 @@ struct TLSVnodeShadowCache {
 
 class DramSkiplist {
 private:
-    // 全局结构版本（split / rebalance 后 bump）
+    //全局结构版本（split / rebalance 后 bump）
     std::atomic<uint32_t> global_epoch{0};
 
     struct TlsPivot {
@@ -209,9 +209,10 @@ public:
     ValueList *valueList;
     int level; //level is the current max level of the skiplist
     std::shared_mutex level_lock;
+    vector<int> inode_count_on_each_level;
 
-    std::mutex inodeRelationMutex;
-    std::unordered_map<Inode*, Inode*> childToParentMap; // map to store child-parent relationships for rebalancing
+    //std::mutex inodeRelationMutex;
+    //std::unordered_map<Inode*, Inode*> childToParentMap; // map to store child-parent relationships for rebalancing
 
     // **新增：为查找操作设计的快速路径缓存**
     std::map<Key_t, Inode*> lookup_cache;
@@ -305,7 +306,7 @@ public:
 
     void recordInodeRelation(Inode* &child, Inode* &parent);
     Inode* getParentInode(Inode* &child);
-    void removeInodeRelation(Inode* &child);
+    //void removeInodeRelation(Inode* &child);
     void acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<std::unique_lock<std::shared_mutex>>& locks);
     void acquireWriteLocksInOrderByVersion(std::vector<Inode*>& nodes);
     void releaseWriteLocksInOrderByVersion(std::vector<Inode*>& nodes);
@@ -325,6 +326,8 @@ public:
         return false;
     }
     void printStats();
+    double calculateSearchEfficiency(long count);
+    void fillInodeCountEachLevel(int level);
 
     // 新增辅助函数声明
     bool find_candidate_parent(Inode* inode, Inode* parent_hint, 

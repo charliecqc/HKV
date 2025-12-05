@@ -52,7 +52,7 @@ private:
 public:
     LogMergeThread(int tid, CkptLog *cklog, PmemInodePool *pmemInodePool);
     ~LogMergeThread();
-    void logMergeOperation();
+    void logMergeOperation(double dram_search_efficiency, long vnode_count);
     //bool isCkptLogEmpty();
 };
 

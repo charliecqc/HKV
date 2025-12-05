@@ -14,16 +14,14 @@
 #include <atomic>
 #include <cstdint>
 
-// ========= 线程本地 Key Cache（极简热点 key 缓存） =========
 #ifndef ENABLE_THREAD_KEY_CACHE
 #define ENABLE_THREAD_KEY_CACHE 1
 #endif
 
 #ifndef THREAD_KEY_CACHE_CAP
-#define THREAD_KEY_CACHE_CAP 512   // 可调：64 / 128 / 256
+#define THREAD_KEY_CACHE_CAP 512 
 #endif
 
-// 定义 Way 数量和 Set 数量
 #define THREAD_KEY_CACHE_WAYS 8
 #define THREAD_KEY_CACHE_SETS (THREAD_KEY_CACHE_CAP / THREAD_KEY_CACHE_WAYS)
 
@@ -35,9 +33,8 @@ struct ThreadKeyCacheEntry {
 };
 
 struct ThreadKeyCache {
-    // 改为 [Set][Way] 的二维结构，利用 padding 避免伪共享(虽然是 thread_local 但对齐有好处)
     ThreadKeyCacheEntry entries[THREAD_KEY_CACHE_SETS][THREAD_KEY_CACHE_WAYS];
-    uint8_t hands[THREAD_KEY_CACHE_SETS]; // 每个 Set 独立的替换指针
+    uint8_t hands[THREAD_KEY_CACHE_SETS];
 
     ThreadKeyCache() {
         for (int i = 0; i < THREAD_KEY_CACHE_SETS; ++i) {
@@ -48,15 +45,12 @@ struct ThreadKeyCache {
         }
     }
 
-    // 简单的 Hash 函数将 key 映射到 Set
-    // 使用 Knuth's Multiplicative Hash 使得连续 key 也能均匀散列
     inline size_t hash(Key_t k) {
         return (static_cast<uint64_t>(k) * 11400714819323198485llu) % THREAD_KEY_CACHE_SETS;
     }
 
     inline bool get(Key_t k, Val_t &out) {
         size_t set_idx = hash(k);
-        // 在特定的 Set 中线性扫描 4 个 Way，编译器会自动展开循环
         for (int i = 0; i < THREAD_KEY_CACHE_WAYS; ++i) {
             if (entries[set_idx][i].used && entries[set_idx][i].key == k) {
                 out = entries[set_idx][i].val;
@@ -69,7 +63,6 @@ struct ThreadKeyCache {
     inline void put(Key_t k, Val_t v) {
         size_t set_idx = hash(k);
         
-        // 1. 检查是否存在（命中则更新）
         for (int i = 0; i < THREAD_KEY_CACHE_WAYS; ++i) {
             if (entries[set_idx][i].used && entries[set_idx][i].key == k) {
                 entries[set_idx][i].val = v;
@@ -77,13 +70,11 @@ struct ThreadKeyCache {
             }
         }
 
-        // 2. 不存在，执行替换（Set 内 Round-Robin）
         int way_idx = hands[set_idx];
         entries[set_idx][way_idx].key  = k;
         entries[set_idx][way_idx].val  = v;
         entries[set_idx][way_idx].used = 1;
 
-        // 更新该 Set 的替换指针
         hands[set_idx] = (way_idx + 1) % THREAD_KEY_CACHE_WAYS;
     }
 };
@@ -100,7 +91,6 @@ thread_local ThreadKeyCache g_threadKeyCache;
 extern std::atomic<uint64_t> g_tlsShadowAttempts;
 extern std::atomic<uint64_t> g_tlsShadowHits;
 #endif
-// （删除之前的 static g_tlsShadowAttempts / g_tlsShadowHits 定义）
 
 std::queue<CheckpointVector *> g_checkpointQueue;
 bool wqReady[WORKERQUEUE_NUM] = {false};
@@ -150,22 +140,52 @@ TandemIndex::TandemIndex() {
     pmemBFPool = new PmemBFPool(MAX_VALUE_NODES);
     valueList = new ValueList();
     if(valueList->pmemVnodePool->getCurrentIdx() > 1) {
-        PmemManager::memcpyToDRAM(4,
-            reinterpret_cast<char *>(valueList->bf),
-            reinterpret_cast<char *>(pmemBFPool->at(0)),
-            sizeof(BloomFilter) * (valueList->pmemVnodePool->getCurrentIdx() + 1));
+        if(pmemBFPool->at(0)->next_id != -1) { // shutdown normally
+            PmemManager::memcpyToDRAM(4,
+                reinterpret_cast<char *>(valueList->bf),
+                reinterpret_cast<char *>(pmemBFPool->at(0)),
+                sizeof(BloomFilter) * (valueList->pmemVnodePool->getCurrentIdx() + 1));
+        }else {
+           for(int i = 0; i <= valueList->pmemVnodePool->getCurrentIdx(); i++) {
+               BloomFilter *bloom = &(valueList->bf[i]);
+               Vnode *vnode = valueList->pmemVnodePool->at(i);
+               bloom->next_id  = vnode->hdr.next;
+               Key_t min_key = std::numeric_limits<Key_t>::max();
+               for(uint32_t bm = vnode->hdr.bitmap; bm; ) {
+                   int idx = __builtin_ctz(bm);
+                   bloom->add(vnode->records[idx].key, idx);
+                   if(vnode->records[idx].key < min_key) {
+                       min_key = vnode->records[idx].key;
+                   }
+                   bm &= (bm - 1);
+               }
+                bloom->setMinKey(min_key);
+           }
+        }
         setDataLoaded(true);
     }else{
         setDataLoaded(false);
     }
     pmemRecoveryArray = new PmemInodePool(sizeof(Inode), MAX_NODES);
     recoveryManager = new RecoveryManager(pmemRecoveryArray); 
-    int level = recoveryManager->recoveryOperation();
+    int levels = recoveryManager->recoveryOperation();
     dramInodePool = recoveryManager->getDramInodePool();
+#if ENABLE_PMEM_STATS
+    ckptLog = new CkptLog(LOG_SIZE, levels-1, valueList);
+#else
     ckptLog = new CkptLog(LOG_SIZE);
+#endif
     PmemManager::flushToNVM(3, reinterpret_cast<char *>(ckptLog), sizeof(ckptLog));
     mainIndex = new DramSkiplist(ckptLog, dramInodePool, valueList);
-    mainIndex->setLevel(level);
+    mainIndex->setLevel(levels);
+    if(isDataLoaded()) {
+        mainIndex->fillInodeCountEachLevel(levels);
+        ckptLog->current_highest_level = levels - 1;
+        ckptLog->current_inode_idx = dramInodePool->getCurrentIdx();
+        memcpy(ckptLog->inode_count_on_each_level.data(),
+               mainIndex->inode_count_on_each_level.data(),
+               sizeof(int) * levels);
+    }
     createLogFlushThread();
     createLogMergeThread();
     createRebalanceThread();
@@ -176,10 +196,8 @@ TandemIndex::TandemIndex() {
         index_header->hdr.last_index,index_header->hdr.next,
         index_header->hdr.level, index_header->hdr.parent_id);
     header_entry->setKeyVal(0, index_header->gps[0].key, index_header->gps[0].value, 1);
-    // 改为批量累积
     ckptLog->batcher().addFull(header_entry);
     
-    // 初始化rebalanceThread数组
     for(int i = 0; i < MAX_REBALANCE_THREADS; i++) {
         rebalanceThread[i] = nullptr;
     }
@@ -201,12 +219,8 @@ TandemIndex::TandemIndex() {
 }
 
 TandemIndex::~TandemIndex() {
-    // 先提交主线程的尾批，并阻止 TLS 析构时再次 flush
     g_endTandem.store(true, std::memory_order_relaxed);
-
-    // 通知退出
     
-    // 1) 等重平衡线程
     for(int i = 0; i < MAX_REBALANCE_THREADS; i++) {
         if(rebalanceThread[i] != nullptr) {
             if(rebalanceThread[i]->joinable()) rebalanceThread[i]->join();
@@ -214,21 +228,18 @@ TandemIndex::~TandemIndex() {
             rebalanceThread[i] = nullptr;
         }
     }
-    //cout << "after finish rebalance" << pmemRecoveryArray->at(40)->hdr.next << endl;
     ckptLog->drainAndPerssistBatchers();
-    // 2) 等日志线程
     if (logFlushThread && logFlushThread->joinable()) {
         logFlushThread->join();
         delete logFlushThread;
         logFlushThread = nullptr;
     }
-    //cout << "after finish log flush" << pmemRecoveryArray->at(40)->hdr.next << endl;
     if (logMergeThread && logMergeThread->joinable()) {
         logMergeThread->join();
         delete logMergeThread;
         logMergeThread = nullptr;
     }
-    // 3) 所有线程都结束后再安全销毁 ckptLog
+
     if (ckptLog) {
         if(!ckptLog->isLogEmpty()) {
             ckptLog->forceReclaim(pmemRecoveryArray);
@@ -255,7 +266,7 @@ TandemIndex::~TandemIndex() {
         reinterpret_cast<char *>(valueList->bf),
         sizeof(BloomFilter) * (valueList->pmemVnodePool->getCurrentIdx() + 1));
 
-    cout << "vnode count: " << valueList->pmemVnodePool->getCurrentIdx() << endl;
+    //cout << "vnode count: " << valueList->pmemVnodePool->getCurrentIdx() << endl;
     mainIndex->printStats();
 
 #if ENABLE_TLS_SHADOW_STATS
@@ -275,6 +286,9 @@ TandemIndex::~TandemIndex() {
 
 bool TandemIndex::insert(Key_t key, Val_t value)
 {
+#if ENABLE_PMEM_STATS
+    std::shared_lock<std::shared_mutex> lk(pmemRecoveryArray->stats_mtx);
+#endif
 #if 0
     tracker_->Add(key); //TODO: sampling out of the critical section
     if (tracker_->LastEpochHistogramValid()) {
@@ -284,7 +298,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         }
     }
 #endif
-    for (;;) { // 重试环
+    for (;;) {
         int idx = -1;
         Vnode *target_vnode = nullptr;
         std::vector<Inode *> updates;
@@ -296,11 +310,9 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         Inode *header = mainIndex->getHeader(current_level - 1);
         if (!header) return false;
 
-        // 新：lookup 时当场捕获叶子的短快照
         InodeSnapShort snap{};
         Inode *parent_inode = mainIndex->lookupForInsertWithSnap(key, header, current_level - 1, idx, updates, snap);
         
-        // 空结构（只 header）
         if (parent_inode == nullptr) {
             bool ret = insertWithNewInodes(key, value, target_vnode);
             if (!ret) {
@@ -316,14 +328,12 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             return true;
         }
 
-        // 使用短快照快速验证（优先用 ver_snap）
         if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
-            //cout << "SnapShort validation failed for key: " << key << endl;
-            continue; // 并发修改导致失效，整条路径重试
+            continue;
         }
         //mainIndex->populate_cache_shards(key, parent_inode, current_level);
 
-        assert(parent_inode->hdr.level == 0); // 叶子层
+        assert(parent_inode->hdr.level == 0);
 
         const int start_vnode_id = snap.gp_value; //start vnode of the chain that contains the target vnode
         const int current_last_idx = snap.last_index; // the last index of the target inode at the time of lookup
@@ -336,14 +346,13 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         target_vnode = start_vnode;
         BloomFilter *target_vnode_bloom = &valueList->bf[target_vnode->getId()];
 
-        //Vnode *start_vnode_replica = new Vnode(*start_vnode); // create a replica of the target vnode for validation
 
-        // 快路径：尝试直接插入
+        //fast path: insert into vnode chain
         if (insertInVnodeChain(target_vnode, target_vnode_bloom, key, value)) {
             return true;
         }
 
-        // 慢路径：节点满 -> split
+        //slow path: need to split the target vnode
         Vnode* new_vnode = nullptr; //new_vnode and target_vnode share the contents of old target_vnode before split
         BloomFilter* new_bloom = nullptr;
         if (!handleNodeFullAndSplit(target_vnode, target_vnode_bloom, key, value, new_vnode, new_bloom)) {
@@ -351,7 +360,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             return false;
         }
 
-        // 分裂后更新父节点（内部会短写锁再次核对 last_index）
+        //update parent inode after split
         int last_idx_mut = current_last_idx;
         if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx)) {
             std::cerr << "Failed to update the parent inode after split." << std::endl;
@@ -377,7 +386,6 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
     valueList->append(headerVnode, newVnode);
     headerbloom->setNextId(newVnode->getId());
 
-    // 在新vnode中插入键值对
     BloomFilter* bloom = &valueList->bf[newVnode->getId()];
     //std::unique_lock<std::shared_mutex> vnode_lock(bloom->vnode_mtx);
     write_lock(bloom->version);
@@ -414,12 +422,12 @@ bool TandemIndex::insertInVnodeChain(Vnode* &start_vnode, BloomFilter* &start_bl
 
             Step s = read_consistent(current_bloom->version, [&]() -> Step {
                 Step r;
-                int nid = current_bloom->next_id;              // 读取右节点id
+                int nid = current_bloom->next_id;               // get right node id 
                 if (nid == -1) {
                     return r;
                 }
 
-                BloomFilter* next_bloom = &valueList->bf[nid]; // 新增：右节点的版本源
+                BloomFilter* next_bloom = &valueList->bf[nid]; // get right node's bloom
                 if(!next_bloom) return r;
                 // read next's min under next's version
                 Key_t next_min = read_consistent(next_bloom->version, [&]() {
@@ -447,7 +455,7 @@ bool TandemIndex::insertInVnodeChain(Vnode* &start_vnode, BloomFilter* &start_bl
             write_lock(current_bloom->version);
             int nid = current_bloom->next_id;
             if (nid != -1) {
-                BloomFilter* next_bloom= &valueList->bf[nid]; // 新增：右节点的版本源
+                BloomFilter* next_bloom= &valueList->bf[nid];
                 if (next_bloom) {
                     Key_t next_min = read_consistent(next_bloom->version, [&]() {
                         return next_bloom->getMinKey();
@@ -516,8 +524,6 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
     return true;
 }
 
-//parent_inode is the last level inode that contains the targetVnode
-//bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level)
 bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode,
                                                std::vector<Inode *> &updates,
                                                int &last_idx, int &idx_to_next_level)
@@ -537,7 +543,6 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
         parent_inode->gps[idx_to_next_level].covered_nodes++;
 #if ENABLE_DELTA_LOG
-        // 单槽 delta 改为批量聚合
         ckptLog->batcher().addDeltaSlot(
             parent_inode->getId(),
             parent_inode->hdr.last_index,
@@ -549,7 +554,6 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
             parent_inode->gps[idx_to_next_level].covered_nodes
         );
 #endif
-        // FULL 快照也改为批量累积（如仍需保守冗余）
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
             parent_inode->hdr.last_index, parent_inode->hdr.next,
             parent_inode->hdr.level, parent_inode->hdr.parent_id);
@@ -565,7 +569,6 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     
     int pos = -1;
     if (parent_inode->activateGPForVnode(targetKey, targetVnode->getId(), pos, 1)) {
-        // 结构变化时仍记录 FULL（批量）
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
             parent_inode->hdr.last_index, parent_inode->hdr.next,
             parent_inode->hdr.level, parent_inode->hdr.parent_id);
@@ -585,137 +588,6 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         addToRebalanceQueue(parent_inode);
         write_unlock(parent_inode->version);
         return true;
-    }
-}
-
-Val_t TandemIndex::lookup_old(Key_t key)
-{
-    for(;;) {
-        int idx = -1;
-        int current_level = mainIndex->getLevel();
-        if(current_level <= 0) {
-            return -1;
-        }
-
-        Inode *header = mainIndex->getHeader(current_level - 1);
-        if(header == nullptr) {
-            return -1;
-        }
-
-        InodeSnapShort snap{};
-        Inode *parent_inode = mainIndex->lookup(key, header, current_level - 1, idx, snap);
-        if(parent_inode == nullptr) {
-            cout << " Failed to lookup the key in the main index." << endl;
-            return -1;
-        }
-
-        if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
-            continue; // 并发修改导致失效，重试
-        }
-
-        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
-        const int start_vnode_id = snap.gp_value;
-        const int current_last_idx = snap.last_index;
-
-        BloomFilter *bloom = &valueList->bf[start_vnode_id];
-        if(bloom == nullptr) {
-            return -1;
-        }
-        int current_vnode_id = start_vnode_id;
-        for (;;) {
-            struct Snap {
-                Val_t out{};
-                bool can_move{false};
-                int  next_id{-1};
-#if ENABLE_TLS_SHADOW_STATS
-                bool tried_tls{false};
-                bool hit_tls{false};
-#endif
-            };
-
-            Snap s = read_consistent(bloom->version, [&]() -> Snap {
-                Snap res;
-                int next = bloom->next_id;
-                if(next == -1) {
-                    return res;
-                }
-                BloomFilter* nb = &valueList->bf[next];
-                if(!nb) {
-                    return res;
-                }
-#if ENABLE_OPT_TLS_OUTSIDE_CLOSURE
-                // 缩减闭包：只做路由判断
-                Key_t next_min = read_consistent(nb->version, [&]() {
-                    return nb->getMinKey();
-                res.can_move = (key >= next_min);
-                res.next_id = next;
-                if(!res.can_move) {
-                    // 不在闭包里做 TLS 与 vnode 查找
-                    res.out = -1;
-                }
-                return res;
-#else
-                Key_t next_min = read_consistent(nb->version, [&]() {
-                    return nb->getMinKey();
-                });
-                res.can_move = (key >= next_min);
-                res.next_id = next;
-                if(!res.can_move) {
-                    Val_t tmp;
-                    Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
-#if ENABLE_TLS_SHADOW_STATS
-                    res.tried_tls = true;
-#endif
-                    if(mainIndex->tlsShadowLookup(current_vnode_id, key, tmp, bloom, vnode)){
-#if ENABLE_TLS_SHADOW_STATS
-                        res.hit_tls = true;
-#endif
-                        res.out = tmp;
-                    } else {
-                        if (vnode->lookupWithoutFilter(key, tmp, bloom)) {
-                            res.out = tmp;
-                            mainIndex->tlsShadowEnsure(current_vnode_id, bloom, vnode);
-                        } else {
-                            res.out = -1;
-                        }
-                    }
-                }
-                return res;
-#endif
-            });
-
-#if ENABLE_OPT_TLS_OUTSIDE_CLOSURE
-            if(!s.can_move) {
-                if(s.out != -1) return s.out; // 早期保守
-                // 闭包未执行 vnode 查找，这里补做
-                Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
-                if(!vnode) return -1;
-                Val_t tmp;
-                if(vnode->lookupWithoutFilter(key, tmp, bloom)) {
-             //       mainIndex->tlsShadowEnsure(current_vnode_id, bloom, vnode);
-                    return tmp;
-                }
-                return -1;
-            }
-#else
-// 原路径统计仍保留
-#if ENABLE_TLS_SHADOW_STATS
-            if (!s.can_move && s.tried_tls) {
-                g_tlsShadowAttempts.fetch_add(1, std::memory_order_relaxed);
-                if (s.hit_tls) {
-                    g_tlsShadowHits.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
-#endif
-            if(s.can_move == false) {
-                return s.out;
-            }
-#endif
-
-            BloomFilter* next_bloom = &valueList->bf[s.next_id];
-            bloom = next_bloom;
-            current_vnode_id = s.next_id;
-        } 
     }
 }
 
@@ -886,10 +758,14 @@ void TandemIndex::logMergeThreadExec(int id)
     }
     while(!g_endTandem.load(std::memory_order_relaxed)) {
         usleep(200);
-        lmt.logMergeOperation();
+        long vnode_count = valueList->pmemVnodePool->getCurrentIdx() + 1;
+        double dram_search_efficiency = mainIndex->calculateSearchEfficiency(vnode_count);
+        lmt.logMergeOperation(dram_search_efficiency, vnode_count);
     }
     // 退出前做一次最终 drain
-    lmt.logMergeOperation();
+    long vnode_count = valueList->pmemVnodePool->getCurrentIdx() + 1;
+    double dram_search_efficiency = mainIndex->calculateSearchEfficiency(vnode_count);
+    lmt.logMergeOperation(dram_search_efficiency, vnode_count);
 }
 
 void TandemIndex::createRebalanceThread() 
@@ -1487,6 +1363,15 @@ void TandemIndex::maybeActivateHotRegion() {
     //std::cout << "[SGP] Speculation completed, dropping last epoch histogram\n";
 }
 
+void TandemIndex::printStatus()
+{
+#if ENABLE_PMEM_STATS
+    std::unique_lock<std::shared_mutex> lock(pmemRecoveryArray->stats_mtx);
+#endif
+    long vnode_count = valueList->pmemVnodePool->getCurrentIdx() + 1;
+    mainIndex->calculateSearchEfficiency(vnode_count);
+}
+
 #if 0
 void TandemIndex::remove(int key)
 {
@@ -1495,8 +1380,5 @@ void TandemIndex::remove(int key)
 
 
 
-void TandemIndex::print()
-{
-    mainIndex->print();
-}
+
 #endif
