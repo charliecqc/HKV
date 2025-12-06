@@ -454,15 +454,31 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
         {
             std::unique_lock<std::shared_mutex> lock3(inode_locks[target->getId()]);
             int idx = target->findKeyPos(oldKey);
+#if 0
             if(target->gps[idx].key == oldKey) {
                 target->updateKeyVal(newKey,idx);
 #if ENABLE_DELTA_LOG
                 ckpt_log_single_slot_delta(ckpt_log, target, static_cast<int16_t>(idx));
 #endif
             }   
-            if(i != 0) {
+#else
+            int sgp_pos = -1;
+            if (target->lookupBetterSGP(oldKey, target->gps[idx].key, sgp_pos)) {
+                if(i != 0) {
+                target = dramInodePool->at(target->sgps[sgp_pos].value);
+                }
+            }else {
+                if(target->gps[idx].key == oldKey) {
+                target->updateKeyVal(newKey,idx);
+#if ENABLE_DELTA_LOG
+                ckpt_log_single_slot_delta(ckpt_log, target, static_cast<int16_t>(idx));
+#endif
+                }
+                if(i != 0) {
                 target = dramInodePool->at(target->gps[idx].value);
+                }
             }
+#endif
         }
         //ckpq->push(&checkVec[i]);
     }
@@ -503,7 +519,14 @@ void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
                 int pos = current->findKeyPos(key);
                 if (current->isHeader() && pos > 0)
                     assert(false);
-                Inode *temp = dramInodePool->at(current->gps[pos].value);
+                int sgp_pos = -1;
+                Inode *temp = nullptr;
+                if(current->lookupBetterSGP(key, current->gps[pos].key, sgp_pos)){
+                    temp = dramInodePool->at(current->sgps[sgp_pos].value);
+                } else {
+                    temp = dramInodePool->at(current->gps[pos].value);
+                }
+                //Inode *temp = dramInodePool->at(current->gps[pos].value);
                 assert(temp != nullptr);
                 current = temp;
             }
@@ -710,13 +733,30 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
                         }
                     }
                     if (lvl == 0) {
+#if 0
                         x.leaf_pos = cur->findKeyPos(key);
+                        int sgp_pos = -1;
+                        if(current->lookupBetterSGP(key, cur->gps[x.leaf_pos].key, sgp_pos)){
+                        x.leaf_pos = sgp_pos + 100;
+                        }
+#endif
                         x.ok = true;
                         return x;
                     }
                     int pos = cur->isHeader() ? 0 : cur->findKeyPos(key);
+#if 1
+                    int sgp_pos = -1;
+                    if(cur->lookupBetterSGP(key, cur->gps[pos].key, sgp_pos)){
+                        x.child_id = cur->sgps[sgp_pos].value;
+                        x.leaf_pos = sgp_pos;
+                    }else{
+                        x.child_id = cur->gps[pos].value;
+                        x.leaf_pos = pos;
+                    }
+#else
                     x.child_id = cur->gps[pos].value;
                     x.leaf_pos = pos;
+#endif
                     x.ok = true;
                     return x;
                 });
@@ -748,6 +788,34 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
             // 叶层：一次性采样 idx + 快照
             uint64_t token = 0;
             std::tie(std::ignore, token) = read_consistent_with_snap(current->version, [&]() {
+#if 1
+                idx = (dec.leaf_pos >= 0) ? dec.leaf_pos : current->findKeyPos(key);
+                
+                int sgp_pos = -1;
+                //if(current->lookupBetterSGP(key, cur->gps[idx].key, sgp_pos)){
+                //idx = sgp_pos + 100;
+                //}
+                snap.last_index = current->hdr.last_index;
+                snap.next       = current->hdr.next;
+                snap.idx        = static_cast<int16_t>(idx);
+                if (idx >= 0 && idx <= current->hdr.last_index) {
+                    snap.gp_key   = current->gps[idx].key;
+                    snap.gp_value = current->gps[idx].value;
+                    snap.lb_key   = current->gps[idx].key;
+                    snap.ub_key   = (idx < current->hdr.last_index)
+                                    ? current->gps[idx + 1].key
+                                    : std::numeric_limits<Key_t>::max();
+                    
+                    if(current->lookupBetterSGP(key, current->gps[idx].key, sgp_pos)){
+                        snap.sgp_key   = current->sgps[sgp_pos].key;
+                        snap.sgp_value = current->sgps[sgp_pos].value; 
+                    }
+                } else {
+                    snap.gp_key = 0; snap.gp_value = -1; snap.sgp_key = 0; snap.sgp_value = -1;
+                    snap.lb_key = 0; snap.ub_key = std::numeric_limits<Key_t>::max();
+                }
+                return 0;
+#else
                 idx = (dec.leaf_pos >= 0) ? dec.leaf_pos : current->findKeyPos(key);
                 snap.last_index = current->hdr.last_index;
                 snap.next       = current->hdr.next;
@@ -764,6 +832,7 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
                     snap.lb_key = 0; snap.ub_key = std::numeric_limits<Key_t>::max();
                 }
                 return 0;
+#endif
             });
             snap.ver_snap = token;
             break;
@@ -949,8 +1018,8 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
         // 分裂当前节点：把 next_node 插到 inode 之后
         next_node->hdr.next = inode->hdr.next;
         inode->hdr.next     = next_node->getId();
-        inode->split(next_node);
-        //inode->splitWithSGP(next_node);
+        //inode->split(next_node);
+        inode->splitWithSGP(next_node);
         const Key_t new_min_key = next_node->getMinKey();
 
         // 通用 FULL 日志提交
@@ -1022,6 +1091,13 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                     cur = dramInodePool->at(cur->hdr.next);
                     ++idx;
                 }
+            }
+
+            int pos = -1;
+            if(verified_parent->linkInactiveSGP(new_min_key, next_node->getId(), pos, 1)) {
+            next_node->setParent(verified_parent->getId());
+            // TODO [ckpt] : log SGP linking
+            ret = 1;
             }
 
             int temp_pos = -1;
@@ -1817,13 +1893,24 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                         }
                     }
                     if (lvl == 0) {
-                        x.leaf_pos = cur->findKeyPos(key);
+                        //x.leaf_pos = cur->findKeyPos(key);
                         x.ok = true;
                         return x;
                     }
                     int pos = cur->isHeader() ? 0 : cur->findKeyPos(key);
+#if 1
+                    int sgp_pos = -1;
+                    if(cur->lookupBetterSGP(key, cur->gps[pos].key, sgp_pos)){
+                        x.child_id = cur->sgps[sgp_pos].value;
+                        x.leaf_pos = sgp_pos;
+                    }else{
+                        x.child_id = cur->gps[pos].value;
+                        x.leaf_pos = pos;
+                    }
+#else
                     x.child_id = cur->gps[pos].value;
                     x.leaf_pos = pos;
+#endif
                     x.ok = true;
                     return x;
                 });
@@ -1858,6 +1945,35 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
             // 叶层：一次性采样 idx + 快照
             uint64_t token = 0;
             std::tie(std::ignore, token) = read_consistent_with_snap(current->version, [&]() {
+#if 1
+                idx = (dec.leaf_pos >= 0) ? dec.leaf_pos : current->findKeyPos(key);
+                
+                int sgp_pos = -1;
+                //if(current->lookupBetterSGP(key, cur->gps[idx].key, sgp_pos)){
+                //idx = sgp_pos + 100;
+                //}
+                snap.last_index = current->hdr.last_index;
+                snap.next       = current->hdr.next;
+                snap.idx        = static_cast<int16_t>(idx);
+                if (idx >= 0 && idx <= current->hdr.last_index) {
+                    snap.gp_key   = current->gps[idx].key;
+                    snap.gp_value = current->gps[idx].value;
+                    snap.lb_key   = current->gps[idx].key;
+                    snap.ub_key   = (idx < current->hdr.last_index)
+                                    ? current->gps[idx + 1].key
+                                    : std::numeric_limits<Key_t>::max();
+                    
+                    if(current->lookupBetterSGP(key, current->gps[idx].key, sgp_pos)){
+                        snap.sgp_key   = current->sgps[sgp_pos].key;
+                        snap.sgp_value = current->sgps[sgp_pos].value;
+                        idx = sgp_pos + 100; 
+                    }
+                } else {
+                    snap.gp_key = 0; snap.gp_value = -1; snap.sgp_key = 0; snap.sgp_value = -1;
+                    snap.lb_key = 0; snap.ub_key = std::numeric_limits<Key_t>::max();
+                }
+                return 0;
+#else
                 idx = (dec.leaf_pos >= 0) ? dec.leaf_pos : current->findKeyPos(key);
                 snap.last_index = current->hdr.last_index;
                 snap.next       = current->hdr.next;
@@ -1874,6 +1990,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                     snap.lb_key = 0; snap.ub_key = std::numeric_limits<Key_t>::max();
                 }
                 return 0;
+#endif
             });
             snap.ver_snap = token;
             break;

@@ -499,6 +499,39 @@ public:
         return true;
     }
 
+    bool isSGPUnbalanced(int idx) {
+        int current_level = this->hdr.level;
+        double coefficient = (current_level < MAX_LEVEL) ? 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
+                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+        if (this->sgps[idx].covered_nodes > coefficient) {
+            return true;
+        }
+        return false;
+    }
+
+    bool lookupBetterSGP(Key_t key, Key_t gp_key, int sgp_pos)
+    {
+        // empty inode
+        if (hdr.last_sgp < 0) return false;
+
+        // handle the boundary cases
+        if (sgps[hdr.last_sgp].key < gp_key) return false;
+        if (key < sgps[0].key) return false;
+
+        for (int i = hdr.last_sgp; i >= 0; --i) {
+            if (sgpVisible.test(i) && (sgps[i].key > gp_key)) {
+                if (sgps[i].key <= key) {
+                    // Found the best possible SGP match. Stop immediately.
+                    sgp_pos = i;
+                    return true; 
+                }
+            }
+        }
+        sgp_pos = -1; // Set index to -1 to indicate no match found.
+        return false;   // No suitable visible SGP found.
+    }
+
     bool insertSGPAtPos(Key_t key, int pos) {
         if(isHeader()) {
             std::cout << "this is weird" << std::endl;
@@ -580,7 +613,7 @@ public:
 
     bool activateSGP(Key_t targetKey)
     {
-        //check if there is enough space to insert the new SGP
+        // TODO [check redundant]
         int16_t cur_index = this->hdr.last_sgp;  
         if(static_cast<int32_t>(cur_index + 1)>= fanout/2) {
             return false;
@@ -594,6 +627,47 @@ public:
             this->insertSGPAtPos(targetKey, pos);
             return true;
         }
+    }
+
+    bool findLinkingSGPPos(Key_t key, int pos)
+    {
+        //handle the boundary cases
+        if (hdr.last_sgp < 0) return false;
+        if (key < sgps[0].key) return false;
+
+        if (key >= sgps[hdr.last_sgp].key && !sgpVisible.test(hdr.last_sgp)) {
+            pos = hdr.last_sgp;
+            return true;
+        }
+        
+        for (int i = hdr.last_sgp; i >= 0; --i) {
+            if (sgps[i].key <= key) {
+                if (!sgpVisible.test(i)) {
+                    pos = i;
+                    return true;
+                } else {
+                    return false;
+                }
+
+            }
+        }
+        return false;
+    }
+
+    bool linkInactiveSGP(Key_t key, int vnode_id, int pos, int covered_nodes) {
+        if (hdr.last_sgp < 0) {
+            return false;
+        }
+        int sgp_pos = -1;
+        if (!findLinkingSGPPos(key, sgp_pos)) {
+            return false;
+        }
+        if(sgp_pos < 0 || sgp_pos > hdr.last_sgp) return false;
+        sgpVisible.set(sgp_pos);
+        sgps[sgp_pos].key = key;
+        sgps[sgp_pos].value = vnode_id;
+        sgps[sgp_pos].covered_nodes = covered_nodes;
+        return true;
     }
 };
 

@@ -29,7 +29,9 @@ struct InodeSnapShort {
     int16_t  idx{-1};
     Key_t    gp_key{0};
     int      gp_value{-1};
-
+    Key_t    sgp_key{0};
+    int      sgp_value{-1};
+    
     // 命中槽位区间（用于验证 key 是否仍命中该槽）
     Key_t    lb_key{0};
     Key_t    ub_key{std::numeric_limits<Key_t>::max()};

@@ -45,7 +45,7 @@ inline void load(int wl,
     std::string init_file;
     std::string txn_file;
 
-    workload_dir = "workloads";
+    workload_dir = "/home/charliecqc/0612/HKV/Prototype/workloads/5M";
     init_file = workload_dir + "/load.trace";
 
     if (kt == RAND_KEY && wl == WORKLOAD_A)

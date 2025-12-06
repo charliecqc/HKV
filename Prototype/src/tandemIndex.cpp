@@ -343,7 +343,13 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 
         assert(parent_inode->hdr.level == 0); // 叶子层
 
-        const int start_vnode_id = snap.gp_value; //start vnode of the chain that contains the target vnode
+        int vnode_id ;
+        if(snap.sgp_key != 0) {
+            vnode_id = snap.sgp_value;
+        } else {
+            vnode_id = snap.gp_value;
+        }
+        const int start_vnode_id = vnode_id;
         const int current_last_idx = snap.last_index; // the last index of the target inode at the time of lookup
 
         Vnode *start_vnode = valueList->pmemVnodePool->at(start_vnode_id);
@@ -609,7 +615,7 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
     Key_t next_right_min = read_consistent(right_bloom->version, [&](){
         return right_bloom->getMinKey();
     });
-#if 0
+#if 1
     if (sampler_) {sampler_->Submit(next_right_min);} //sample split
     if (tracker_->LastEpochHistogramValid()) { //TODO: currently one thread speculating per round
         speculator_->TrySubmit();   // TODO: optimize: avoid double atomic ops
@@ -683,8 +689,13 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     Key_t targetKey = read_consistent(target_bloom->version, [&](){
         return targetVnode->getMinKey();
     });
-
-    if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
+    
+    if (idx_to_next_level >= 100 && !parent_inode->isSGPUnbalanced(idx_to_next_level - 100)) {
+        parent_inode->sgps[idx_to_next_level - 100].covered_nodes++; 
+        //TODO [ckpt] : log SGP update
+        write_unlock(parent_inode->version);
+        return true;
+    } else if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
         parent_inode->gps[idx_to_next_level].covered_nodes++;
 #if ENABLE_DELTA_LOG
         // 单槽 delta 改为批量聚合
@@ -712,8 +723,14 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         write_unlock(parent_inode->version);
         return true;
     }
-    
+
     int pos = -1;
+    if(parent_inode->linkInactiveSGP(targetKey, targetVnode->getId(), pos, 1)) {
+        // TODO [ckpt] : log SGP linking
+        write_unlock(parent_inode->version);
+        return true;
+    }
+
     if (parent_inode->activateGPForVnode(targetKey, targetVnode->getId(), pos, 1)) {
         // 结构变化时仍记录 FULL（批量）
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
@@ -768,12 +785,18 @@ Val_t TandemIndex::lookup(Key_t key)
             return -1;
         }
 
-        if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
+        if (!mainIndex->validateSnapShort(parent_inode, snap, key)) { //validate sgp [TODO]
             continue; // 并发修改导致失效，重试
         }
 
         //mainIndex->populate_cache_shards(key, parent_inode, current_level);
-        const int start_vnode_id = snap.gp_value;
+        int vnode_id ;
+        if(snap.sgp_key != 0) {
+            vnode_id = snap.sgp_value;
+        } else {
+            vnode_id = snap.gp_value;
+        }
+        const int start_vnode_id = vnode_id;
         const int current_last_idx = snap.last_index;
 
         BloomFilter *bloom = &valueList->bf[start_vnode_id];
@@ -1117,7 +1140,13 @@ bool TandemIndex::update(Key_t key, Val_t value)
 
         assert(parent_inode->hdr.level == 0); // 叶子层
 
-        const int start_vnode_id = snap.gp_value; //start vnode of the chain that contains the target vnode
+        int vnode_id ;
+        if(snap.sgp_key != 0) {
+            vnode_id = snap.sgp_value;
+        } else {
+            vnode_id = snap.gp_value;
+        }
+        const int start_vnode_id = vnode_id;
         const int current_last_idx = snap.last_index; // the last index of the target inode at the time of lookup
 
         Vnode *start_vnode = valueList->pmemVnodePool->at(start_vnode_id);
@@ -1274,7 +1303,13 @@ bool TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
         }
 
         //mainIndex->populate_cache_shards(key, parent_inode, current_level);
-        const int start_vnode_id = snap.gp_value;
+        int vnode_id ;
+        if(snap.sgp_key != 0) {
+            vnode_id = snap.sgp_value;
+        } else {
+            vnode_id = snap.gp_value;
+        }
+        const int start_vnode_id = vnode_id;
         const int current_last_idx = snap.last_index;
 
         BloomFilter *bloom = &valueList->bf[start_vnode_id];
@@ -1356,7 +1391,13 @@ bool TandemIndex::scan(Key_t key, size_t range,
         }
 
         //mainIndex->populate_cache_shards(key, parent_inode, current_level);
-        const int start_vnode_id = snap.gp_value;
+        int vnode_id ;
+        if(snap.sgp_key != 0) {
+            vnode_id = snap.sgp_value;
+        } else {
+            vnode_id = snap.gp_value;
+        }
+        const int start_vnode_id = vnode_id;
         const int current_last_idx = snap.last_index;
 
         BloomFilter *bloom = &valueList->bf[start_vnode_id];
@@ -1496,7 +1537,7 @@ void TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
 #endif
 
 struct AnchorParams {
-  double inserts_per_anchor = 64.0; // how many future inserts justify one SGP
+  double inserts_per_anchor = 10.0; // how many future inserts justify one SGP
   int    max_per_node       = 8;    // cap [remaining empty slots in SGP array]
   size_t future_epochs      = 1;    // forecast horizon
   size_t window_buckets     = 30;   // hot-region width for GetHottestRegion
@@ -1524,7 +1565,7 @@ void TandemIndex::maybeActivateHotRegion() {
         return;  // no completed epoch yet
     }
     //std::cout << "[SGP] hottest region = [" << hot.start << ", " << hot.end << ") (window=" << window << ")\n";
-#if 0
+
     // Forecast one future epoch
     double forecast = 0.0;
     if (!tracker_->GetNumInsertsInKeyRangeForNumFutureEpochs(
@@ -1532,7 +1573,7 @@ void TandemIndex::maybeActivateHotRegion() {
         //std::cout << "[SGP] forecast failed at GetNumInsertsInKeyRangeForNumFutureEpochs; skip\n";
         return;
     }
-    std::cout << std::fixed << std::setprecision(1) << "[SGP] forecast in hot region (next epoch) ≈ " << forecast << "\n";
+    //std::cout << std::fixed << std::setprecision(1) << "[SGP] forecast in hot region (next epoch) ≈ " << forecast << "\n";
 
     // Map to covering nodes at an appropriate level
     int L = 0; // TODO start from lowest level [propagate to parent?]
@@ -1550,20 +1591,22 @@ void TandemIndex::maybeActivateHotRegion() {
         //std::cout << "[SGP] no last-epoch histogram; skip\n";
         return;
     }
-    /*
+
     // per node intersect, forecast , choose how many SGPs, place anchors, activate sgp
     const AnchorParams P{};
     for (auto* inode : nodes) { 
-        // no room for speculation
-        if (inode->isSGPFull()) { //TODO: check if it increase number of splits
-            addToRebalanceQueue(inode);
-            //std::cout << "  [SGP] inode " << inode->getId() << no room for speculation - added to rebanance queue; skip\n"; 
-            continue;
-        }
         if(getFromRebalanceQueue(inode)){
-            //std::cout << "  [SGP] inode " << inode->getId() << queued for rebalance; skip\n";
+            //std::cout << "  [SGP] inode " << inode->getId() << "queued for rebalance; skip\n";
             continue;
         }
+
+        // no room for speculation
+        if (inode->isSGPFull() || inode->isFull()) { //TODO: check if it increase number of splits
+            addToRebalanceQueue(inode);
+            //std::cout << "  [SGP] inode " << inode->getId() <<"no room for speculation - added to rebanance queue; skip\n"; 
+            continue;
+        }
+        
 
         //intersection of node and hot region
         const uint64_t nmin = inode->getMinKey();
@@ -1597,18 +1640,18 @@ void TandemIndex::maybeActivateHotRegion() {
 
         //check rebalance again before activating SGPs [no need activating SGPS in node to be rebalanced]
         if(getFromRebalanceQueue(inode)){
-            //std::cout << "  [SGP] inode " << inode->getId() << queued for rebalance; skip\n";
+            //std::cout << "  [SGP] inode " << inode->getId() << "queued for rebalance; skip\n";
             continue;
         }
+#if 0
         // activate SGPs at those anchor keys
         // TODO - get lock
         for(uint64_t key : anchors){
-            //inode->activateSGP(key);
+            inode->activateSGP(key);
             //TODO - checkpoint or flush
         }
-        
-    }*/ 
-#endif
+#endif        
+    } 
     // clear current epoch histogram
     tracker_->DropLastEpochHistogram();
     //std::cout << "[SGP] Speculation completed, dropping last epoch histogram\n";
