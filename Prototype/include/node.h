@@ -32,7 +32,6 @@ public:
     alignas(64) int32_t next_id{-1};
 
     alignas(64) std::atomic<uint64_t> version{0}; // 独占 cacheline
-    //alignas(64) std::shared_mutex vnode_mtx;      // 与 version 分离，避免伪共享
     alignas(64) Key_t min_key{std::numeric_limits<Key_t>::max()};
 public:
     // 哈希函数，返回位置
@@ -448,9 +447,9 @@ public:
                              SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
                              SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
         
-        // 检查是否有任何一个GP的负载过高
+        //to check if any gp's covered nodes exceed the coefficient
         for (int i = 0; i <= this->hdr.last_index; ++i) {
-            // 每个GP至少应该覆盖1个节点，如果它覆盖的节点数远超这个基数，则认为不平衡
+            //every gp's covered nodes exceed the coefficient, then it will be considered unbalanced
             if (this->gps[i].covered_nodes > coefficient) {
                  return true;
             }
@@ -719,7 +718,7 @@ public:
 
     bool lookupWithoutFilter(Key_t key, Val_t &value, BloomFilter *bloom) 
     {
-#ifdef __AVX2__
+#if 0
         // 如果没有 bloom filter，则退回非 SIMD 的线性扫描
         if (bloom == nullptr) {
             goto non_simd;

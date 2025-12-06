@@ -1,8 +1,8 @@
 #!/bin/bash -e
 
-DIST_TYPE=("unif") #zipf or unif
+DIST_TYPE=("zipf") #zipf or unif
 WORKLOAD_TYPE=(a b c d e f) #type a b c d e ## NOTE: type f for measuring SSD-level WAF
-ITEM_NUM=2000000
+ITEM_NUM=50000000
 ZIPF=("0.99") #"0.5" "0.9" "0.99" "1.2" "1.5")
 
 rm -f *.trace

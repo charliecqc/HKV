@@ -1,5 +1,6 @@
 #include "ckpt_log.h"
 #include "pmemManager.h"
+#include "pmemInodePool.h"
 #include <cstring>
 #include <vector>
 #include <cassert>
@@ -68,6 +69,23 @@ static size_t parseApplySpan(CkptLog* self,
             inode->hdr.next       = fh->next;
             inode->hdr.level      = fh->level;
             inode->hdr.parent_id  = fh->parent_id;
+            
+
+            if(fh->level > self->current_highest_level) {
+                if(fh->next != -1 &&  fh->next!= 0 && !(fh->next >= MAX_LEVEL && fh->next < 2 * MAX_LEVEL)) {
+                    self->current_highest_level = fh->level;
+                    Inode *superNode = pmemInodePool->at(MAX_NODES - 1);
+                    superNode->hdr.level = self->current_highest_level;
+                    PmemManager::flushNoDrain(1, &superNode->hdr.level, sizeof(Inode));
+                }
+            }
+            if(fh->id > self->current_inode_idx) {
+                self->inode_count_on_each_level[fh->level]++;
+                self->current_inode_idx = fh->id;
+                Inode *superNode = pmemInodePool->at(MAX_NODES - 1);
+                superNode->hdr.next = self->current_inode_idx;
+                PmemManager::flushNoDrain(1, &superNode->hdr.next, sizeof(Inode));
+            }
 
             for (int i = 0; i < fh->count; ++i) {
                 int gi = entries[i].gp_idx;
@@ -75,7 +93,7 @@ static size_t parseApplySpan(CkptLog* self,
                 inode->gps[gi].value         = entries[i].value;
                 inode->gps[gi].covered_nodes = entries[i].covered_nodes;
             }
-            PmemManager::flushNoDrain(CKPLOGPOOL, inode, sizeof(Inode));
+            PmemManager::flushNoDrain(1, inode, sizeof(Inode)); //1: INDEXPOOL
 
             consumed += entry_sz;
             continue;
@@ -116,13 +134,21 @@ int CkptLogNVM::init(root_obj *root, size_t maxSize) {
 }
 
 // 构造函数
+#if ENABLE_PMEM_STATS
+CkptLog::CkptLog(size_t logSize, int current_highest_level, ValueList *va_list)
+    : retry_count(0), current_highest_level(current_highest_level), valueList(va_list),
+      ckptlog(new CkptLogNVM(logSize)) {
+#else
 CkptLog::CkptLog(size_t logSize)
     : retry_count(0),
       ckptlog(new CkptLogNVM(logSize)) {
-
+#endif
     a_consumed_start.v.store(ckptlog->start, std::memory_order_relaxed);
     a_durable_end.v.store(ckptlog->start_persistent, std::memory_order_relaxed);
     a_produced_end.v.store(ckptlog->end_persistent, std::memory_order_relaxed);
+    current_inode_idx = 0;
+    current_highest_level = 0;
+    inode_count_on_each_level.reserve(MAX_LEVEL);
 }
 
 // 析构函数
@@ -251,19 +277,19 @@ void CkptLog::applyDeltaEntries(Inode *inode,
         gp.key = entries[i].key;
         gp.value = entries[i].value;
         gp.covered_nodes = entries[i].covered;
-        PmemManager::flushNoDrain(CKPLOGPOOL, &gp, sizeof(gp));
+        PmemManager::flushNoDrain(1, &gp, sizeof(gp)); // i is INDEXPOOL
     }
     if (new_last_index != WAL_META_KEEP) {
         inode->hdr.last_index = new_last_index;
-        PmemManager::flushNoDrain(CKPLOGPOOL, &inode->hdr.last_index, sizeof(inode->hdr.last_index));
+        PmemManager::flushNoDrain(1, &inode->hdr.last_index, sizeof(inode->hdr.last_index));
     }
     if (new_next != WAL_META_KEEP) {
         inode->hdr.next = new_next;
-        PmemManager::flushNoDrain(CKPLOGPOOL, &inode->hdr.next, sizeof(inode->hdr.next));
+        PmemManager::flushNoDrain(1, &inode->hdr.next, sizeof(inode->hdr.next));
     }
     if (new_parent_id != WAL_META_KEEP) {
         inode->hdr.parent_id = new_parent_id;
-        PmemManager::flushNoDrain(CKPLOGPOOL, &inode->hdr.parent_id, sizeof(inode->hdr.parent_id));
+        PmemManager::flushNoDrain(1, &inode->hdr.parent_id, sizeof(inode->hdr.parent_id));
     }
 }
 #endif // ENABLE_DELTA_LOG
@@ -380,6 +406,7 @@ void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
 
 size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
 {
+    //return 0;
     size_t start   = a_consumed_start.v.load(std::memory_order_acquire);
     size_t durable = a_durable_end.v.load(std::memory_order_acquire);
     if (start >= durable) return 0;
@@ -410,31 +437,40 @@ size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
 
     if (consumed == 0) return 0;
 
-    PmemManager::drain(CKPLOGPOOL);
+    PmemManager::drain(1); // 1: INDEXPOOL
     a_consumed_start.v.fetch_add(consumed, std::memory_order_acq_rel);
     return consumed;
 }
 
-// 修改：reclaim 使用批处理，按阈值驱动
-void CkptLog::reclaim(PmemInodePool *pmemInodePool)
+void CkptLog::reclaim(double dramSearchEfficincy, long vnode_count, PmemInodePool *pmemInodePool)
 {
     try {
         size_t q = getLogQueueSize();
-        if (q < RECLAIM_THRESHOLD && retry_count < RECLAIM_RETRY_THRESHOLD) {
+        double pmemSearchEfficiency = calculatePmemSearchEfficiency(vnode_count);
+        double threshold = pmemSearchEfficiency / dramSearchEfficincy;
+        if (q < RECLAIM_THRESHOLD && retry_count < RECLAIM_RETRY_THRESHOLD && threshold <= 1.2) {
             retry_count++;
             return;
         }
         retry_count = 0;
 
-        // 每批按阈值大小处理，直到该次没有更多完整条目
         const size_t BATCH_BYTES = std::max<size_t>(PERSISTENT_THRESHOLD, RECLAIM_THRESHOLD);
         while (reclaimBatch(pmemInodePool, BATCH_BYTES) > 0) { /* loop */ }
+#if ENABLE_PMEM_STATS
+        {
+            std::shared_lock<std::shared_mutex> lk(pmemInodePool->stats_mtx);
+            int i = current_highest_level;
+            int vnode_count = valueList->pmemVnodePool->getCurrentIdx();
+            pmemInodePool->printStats(i, vnode_count);
+        }
+    cout << "Reclaim finished. current_highest_level: " << current_highest_level << " current_inode_idx: " << current_inode_idx << endl;
+#endif
     } catch (std::exception &e) {
         std::cout << "Exception in reclaim: " << e.what() << std::endl;
     }
 }
 
-// 统一环形索引：要求 mask = log_size - 1；否则回退到 %
+// uniform ring index: prefer &mask if mask = log_size - 1;
 unsigned int CkptLog::nvm_log_index(unsigned long idx)
 {
     const size_t log_size = ckptlog->log_size;
@@ -472,6 +508,35 @@ size_t CkptLog::getLogQueueSize()
     size_t c = a_consumed_start.v.load(std::memory_order_acquire);
     size_t d = a_durable_end.v.load(std::memory_order_acquire);
     return (d > c) ? (d - c) : 0;
+}
+
+double CkptLog::calculatePmemSearchEfficiency(long vnode_count)
+{
+    int cur_level = current_highest_level;
+    int max_level_idx = cur_level - 1;
+    double E_index = 0.0;
+    if(max_level_idx >=0) {
+        E_index += 1.0;
+    }
+
+    for(int i = max_level_idx; i > 0; i--) {
+        double upper = static_cast<double>(inode_count_on_each_level[i]);
+        double lower = static_cast<double>(inode_count_on_each_level[i-1]);
+        if(upper > 0.0) {
+            double fanout = lower / upper;
+            E_index += fanout / 2.0;
+        }
+    }
+
+    double E_data = 0.0;
+    if (vnode_count > 0 && inode_count_on_each_level[0] > 0) {
+        double Vtotal = static_cast<double>(vnode_count);
+        double avg_vnodes_per_inode = Vtotal / static_cast<double>(inode_count_on_each_level[0]);
+        E_data = avg_vnodes_per_inode / 2.0;
+    }
+
+    double E_search = E_index + E_data;
+    return E_search;
 }
 
 bool CkptLog::flushOnce()

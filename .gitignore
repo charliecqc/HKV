@@ -6,6 +6,9 @@
 *.lo
 *.o
 *.obj
+*.dat
+*.csv
+*.eps
 
 # Precompiled Headers
 *.gch

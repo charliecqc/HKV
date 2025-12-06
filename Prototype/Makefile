@@ -14,10 +14,11 @@ CXX = g++
 #CXXFLAGS = -Wall -Iinclude --std=c++17 -mavx2 -O3 -march=native -flto -DENABLE_CACHE_STATS=0
 #CXXFLAGS = -Wall -Iinclude --std=c++17 -O3 -flto -DENABLE_CACHE_STATS=0 
 #CXXFLAGS = -Wall -Iinclude --std=c++17 -g -O0 -flto -DENABLE_CACHE_STATS=0
-#CXXFLAGS = -Wall -Iinclude -mavx2 -g --std=c++17 -O0 -DENABLE_CACHE_STATS=0
+#CXXFLAGS = -Wall -Iinclude -g --std=c++17 -O0 -DENABLE_CACHE_STATS=0 -DENABLE_TLS_SHADOW_STATS=0 -DENABLE_VNODE_SHADOW_CACHE=0 -DENABLE_THREAD_KEY_CACHE=1 -DENABLE_L2_SHARD_CACHE=0 -DENABLE_L1_TLS_CACHE=1 -DENABLE_PMEM_STATS=0
 #CXXFLAGS = -Wall -Iinclude --std=c++17 -O3 -DENABLE_CACHE_STATS=1
-#CXXFLAGS = -Wall -Iinclude --std=c++17 -g -O2 -flto -DENABLE_CACHE_STATS=0
-CXXFLAGS = -Wall -Iinclude --std=c++17 -O3 -flto -DENABLE_CACHE_STATS=0
+CXXFLAGS = -Wall -Iinclude --std=c++17 -O3 -flto -mssse3 -mbmi -mlzcnt -mbmi2 -DENABLE_CACHE_STATS=0 -DENABLE_TLS_SHADOW_STATS=0 -DENABLE_VNODE_SHADOW_CACHE=0 -DENABLE_THREAD_KEY_CACHE=1 -DENABLE_L2_SHARD_CACHE=0 -DENABLE_L1_TLS_CACHE=0 -DENABLE_PMEM_STATS=0
+#CXXFLAGS = -Wall -Iinclude --std=c++17 -g -O0 -DENABLE_CACHE_STAT=0 -DENABLE_TLS_SHADOW_STATS=1
+#CXXFLAGS = -Wall -Iinclude --std=c++17 -O3 -flto -DENABLE_CACHE_STATS=0
 #CXXFLAGS = -Wall -Iinclude -g --std=c++17 -O1 -fno-omit-frame-pointer  -DENABLE_CACHE_STATS=0
 #CXXFLAGS = -Wall -Iinclude --std=c++17 -O3
 #CXXFLAGS = -Wall -Iinclude --std=c++17 -O2
