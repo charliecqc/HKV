@@ -767,6 +767,7 @@ Val_t TandemIndex::lookup(Key_t key)
         }
 #if ENABLE_L2_SHARD_CACHE
         //mainIndex->populate_cache_shards(key, parent_inode, current_level);
+#endif
         int vnode_id ;
         if(snap.sgp_key != 0) {
             vnode_id = snap.sgp_value;
