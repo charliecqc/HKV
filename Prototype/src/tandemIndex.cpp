@@ -210,9 +210,9 @@ std::unique_ptr<AsyncSpeculator> speculator_;
 
 struct InsertForecastingOptions {
     bool use_insert_forecasting = true;
-    size_t num_inserts_per_epoch = 10000; // The number of inserts in each InsertTracker epoch; the total elements of the equi-depth histogram used for insert forecasting.
-    size_t num_partitions = 1000; // The number of bins in the insert forecasitng histogram. TODO: make adaptive with increased node numbers
-    size_t sample_size = 1000; // The size of the reservoir sample based on which the partition boundaries are set at the beginning of each epoch.
+    size_t num_inserts_per_epoch = 1000; // The number of inserts in each InsertTracker epoch; the total elements of the equi-depth histogram used for insert forecasting.
+    size_t num_partitions = 100; // The number of bins in the insert forecasitng histogram. TODO: make adaptive with increased node numbers
+    size_t sample_size = 100; // The size of the reservoir sample based on which the partition boundaries are set at the beginning of each epoch.
     size_t random_seed = 42; // The random seed to be used by the insert tracker.
     double overestimation_factor = 1.5; // Estimated ratio of (number of records in reorg range) / (number of records that fit in base pages in reorg range).
     size_t num_future_epochs = 1; // During reorganization, the system will leave sufficient space to accommodate forecasted inserts for the next `num_future_epochs` epochs.
@@ -1457,7 +1457,7 @@ void TandemIndex::maybeActivateHotRegion() {
         //std::cout << "[SGP] no covering inodes at level " << L << "\n";
         return;
     }
-    //std::cout << "[SGP] covering inodes at level " << L << ": " << nodes.size() << "\n";
+    std::cout << "[SGP] covering inodes at level " << L << ": " << nodes.size() << "\n";
 
     //pill the last histogram once
     std::vector<uint64_t> B; // P+1 partition boundaries of last competed epoch
@@ -1503,15 +1503,22 @@ void TandemIndex::maybeActivateHotRegion() {
 
         //decide how many anchors for this node
         //P.max_per_node = (fanout / 2) - inode->sgp_last_index
-        int m = std::clamp<int>(std::lround(pred / P.inserts_per_anchor), 1, P.max_per_node);
+        int m = std::lround(pred / P.inserts_per_anchor);
+        if (m <= 0) continue;
+        m = std::min(m, P.max_per_node);
+
 
         //place anchors by density inside [S,E]
         auto anchors = tracker_->quantileAnchorsInWindow(B, C, S, E, (size_t)m);
-        //std::cout << "  [SGP] inode " << inode->getId()
-        //          << " node_range=[" << nmin << "," << nmax << "]"
-        //          << " slice=[" << S << "," << E << ")"
-        //          << " pred≈" << pred << " -> anchors=" << anchors.size()
-        //          << " keys=" << join_u64(anchors) << "\n";
+        anchors.erase( std::remove_if(anchors.begin(), anchors.end(),
+            [&](uint64_t k){
+            return k <= S || k >= E;}),
+            anchors.end());
+        std::cout << "  [SGP] inode " << inode->getId()
+                  << " node_range=[" << nmin << "," << nmax << "]"
+                  << " slice=[" << S << "," << E << ")"
+                  << " pred≈" << pred << " -> anchors=" << anchors.size()
+                  << " keys=" << join_u64(anchors) << "\n";
 
         //check rebalance again before activating SGPs [no need activating SGPS in node to be rebalanced]
         if(getFromRebalanceQueue(inode)){

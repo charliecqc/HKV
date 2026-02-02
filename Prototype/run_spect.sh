@@ -62,7 +62,7 @@ for dist in "${distributions[@]}"; do
 			#save output
 			fname="result_${workload}_${dist}_${th}.dat"
             #rm -rf /mnt/pmem0/ckpt_log /mnt/pmem0/pmem*
-			numactl --cpunodebind=0 --membind=0 ./project $workload $dist $th > results/raw/$fname
+			numactl --cpunodebind=1 --membind=1 ./project $workload $dist $th > results/raw/$fname
 
 			#parse throughput from output
 #			workload_upper=$(echo "$workload" | tr '[:lower:]' '[:upper:]')

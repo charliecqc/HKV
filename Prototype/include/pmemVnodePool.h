@@ -16,7 +16,7 @@ using namespace std;
 
 class PmemVnodePool {
 private:
-    string fileName = "/mnt/pmem0/pmemVnodePool";
+    string fileName = "/mnt/pmem1/pmemVnodePool";
     std::vector<Vnode*> pmemVnodePool;
     int nodeSize;
     int numNodes;

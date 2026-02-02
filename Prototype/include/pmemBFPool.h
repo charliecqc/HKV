@@ -16,7 +16,7 @@ using namespace std;
 
 class PmemBFPool {
 private:
-    string fileName = "/mnt/pmem0/pmemBFPool";
+    string fileName = "/mnt/pmem1/pmemBFPool";
     std::vector<BloomFilter*> pmemBFPool;
     int numNodes;
     std::atomic<int> currentIdx;
