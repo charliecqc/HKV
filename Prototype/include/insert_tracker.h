@@ -77,6 +77,11 @@ class InsertTracker {
     }
   }
 
+  // --- Add to public section ---
+size_t num_inserts_per_epoch() const {
+  return num_inserts_per_epoch_;
+}
+
   // Extrapolates inserts during the last epoch to `num_future_epochs` future
   // epochs. `range_end` is exclusive. Returns false if the last epoch hasn't
   // been initialized yet.
@@ -144,7 +149,7 @@ class InsertTracker {
 }
 
 // Given last-epoch histogram, pick m anchor keys inside [Wstart, Wend)
-std::vector<uint64_t> quantileAnchorsInWindow(
+static std::vector<uint64_t> quantileAnchorsInWindow(
     const std::vector<uint64_t>& B,   // size P+1 boundaries
     const std::vector<size_t>& C,     // size P counts
     uint64_t Wstart, uint64_t Wend, size_t m) {
@@ -186,6 +191,35 @@ std::vector<uint64_t> quantileAnchorsInWindow(
   }
   return out;
 }
+
+static std::vector<uint64_t>
+placeAnchorsInsideInterval(
+    const std::vector<uint64_t>& B,
+    const std::vector<size_t>&   C,
+    uint64_t lo,
+    uint64_t hi,
+    size_t m)
+{
+    if (hi <= lo + 2 || m == 0) return {};
+
+    uint64_t guard = std::max<uint64_t>(1, (hi - lo) / 16);
+    uint64_t S = lo + guard;
+    uint64_t E = hi - guard;
+    if (S >= E) return {};
+
+    auto anchors = quantileAnchorsInWindow(B, C, S, E, m);
+
+    anchors.erase(
+        std::remove_if(anchors.begin(), anchors.end(),
+            [&](uint64_t k) {
+                return k <= lo || k >= hi;
+            }),
+        anchors.end()
+    );
+
+    return anchors;
+}
+
 
  private:
   // See Algorithm L: https://en.wikipedia.org/wiki/Reservoir_sampling

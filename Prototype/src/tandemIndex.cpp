@@ -1429,7 +1429,7 @@ static std::string join_u64(const std::vector<uint64_t>& v) {
     oss << "]";
     return oss.str();
 }
-
+/*
 void TandemIndex::maybeActivateHotRegion() {
     // Choose a window of buckets to represent the “region” (e.g., 16 buckets)
     
@@ -1537,7 +1537,7 @@ void TandemIndex::maybeActivateHotRegion() {
     // clear current epoch histogram
     tracker_->DropLastEpochHistogram();
     //std::cout << "[SGP] Speculation completed, dropping last epoch histogram\n";
-}
+}*/
 
 void TandemIndex::printStatus()
 {
@@ -1553,8 +1553,84 @@ void TandemIndex::remove(int key)
 {
     mainIndex->remove(key);
 }
-
-
-
-
 #endif
+
+void TandemIndex::maybeActivateHotRegion() {
+    constexpr size_t WINDOW = 20;
+    constexpr size_t FUTURE_EPOCHS = 1;
+
+    std::cout << "  Speculation round\n";
+
+    tl::Region hot{};
+    if (!tracker_->GetHottestRegion(WINDOW, &hot))
+        return;
+
+    std::vector<uint64_t> B;
+    std::vector<size_t>   C;
+    if (!tracker_->GetLastEpochHistogram(B, C))
+        return;
+
+    int L = 0;
+    auto inodes = mainIndex->nodesCoveringRangeAtLevel(hot.start, hot.end, L);
+    if (inodes.empty()) {
+        tracker_->DropLastEpochHistogram();
+        return;
+    }
+    std::cout << "--------------Speculation round------------------\n";
+    for (Inode* inode : inodes) {
+        if (!inode || inode->isFull() || inode->isSGPFull())
+            continue;
+
+        int last_gp = inode->hdr.last_index;
+        if (last_gp < 0) continue;
+
+        for (int i = 0; i < last_gp; ++i) {
+            uint64_t lo = inode->gps[i].key;
+            uint64_t hi = inode->gps[i + 1].key;
+
+            // intersect with hot region
+            uint64_t S = std::max(lo, hot.start);
+            uint64_t E = std::min(hi, hot.end);
+            if (S >= E) continue;
+
+            double pred = 0.0;
+            if (!tracker_->GetNumInsertsInKeyRangeForNumFutureEpochs(
+                    S, E, FUTURE_EPOCHS, &pred))
+                continue;
+
+            // predict stability violation
+            double coeff = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[inode->hdr.level];
+            double future_nodes = inode->gps[i].covered_nodes + pred;
+
+            if (future_nodes <= coeff)
+                continue;
+
+            int m = std::min(
+                int(std::ceil(pred / AnchorParams{}.inserts_per_anchor)),
+                AnchorParams{}.max_per_node
+            );
+            if (m <= 0) continue;
+
+            auto anchors =
+                tracker_->placeAnchorsInsideInterval(B, C, lo, hi, m);
+
+            if (anchors.empty()) continue;
+#if 0
+            std::cout << "  [SGP] HOT inode " << inode->getId()
+                      << " GP[" << i << "]"
+                      << " interval=[" << lo << "," << hi << ")"
+                      << " pred≈" << pred
+                      << " anchors=" << anchors.size()
+                      << " keys=" << join_u64(anchors) << "\n";
+#endif
+
+#if 0
+            for (uint64_t k : anchors) {
+                inode->activateSGP(k);
+            }
+#endif
+        }
+    }
+
+    tracker_->DropLastEpochHistogram();
+}
