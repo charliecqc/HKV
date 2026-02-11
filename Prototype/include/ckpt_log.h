@@ -172,7 +172,7 @@ public:
 
 class CkptLogNVM {
 private:
-    std::string fileName = "/mnt/pmem1/ckpt_log";
+    std::string fileName;
 public:
     volatile unsigned char *_buf; // buffer for checkpoint log
     volatile unsigned char *buf; // cacheline alighed buffer for checkpoint log
@@ -188,7 +188,8 @@ public:
     
 
 public:
-    CkptLogNVM(size_t maxSize) : maxSize(maxSize), start(0), end(0), isFull(false) {
+    CkptLogNVM(size_t maxSize,std::string storage_path) : maxSize(maxSize), start(0), end(0), isFull(false) {
+        fileName = storage_path + "/ckpt_log";
         root_obj *root = nullptr;
         init(root,maxSize);
         start = 0;
@@ -256,12 +257,13 @@ public:
     std::atomic_flag flush_busy = ATOMIC_FLAG_INIT;
 
     std::atomic<int32_t> active_batchers{0};
+    std::string storagePath;
 
     #if ENABLE_PMEM_STATS
-    explicit CkptLog(size_t logSize = MAX_CKP_LOG_ENTRIES, int current_highest_level = 0, ValueList *va_list = nullptr);
+    explicit CkptLog(size_t logSize = MAX_CKP_LOG_ENTRIES, int current_highest_level = 0, ValueList *va_list = nullptr, std::string storage_path = "");
     ~CkptLog();
     #else
-    explicit CkptLog(size_t logSize = MAX_CKP_LOG_ENTRIES);
+    explicit CkptLog(size_t logSize = MAX_CKP_LOG_ENTRIES, std::string storage_path = "");
     ~CkptLog();
     #endif
 

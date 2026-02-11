@@ -113,7 +113,7 @@ inline void load(int wl,
     std::string update("UPDATE");
     std::string scan("SCAN");
 
-    int count = 0;
+    size_t count = 0;
     while ((count < INIT_LIMIT) && infile_load.good())
     {
         infile_load >> op >> key;
@@ -128,7 +128,7 @@ inline void load(int wl,
     }
 
     size_t total_num_key = init_keys.size();
-    fprintf(stderr, "Loaded %d keys\n", total_num_key);
+    fprintf(stderr, "Loaded %ld keys\n", total_num_key);
 
     count = 0;
     uint64_t value = 0;
@@ -238,6 +238,7 @@ inline void load(int wl,
 inline void exec(int wl,
                  int index_type,
                  int num_thread,
+                 std::string storage_path,
                  std::vector<keytype> &init_keys,
                  std::vector<keytype> &keys,
                  std::vector<uint64_t> &values,
@@ -252,7 +253,7 @@ inline void exec(int wl,
 
     //Index<keytype, keycomp> *idx = getInstance<keytype, keycomp>(index_type, key_type);
     bool is_data_loaded = false;
-    TandemIndex *idx = new TandemIndex();
+    TandemIndex *idx = new TandemIndex(storage_path);
     is_data_loaded = idx->isDataLoaded();
     int count = (int)init_keys.size();
 
@@ -379,7 +380,6 @@ inline void exec(int wl,
     //int txn_num = GetTxnCount(ops, index_type);
     int txn_num = ops.size();
     uint64_t sum = 0;
-    uint64_t s = 0;
 
     if (values.size() < keys.size())
     {
@@ -402,16 +402,11 @@ inline void exec(int wl,
         size_t op_per_thread = total_num_op / num_thread;
         size_t start_index = op_per_thread * thread_id;
         size_t end_index = start_index + op_per_thread;
-        size_t current_time = get_now();
 
         std::vector<uint64_t> v;
         v.reserve(10);
 
         //threadinfo *ti = threadinfo::make(threadinfo::TI_MAIN, -1);
-        int counter = 0;
-        size_t temp_time = get_now();
-        size_t current_thp = 0;
-        int op_cnt = 0;
 
         // declare_periodic_count;
         for (size_t i = start_index; i < end_index; i++)
@@ -497,7 +492,7 @@ inline void exec(int wl,
 int main(int argc, char *argv[])
 {
 
-    if (argc < 3)
+    if (argc < 4)
     {
         std::cout << "Usage:\n";
         std::cout << "1. workload type: a, b, c, d, e, none\n";
@@ -505,6 +500,7 @@ int main(int argc, char *argv[])
                      "This serves as the base line for microbenchamrks\n";
         std::cout << "2. key distribution: zipf, unif\n";
         std::cout << "3. number of threads (integer)\n";
+        std::cout << "4. storage path (string)\n";
         std::cout << "   --insert-only: Whether to only execute insert operations\n";
         std::cout << "   --recovery-test: Whether to only execute recovery operations\n";
 
@@ -577,8 +573,9 @@ int main(int argc, char *argv[])
 
     // Then read all remianing arguments
     int repeat_counter = 1;
+    std::string storage_path = argv[4];
     char **argv_end = argv + argc;
-    for (char **v = argv + 4; v != argv_end; v++)
+    for (char **v = argv + 5; v != argv_end; v++)
     {
         if (strcmp(*v, "--insert-only") == 0)
         {
@@ -642,7 +639,7 @@ int main(int argc, char *argv[])
         // Then repeat executing the same workload
         while (repeat_counter > 0)
         {
-            exec(wl, index_type, num_thread, init_keys, keys, values, ranges, ops);
+            exec(wl, index_type, num_thread, storage_path, init_keys, keys, values, ranges, ops);
             repeat_counter--;
             // printf("Finished running benchmark\n");
         }

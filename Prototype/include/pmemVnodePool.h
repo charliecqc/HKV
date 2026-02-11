@@ -16,13 +16,14 @@ using namespace std;
 
 class PmemVnodePool {
 private:
-    string fileName = "/mnt/pmem1/pmemVnodePool";
+    string fileName;
     std::vector<Vnode*> pmemVnodePool;
     int nodeSize;
     int numNodes;
     std::atomic<int> currentIdx;
 public:
-    PmemVnodePool(size_t nodeSize, size_t numNodes) : nodeSize(nodeSize), numNodes(numNodes){
+    PmemVnodePool(size_t nodeSize, size_t numNodes, string storagePath) : nodeSize(nodeSize), numNodes(numNodes) {
+        fileName = storagePath + "/pmemVnodePool";
         root_obj *root = nullptr;
         int current_idx = init(root);
         currentIdx.store(current_idx);

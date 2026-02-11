@@ -9,11 +9,12 @@
 
 class ValueList {
 public:
+    string fileName;
     PmemVnodePool *pmemVnodePool;
     Vnode *head;
     BloomFilter bf[MAX_VALUE_NODES]; // Bloom filters for each vnode
 public:
-    ValueList();
+    ValueList(string storagePath);
     bool insert(Key_t key, Val_t value);
     bool insert(Vnode* startNode, Vnode* vnode);
     bool append(Vnode* curVnode, Vnode* nextVnode);
