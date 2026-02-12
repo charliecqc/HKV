@@ -273,7 +273,7 @@ public:
     Inode* lookupForInsert(Key_t key, Inode* &start, int level, int& idx, std::vector<Inode*>& updates);
     Inode* lookupForInsertWithSnap(Key_t key, Inode* &start,
                                    int currentHighestLevelIndex,
-                                   int &idx,
+                                   int &idx, bool &is_sgp,
                                    std::vector<Inode*> &updates,
                                    InodeSnapShort &snap);
 

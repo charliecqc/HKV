@@ -419,6 +419,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 #endif
     for (;;) {
         int idx = -1;
+        bool is_sgp = false;
         Vnode *target_vnode = nullptr;
         std::vector<Inode *> updates;
         updates.reserve(MAX_LEVEL);
@@ -430,7 +431,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         if (!header) return false;
 
         InodeSnapShort snap{};
-        Inode *parent_inode = mainIndex->lookupForInsertWithSnap(key, header, current_level - 1, idx, updates, snap);
+        Inode *parent_inode = mainIndex->lookupForInsertWithSnap(key, header, current_level - 1, idx, is_sgp, updates, snap);
         
         if (parent_inode == nullptr) {
             bool ret = insertWithNewInodes(key, value, target_vnode);
@@ -487,7 +488,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 
         //update parent inode after split
         int last_idx_mut = current_last_idx;
-        if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx)) {
+        if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx, is_sgp)) {
             std::cerr << "Failed to update the parent inode after split." << std::endl;
             return false;
         }
@@ -657,7 +658,7 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
 
 bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode,
                                                std::vector<Inode *> &updates,
-                                               int &last_idx, int &idx_to_next_level)
+                                               int &last_idx, int &idx_to_next_level, bool &is_sgp)
 {
     write_lock(parent_inode->version);
     
@@ -671,8 +672,8 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         return targetVnode->getMinKey();
     });
     
-    if (idx_to_next_level >= 100 && !parent_inode->isSGPUnbalanced(idx_to_next_level - 100)) {
-        parent_inode->sgps[idx_to_next_level - 100].covered_nodes++; 
+    if (is_sgp && !parent_inode->isSGPUnbalanced(idx_to_next_level)) {
+        parent_inode->sgps[idx_to_next_level].covered_nodes++; 
         //TODO [ckpt] : log SGP update
         write_unlock(parent_inode->version);
         return true;
@@ -706,6 +707,10 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     int pos = -1;
     if(parent_inode->linkInactiveSGP(targetKey, targetVnode->getId(), pos, 1)) {
         // TODO [ckpt] : log SGP linking
+        std::cout << "Linking SGP at pos " << pos
+              << " key=" << targetKey
+              << " -> vnode " << targetVnode->getId()
+              << " covering " << parent_inode->sgps[pos].covered_nodes << "\n";
         write_unlock(parent_inode->version);
         return true;
     }
@@ -986,6 +991,7 @@ void TandemIndex::addToRebalanceQueue(Inode *&inode)
         nodesInRebalanceProcess.find(inode) == nodesInRebalanceProcess.end()) {
         rebalanceQueue.push(inode);
         rebalancingInodes.insert(inode);
+        inode->onRebalanceComplete();
     }else {
         //cout << "inode " << inode->getId() << " is already in the rebalance queue or being processed." << endl;
     }
@@ -1009,6 +1015,7 @@ bool TandemIndex::update(Key_t key, Val_t value)
 {
     for (;;) { // 重试环
         int idx = -1;
+        bool is_sgp = false;
         Vnode *target_vnode = nullptr;
         std::vector<Inode *> updates;
         updates.reserve(MAX_LEVEL);
@@ -1021,7 +1028,7 @@ bool TandemIndex::update(Key_t key, Val_t value)
 
         // 新：lookup 时当场捕获叶子的短快照
         InodeSnapShort snap{};
-        Inode *parent_inode = mainIndex->lookupForInsertWithSnap(key, header, current_level - 1, idx, updates, snap);
+        Inode *parent_inode = mainIndex->lookupForInsertWithSnap(key, header, current_level - 1, idx, is_sgp, updates, snap);
         
         // 空结构（只 header）
         if (parent_inode == nullptr) {
@@ -1085,7 +1092,7 @@ bool TandemIndex::update(Key_t key, Val_t value)
 
         // 分裂后更新父节点（内部会短写锁再次核对 last_index）
         int last_idx_mut = current_last_idx;
-        if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx)) {
+        if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx, is_sgp)) {
             std::cerr << "Failed to update the parent inode after split." << std::endl;
             return false;
         }
@@ -1555,11 +1562,9 @@ void TandemIndex::remove(int key)
 }
 #endif
 
-void TandemIndex::maybeActivateHotRegion() {
+/*void TandemIndex::maybeActivateHotRegionOld() {
     constexpr size_t WINDOW = 20;
     constexpr size_t FUTURE_EPOCHS = 1;
-
-    std::cout << "  Speculation round\n";
 
     tl::Region hot{};
     if (!tracker_->GetHottestRegion(WINDOW, &hot))
@@ -1576,15 +1581,34 @@ void TandemIndex::maybeActivateHotRegion() {
         tracker_->DropLastEpochHistogram();
         return;
     }
-    std::cout << "--------------Speculation round------------------\n";
-    for (Inode* inode : inodes) {
-        if (!inode || inode->isFull() || inode->isSGPFull())
-            continue;
 
+    struct IntervalCandidate {
+        int gp;
+        uint64_t lo;
+        uint64_t hi;
+        double pred;
+    };
+
+    for (Inode* inode : inodes) {
+        //if(getFromRebalanceQueue(inode)){
+        //    //std::cout << "  [SGP] inode " << inode->getId() << "queued for rebalance; skip\n";
+        //    continue;
+        //}
+
+        if (!inode || inode->isFull() || inode->isSGPFull()){
+            addToRebalanceQueue(inode);
+            continue;
+        }
+            
         int last_gp = inode->hdr.last_index;
         if (last_gp < 0) continue;
 
+        double inode_pressure = 0.0;
+        std::vector<IntervalCandidate> hot_intervals;
+
         for (int i = 0; i < last_gp; ++i) {
+            std::vector<IntervalCandidate> hot_intervals;
+            double inode_pressure = 0.0;
             uint64_t lo = inode->gps[i].key;
             uint64_t hi = inode->gps[i + 1].key;
 
@@ -1623,13 +1647,158 @@ void TandemIndex::maybeActivateHotRegion() {
                       << " anchors=" << anchors.size()
                       << " keys=" << join_u64(anchors) << "\n";
 #endif
-
+            //if(getFromRebalanceQueue(inode)){
+            //std::cout << "  [SGP] inode " << inode->getId() << "queued for rebalance; skip\n";
+            //continue;}
 #if 0
             for (uint64_t k : anchors) {
-                inode->activateSGP(k);
+                if (!inode->isSGPFull()){ 
+                    inode->activateSGP(k);
+                } else {
+                    break;
+                }
             }
 #endif
         }
+    }
+
+    tracker_->DropLastEpochHistogram();
+}*/
+
+void TandemIndex::maybeActivateHotRegion() {
+    constexpr size_t WINDOW        = 20;
+    constexpr size_t FUTURE_EPOCHS = 1;
+
+    auto dump_inode_sgp_state = [&](Inode* inode) {
+    std::ostringstream oss;
+    oss << "  [SGP-STATE] inode " << inode->getId()
+        << " L=" << inode->hdr.level
+        << " GP=" << (inode->hdr.last_index + 1)
+        << " SGP=" << inode->hdr.last_sgp
+        << " | GPs=[";
+
+    for (int i = 0; i <= inode->hdr.last_index; ++i) {
+        oss << inode->gps[i].key;
+        if (i < inode->hdr.last_index) oss << ",";
+    }
+
+    oss << "] SGPs=[";
+
+    for (int i = 0; i < inode->hdr.last_sgp; ++i) {
+        oss << inode->sgps[i].key;
+        if (i + 1 < inode->hdr.last_sgp) oss << ",";
+    }
+
+    oss << "]";
+    std::cout << oss.str() << "\n";
+};
+
+    // local guards (no AnchorParams changes)
+    constexpr double MIN_INODE_PRED = 0.05;  // suppress tiny Zipf noise
+    constexpr int    MAX_ANCHORS_PER_INODE = 3;
+
+    tl::Region hot{};
+    if (!tracker_->GetHottestRegion(WINDOW, &hot))
+        return;
+
+    std::vector<uint64_t> B;
+    std::vector<size_t>   C;
+    if (!tracker_->GetLastEpochHistogram(B, C))
+        return;
+
+    int L = 0;
+    auto inodes = mainIndex->nodesCoveringRangeAtLevel(hot.start, hot.end, L);
+    if (inodes.empty()) {
+        tracker_->DropLastEpochHistogram();
+        return;
+    }
+
+    for (Inode* inode : inodes) {
+        if (!inode)
+            continue;
+
+        if (inode->isFull() || inode->isSGPFull()) {
+            addToRebalanceQueue(inode);
+            continue;
+        }
+
+        uint64_t version_snapshot = inode->structure_version.load(std::memory_order_acquire);
+
+        int last_gp = inode->hdr.last_index;
+        if (last_gp < 0)
+            continue;
+
+        double inode_pred = 0.0;
+        std::vector<uint64_t> inode_anchors;
+
+        // ---- PHASE 1: scan GP intervals & COLLECT anchors ----
+        for (int i = 0; i < last_gp; ++i) {
+            uint64_t lo = inode->gps[i].key;
+            uint64_t hi = inode->gps[i + 1].key;
+
+            uint64_t S = std::max(lo, hot.start);
+            uint64_t E = std::min(hi, hot.end);
+            if (S >= E)
+                continue;
+
+            double pred = 0.0;
+            if (!tracker_->GetNumInsertsInKeyRangeForNumFutureEpochs(
+                    S, E, FUTURE_EPOCHS, &pred))
+                continue;
+
+            double coeff =
+                SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[inode->hdr.level];
+            double future_nodes = inode->gps[i].covered_nodes + pred;
+
+            if (future_nodes <= coeff)
+                continue;
+
+            inode_pred += pred;
+
+            int m = std::min(
+                int(std::ceil(pred / AnchorParams{}.inserts_per_anchor)),
+                AnchorParams{}.max_per_node
+            );
+            if (m <= 0)
+                continue;
+
+            auto anchors =
+                tracker_->placeAnchorsInsideInterval(B, C, lo, hi, m);
+
+            for (uint64_t k : anchors) {
+                if ((int)inode_anchors.size() >= MAX_ANCHORS_PER_INODE)
+                    break;
+                inode_anchors.push_back(k);
+            }
+        }
+
+        // ---- PHASE 2: inode-level decision ----
+        if (inode_pred < MIN_INODE_PRED)
+            continue;
+
+        if (inode_anchors.empty())
+            continue;
+
+#if 0
+        std::cout << "  [SGP] HOT inode " << inode->getId()
+                  << " anchors=" << inode_anchors.size()
+                  << " keys=" << join_u64(inode_anchors)
+                  << " pred≈" << inode_pred << "\n";
+#endif
+
+        // ---- PHASE 3: activate SGPs ONCE ----
+        if (inode->structure_version.load(std::memory_order_acquire) != version_snapshot) {
+        std::cout << "  [SGP] skipped \n";
+            continue;}
+
+        for (uint64_t k : inode_anchors) {
+            if (inode->isSGPFull())
+                break;
+            //std::cout << "  [SGP] activating" << k << "\n";
+            inode->activateSGP(k);
+
+        }
+        //dump_inode_sgp_state(inode);
     }
 
     tracker_->DropLastEpochHistogram();

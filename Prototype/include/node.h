@@ -196,6 +196,7 @@ public:
     entry sgps[fanout/2];
     std::bitset<fanout/2> sgpVisible;
 	std::atomic<uint64_t> version{0};
+    std::atomic<uint64_t> structure_version;
     
 
     Inode(uint32_t level)
@@ -215,6 +216,7 @@ public:
             sgps[i].value = std::numeric_limits<Val_t>::max();
             sgpVisible.reset();
 			version.store(0, std::memory_order_relaxed);
+            structure_version.store(0, std::memory_order_relaxed);
         }
     }
 
@@ -493,10 +495,24 @@ public:
         return (cmk >= low && cmk < high);
     }
 
-    bool shiftSGP(int oldIdx) { // shift data from oldIdx to newIdx
-        memmove(&sgps[oldIdx+1], &sgps[oldIdx], sizeof(entry) * (hdr.last_sgp - oldIdx + 1));
-        return true;
+    bool shiftSGP(int oldIdx) {
+    // shift entries
+    memmove(&sgps[oldIdx + 1],
+            &sgps[oldIdx],
+            sizeof(entry) * (hdr.last_sgp - oldIdx + 1));
+
+    // shift visibility bits
+    for (int i = hdr.last_sgp; i >= oldIdx; --i) {
+        if (sgpVisible.test(i))
+            sgpVisible.set(i + 1);
+        else
+            sgpVisible.reset(i + 1);
     }
+    sgpVisible.reset(oldIdx); // new slot starts invisible
+
+    return true;
+    }
+
 
     bool isSGPUnbalanced(int idx) {
         int current_level = this->hdr.level;
@@ -519,10 +535,11 @@ public:
         if (key < sgps[0].key) return false;
 
         for (int i = hdr.last_sgp; i >= 0; --i) {
-            if (sgpVisible.test(i) && (sgps[i].key > gp_key)) {
+            if (sgpVisible.test(i) && (sgps[i].key > gp_key) && sgps[i].value != -1) {
                 if (sgps[i].key <= key) {
-                    // Found the best possible SGP match. Stop immediately.
+                    // Found the best possible SGP match that is visible. Stop immediately.
                     sgp_pos = i;
+                    assert(!sgpVisible.test(i) || sgps[i].value != -1);
                     return true; 
                 }
             }
@@ -543,10 +560,9 @@ public:
         // TODO: add sgppos to vnode entry
 
         sgps[pos].key = key;
-        // sgps[pos].value = value; stays empty
-        // sgps[pos].covered_nodes = 0; still doesnt apply
-        // assert(sgps[pos].covered_nodes >= 1);
-        // sgpVisible.set(pos); //later when we link
+        sgps[pos].value = -1; 
+        sgps[pos].covered_nodes = 0; 
+        sgpVisible.reset(pos);
 
         hdr.last_sgp++;
         return true;
@@ -585,6 +601,7 @@ public:
         memset(this->sgps, 0, sizeof(sgps));
         this->sgpVisible.reset();
         this->hdr.last_sgp = -1;
+        //this->onRebalanceComplete();
 
         assert(this->getMaxKey() <= targetInode->getMinKey());
         return true;
@@ -616,19 +633,24 @@ public:
         int16_t cur_index = this->hdr.last_sgp;  
         if(static_cast<int32_t>(cur_index + 1)>= fanout/2) {
             return false;
-        }else {
-            int pos = this->findInsertSGPPos(targetKey);
-            if(pos < 0 || pos > cur_index + 1) {
-                std::cout << "Invalid position for inserting GP: " << pos << std::endl;
-                return false;
-            }
-            //assert(pos != 0);
-            this->insertSGPAtPos(targetKey, pos);
-            return true;
         }
+        int pos = this->findInsertSGPPos(targetKey);
+        if(pos < 0 || pos > cur_index + 1) {
+            std::cout << "Invalid position for inserting GP: " << pos << std::endl;
+            return false;
+        }
+
+        // ---- O(1) redundancy check ----
+        if (pos > 0 && sgps[pos - 1].key == targetKey) return false;
+        if (pos <= cur_index && sgps[pos].key == targetKey) return false;
+        // --------------------------------
+        //assert(pos != 0);
+        this->insertSGPAtPos(targetKey, pos);
+        return true;
+        
     }
 
-    bool findLinkingSGPPos(Key_t key, int pos)
+    bool findLinkingSGPPos(Key_t key, int& pos)
     {
         //handle the boundary cases
         if (hdr.last_sgp < 0) return false;
@@ -653,7 +675,7 @@ public:
         return false;
     }
 
-    bool linkInactiveSGP(Key_t key, int vnode_id, int pos, int covered_nodes) {
+    /*bool linkInactiveSGP(Key_t key, int vnode_id, int pos, int covered_nodes) {
         if (hdr.last_sgp < 0) {
             return false;
         }
@@ -666,8 +688,66 @@ public:
         sgps[sgp_pos].key = key;
         sgps[sgp_pos].value = vnode_id;
         sgps[sgp_pos].covered_nodes = covered_nodes;
+
+        std::cout << "Linking SGP at pos " << sgp_pos << " with key " << key << " to vnode " << vnode_id << " covering " << covered_nodes << " nodes.\n";
         return true;
+    }*/
+
+bool findLinkingSGPPosExact(Key_t key, int& pos) {
+    if (hdr.last_sgp < 0) return false;
+
+    // binary search since SGPs are ordered
+    int l = 0, r = hdr.last_sgp;
+    while (l <= r) {
+        int m = (l + r) >> 1;
+        if (sgps[m].key == key) {
+            if (!sgpVisible.test(m)) {
+                pos = m;
+                return true;
+            }
+            return false; // already visible
+        }
+        if (sgps[m].key < key) l = m + 1;
+        else r = m - 1;
     }
+    return false;
+}
+
+
+    bool linkInactiveSGP(Key_t key, int vnode_id, int& pos, int covered_nodes)
+{
+    if (hdr.last_sgp < 0) return false;
+
+    int sgp_pos = -1;
+    if (!findLinkingSGPPosExact(key, sgp_pos)) return false;
+
+    if (sgp_pos < 0 || sgp_pos > hdr.last_sgp) return false;
+
+    // 🔒 SAFETY: key must already match
+    assert(sgps[sgp_pos].key == key &&
+           "Linking SGP with mismatched key");
+
+    sgps[sgp_pos].value = vnode_id;        // DOWN POINTER ✔
+    sgps[sgp_pos].covered_nodes = covered_nodes;
+
+    std::atomic_thread_fence(std::memory_order_release);
+    sgpVisible.set(sgp_pos);
+
+    pos = sgp_pos;
+
+    //std::cout << "Linking SGP at pos " << sgp_pos
+    //          << " key=" << key
+    //          << " -> vnode " << vnode_id
+    //          << " covering " << covered_nodes << "\n";
+
+    return true;
+}
+
+
+    void onRebalanceComplete() {
+        structure_version.fetch_add(1, std::memory_order_release);
+    }
+
 };
 
 class vnodeHeader {

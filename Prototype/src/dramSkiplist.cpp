@@ -816,9 +816,12 @@ Inode *DramSkiplist::lookup_lambda(Key_t key, Inode *current, int currentHighest
                     if (lvl == 0) {
 #if 0
                         x.leaf_pos = cur->findKeyPos(key);
+                        x.sgp_used = false; 
                         int sgp_pos = -1;
                         if(current->lookupBetterSGP(key, cur->gps[x.leaf_pos].key, sgp_pos)){
-                        x.leaf_pos = sgp_pos + 100;
+                        x.leaf_sgp_pos = sgp_pos;
+                        x.sgp_used = true;
+
                         }
 #endif
                         x.ok = true;
@@ -829,6 +832,7 @@ Inode *DramSkiplist::lookup_lambda(Key_t key, Inode *current, int currentHighest
                     int sgp_pos = -1;
                     if(cur->lookupBetterSGP(key, cur->gps[pos].key, sgp_pos)){
                         x.child_id = cur->sgps[sgp_pos].value;
+                        std::cout << "level " << lvl << " sgp used for key: " << key << " sgp_key: " << cur->sgps[sgp_pos].key << " sgp_value: " << cur->sgps[sgp_pos].value << endl;
                         x.leaf_pos = sgp_pos;
                     }else{
                         x.child_id = cur->gps[pos].value;
@@ -886,7 +890,8 @@ Inode *DramSkiplist::lookup_lambda(Key_t key, Inode *current, int currentHighest
                     
                     if(current->lookupBetterSGP(key, current->gps[idx].key, sgp_pos)){
                         snap.sgp_key   = current->sgps[sgp_pos].key;
-                        snap.sgp_value = current->sgps[sgp_pos].value; 
+                        snap.sgp_value = current->sgps[sgp_pos].value;
+                        std::cout << "level osgp used for key: " << key << " sgp_key: " << snap.sgp_key << " sgp_value: " << snap.sgp_value << endl; 
                     }
                 } else {
                     snap.gp_key = 0; snap.gp_value = -1; snap.sgp_key = 0; snap.sgp_value = -1;
@@ -1165,13 +1170,12 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                 }
             }
 
-            int pos = -1;
-            if(verified_parent->linkInactiveSGP(new_min_key, next_node->getId(), pos, 1)) {
-            next_node->setParent(verified_parent->getId());
+            //int sgp_pos = -1;
+            //if(verified_parent->linkInactiveSGP(new_min_key, next_node->getId(), sgp_pos, 1)) {
+            //next_node->setParent(verified_parent->getId());
             // TODO [ckpt] : log SGP linking
-            ret = 1;
-            }
-
+            //ret = 1;
+            //} else {
             int temp_pos = -1;
             if (verified_parent->activateGP(new_min_key, next_node->getId(), temp_pos, relative_pos)) {
                 next_node->setParent(verified_parent->getId());
@@ -1186,6 +1190,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                 commit_full_logs();
                 ret = 2;
             }
+            //}
         }
 
         parent_inode_hint = verified_parent;
@@ -1637,7 +1642,7 @@ std::vector<Inode*> DramSkiplist::nodesCoveringRangeAtLevel(uint64_t a, uint64_t
 
 
 Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int currentHighestLevelIndex,
-                                             int &idx, std::vector<Inode*> &updates,
+                                             int &idx, bool &is_sgp, std::vector<Inode*> &updates,
                                              InodeSnapShort &snap)
 {
     int  start_level = -1;
@@ -1823,9 +1828,11 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                     if(cur->lookupBetterSGP(key, cur->gps[pos].key, sgp_pos)){
                         x.child_id = cur->sgps[sgp_pos].value;
                         x.leaf_pos = sgp_pos;
+                        is_sgp = true;
                     }else{
                         x.child_id = cur->gps[pos].value;
                         x.leaf_pos = pos;
+                        is_sgp = false;
                     }
 #else
                     x.child_id = cur->gps[pos].value;
@@ -1878,15 +1885,17 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                     snap.ub_key   = (idx < current->hdr.last_index)
                                     ? current->gps[idx + 1].key
                                     : std::numeric_limits<Key_t>::max();
+                    is_sgp = false;
                     
                     if(current->lookupBetterSGP(key, current->gps[idx].key, sgp_pos)){
                         snap.sgp_key   = current->sgps[sgp_pos].key;
                         snap.sgp_value = current->sgps[sgp_pos].value;
-                        idx = sgp_pos + 100; 
+                        std::cout << "sgp used for key: " << key << " sgp_key: " << snap.sgp_key << " sgp_value: " << snap.sgp_value << endl;
+                        is_sgp = true;
                     }
                 } else {
                     snap.gp_key = 0; snap.gp_value = -1; snap.sgp_key = 0; snap.sgp_value = -1;
-                    snap.lb_key = 0; snap.ub_key = std::numeric_limits<Key_t>::max();
+                    snap.lb_key = 0; snap.ub_key = std::numeric_limits<Key_t>::max(); is_sgp = false;
                 }
                 return 0;
 #else
