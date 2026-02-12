@@ -5,8 +5,9 @@
 #include <limits>
 #include <cstring>
 
-ValueList::ValueList() {
-    pmemVnodePool = new PmemVnodePool(sizeof(Vnode), MAX_VALUE_NODES);
+ValueList::ValueList(string storagePath) {
+    pmemVnodePool = new PmemVnodePool(sizeof(Vnode), MAX_VALUE_NODES, storagePath);
+    fileName = storagePath;
     if(pmemVnodePool->getCurrentIdx() != 0) {
         head = pmemVnodePool->at(0);
     }else {

@@ -241,10 +241,11 @@ struct SpeculationToken {
 
 #define LOG_SIZE 10UL*1024UL*1024UL*1024UL
 
-TandemIndex::TandemIndex() {
+TandemIndex::TandemIndex(string storage_path) {
     g_endTandem.store(false,std::memory_order_relaxed);
-    pmemBFPool = new PmemBFPool(MAX_VALUE_NODES);
-    valueList = new ValueList();
+    storagePath = storage_path;
+    pmemBFPool = new PmemBFPool(MAX_VALUE_NODES, storagePath);
+    valueList = new ValueList(storagePath);
     if(valueList->pmemVnodePool->getCurrentIdx() > 1) {
         if(pmemBFPool->at(0)->next_id != -1) { // shutdown normally
             PmemManager::memcpyToDRAM(4,
@@ -252,7 +253,7 @@ TandemIndex::TandemIndex() {
                 reinterpret_cast<char *>(pmemBFPool->at(0)),
                 sizeof(BloomFilter) * (valueList->pmemVnodePool->getCurrentIdx() + 1));
         }else {
-           for(int i = 0; i <= valueList->pmemVnodePool->getCurrentIdx(); i++) {
+           for(size_t i = 0; i <= valueList->pmemVnodePool->getCurrentIdx(); i++) {
                BloomFilter *bloom = &(valueList->bf[i]);
                Vnode *vnode = valueList->pmemVnodePool->at(i);
                bloom->next_id  = vnode->hdr.next;
@@ -272,14 +273,14 @@ TandemIndex::TandemIndex() {
     }else{
         setDataLoaded(false);
     }
-    pmemRecoveryArray = new PmemInodePool(sizeof(Inode), MAX_NODES);
+    pmemRecoveryArray = new PmemInodePool(sizeof(Inode), MAX_NODES, storagePath);
     recoveryManager = new RecoveryManager(pmemRecoveryArray); 
     int levels = recoveryManager->recoveryOperation();
     dramInodePool = recoveryManager->getDramInodePool();
 #if ENABLE_PMEM_STATS
-    ckptLog = new CkptLog(LOG_SIZE, levels-1, valueList);
+    ckptLog = new CkptLog(LOG_SIZE, levels-1, valueList, storagePath);
 #else
-    ckptLog = new CkptLog(LOG_SIZE);
+    ckptLog = new CkptLog(LOG_SIZE, storagePath);
 #endif
     PmemManager::flushToNVM(3, reinterpret_cast<char *>(ckptLog), sizeof(ckptLog));
     mainIndex = new DramSkiplist(ckptLog, dramInodePool, valueList);
@@ -780,7 +781,6 @@ Val_t TandemIndex::lookup(Key_t key)
             vnode_id = snap.gp_value;
         }
         const int start_vnode_id = vnode_id;
-        const int current_last_idx = snap.last_index;
 
         BloomFilter *bloom = &valueList->bf[start_vnode_id];
         if(bloom == nullptr) {
@@ -1225,7 +1225,6 @@ bool TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
             vnode_id = snap.gp_value;
         }
         const int start_vnode_id = vnode_id;
-        const int current_last_idx = snap.last_index;
 
         BloomFilter *bloom = &valueList->bf[start_vnode_id];
         if(bloom == nullptr) {
@@ -1313,7 +1312,6 @@ bool TandemIndex::scan(Key_t key, size_t range,
             vnode_id = snap.gp_value;
         }
         const int start_vnode_id = vnode_id;
-        const int current_last_idx = snap.last_index;
 
         BloomFilter *bloom = &valueList->bf[start_vnode_id];
         if(bloom == nullptr) {

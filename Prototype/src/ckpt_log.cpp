@@ -135,13 +135,13 @@ int CkptLogNVM::init(root_obj *root, size_t maxSize) {
 
 // 构造函数
 #if ENABLE_PMEM_STATS
-CkptLog::CkptLog(size_t logSize, int current_highest_level, ValueList *va_list)
+CkptLog::CkptLog(size_t logSize, int current_highest_level, ValueList *va_list, std::string storage_path)
     : retry_count(0), current_highest_level(current_highest_level), valueList(va_list),
-      ckptlog(new CkptLogNVM(logSize)) {
+      ckptlog(new CkptLogNVM(logSize, storage_path)) {
 #else
-CkptLog::CkptLog(size_t logSize)
+CkptLog::CkptLog(size_t logSize, std::string storage_path)
     : retry_count(0),
-      ckptlog(new CkptLogNVM(logSize)) {
+      ckptlog(new CkptLogNVM(logSize, storage_path)) {
 #endif
     a_consumed_start.v.store(ckptlog->start, std::memory_order_relaxed);
     a_durable_end.v.store(ckptlog->start_persistent, std::memory_order_relaxed);

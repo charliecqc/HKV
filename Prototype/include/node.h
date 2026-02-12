@@ -155,7 +155,7 @@ public:
     int16_t last_sgp; //2B
     
 public:
-    header() : id(0), level(0), next(0), last_index(-1), last_sgp(-1), parent_id(-1) {}
+    header() : next(0), id(0), parent_id(-1), level(0), last_index(-1), last_sgp(-1) {}
     friend class Inode;
 };
 
@@ -597,8 +597,10 @@ public:
         memcpy(targetInode->gps, merged_entries.data() + first_half_count, sizeof(entry) * second_half_count);
         targetInode->hdr.last_index = second_half_count - 1;
 
-        //clear all speculative entries and metadata
-        memset(this->sgps, 0, sizeof(sgps));
+        // 替换 memset，用循环调用默认构造函数清理 sgps
+        for (int i = 0; i < fanout/2; ++i) {
+            this->sgps[i] = entry();
+        }
         this->sgpVisible.reset();
         this->hdr.last_sgp = -1;
         //this->onRebalanceComplete();

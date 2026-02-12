@@ -9,14 +9,13 @@
 #include "node.h"
 #pragma once
 
-#define INDEX_POOL_LAYOUT_NAME "index_pool"
 #define NODE_POOL_SIZE ((60LL*1024*1024*1024))
 
 using namespace std;
 
 class PmemInodePool {
 private:
-    string fileName = "/mnt/pmem1/pmemInodePool";
+    string fileName;
     std::vector<Inode*> pmemInodePool;
     int nodeSize;
     int numNodes;
@@ -25,7 +24,8 @@ public:
 #if ENABLE_PMEM_STATS
     std::shared_mutex stats_mtx;
 #endif
-    PmemInodePool(size_t nodeSize, size_t numNodes) : nodeSize(nodeSize), numNodes(numNodes){
+    PmemInodePool(size_t nodeSize, size_t numNodes, string storagePath) : nodeSize(nodeSize), numNodes(numNodes) {
+        fileName = storagePath + "/pmemInodePool";
         root_obj *root = nullptr;
         init(root);
         currentIdx.store(0);

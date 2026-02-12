@@ -295,7 +295,7 @@ placeAnchorsInsideInterval(
       return false;
     }
     *num_inserts_last_epoch = 0;
-    for (int i = 0; i < num_partitions_; ++i) {
+    for (size_t i = 0; i < num_partitions_; ++i) {
       const uint64_t partition_start = partition_boundaries_last_epoch_[i];
       const uint64_t partition_end = partition_boundaries_last_epoch_[i + 1];
 

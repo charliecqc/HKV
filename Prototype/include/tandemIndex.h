@@ -19,7 +19,7 @@ extern std::queue<CheckpointVector *> g_checkpointQueue;
 
 class TandemIndex {
     public:
-        TandemIndex();
+        TandemIndex(string storage_path);
         ~TandemIndex();
 
         bool insert(Key_t key, Val_t value);
@@ -96,4 +96,5 @@ class TandemIndex {
         std::shared_mutex printMutex;
         std::unordered_set<Inode *> rebalancingInodes;
         std::unordered_set<Inode *> nodesInRebalanceProcess;
+        string storagePath;
 };

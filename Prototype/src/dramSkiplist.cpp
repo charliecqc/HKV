@@ -712,7 +712,6 @@ Inode *DramSkiplist::lookup_lambda(Key_t key, Inode *current, int currentHighest
 {
     int  start_level = -1;
     bool cache_hit_and_verified = false;
-    int  current_total_level = currentHighestLevelIndex + 1;
 
 #if ENBALE_L1_TLS_CACHE
     Inode *start_node = tls_try_match(key, start_level);
@@ -752,7 +751,7 @@ Inode *DramSkiplist::lookup_lambda(Key_t key, Inode *current, int currentHighest
         };
 
         Decision dec{};
-        uint64_t snap_parent{0};
+        int64_t snap_parent{0};
 
         auto commit_right = [&](Inode* parent, uint64_t snap_p, uint32_t expected_next_id) -> bool {
             uint32_t observed_next{std::numeric_limits<uint32_t>::max()};
@@ -1647,7 +1646,6 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
 {
     int  start_level = -1;
     bool cache_hit_and_verified = false;
-    int  current_total_level = currentHighestLevelIndex + 1;
 
     // step 1: try to use cached start node if any
     //Inode *start_node = find_start_node_from_cache_shards(key, start_level);
@@ -1692,7 +1690,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                 int soft_steps = 0;
                 while (soft_steps < SOFT_MAX_STEPS && key >= upper_bound) {
                     uint32_t next_id = std::numeric_limits<uint32_t>::max();
-                    uint64_t snap_parent = 0;
+                    int64_t snap_parent = 0;
                     std::tie(next_id, snap_parent) = read_consistent_with_snap(probe->version, [&]() -> uint32_t {
                             return probe->hdr.next;
                         });
@@ -1756,7 +1754,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
         };
 
         Decision dec{};
-        uint64_t snap_parent{0};
+        int64_t snap_parent{0};
 
         auto commit_right = [&](Inode* parent, uint64_t snap_p, uint32_t expected_next_id) -> bool {
             uint32_t observed_next{std::numeric_limits<uint32_t>::max()};

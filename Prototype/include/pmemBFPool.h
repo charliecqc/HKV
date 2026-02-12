@@ -9,19 +9,19 @@
 #include "node.h"
 #pragma once
 
-#define INDEX_POOL_LAYOUT_NAME "bf_pool"
 #define NODE_POOL_SIZE ((60LL*1024*1024*1024))
 
 using namespace std;
 
 class PmemBFPool {
 private:
-    string fileName = "/mnt/pmem1/pmemBFPool";
+    string fileName;
     std::vector<BloomFilter*> pmemBFPool;
     int numNodes;
     std::atomic<int> currentIdx;
 public:
-    PmemBFPool(size_t numNodes) : numNodes(numNodes){
+    PmemBFPool(size_t numNodes, string storagePath) : numNodes(numNodes){
+        fileName = storagePath + "/pmemBFPool";
         root_obj *root = nullptr;
         init(root);
         currentIdx.store(0);
