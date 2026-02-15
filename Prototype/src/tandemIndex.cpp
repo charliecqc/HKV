@@ -452,7 +452,6 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         if (!mainIndex->validateSnapShort(parent_inode, snap, key)) {
             continue;
         }
-        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
 
         assert(parent_inode->hdr.level == 0);
 
@@ -1051,7 +1050,6 @@ bool TandemIndex::update(Key_t key, Val_t value)
             //cout << "SnapShort validation failed for key: " << key << endl;
             continue; // 并发修改导致失效，整条路径重试
         }
-        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
 
         assert(parent_inode->hdr.level == 0); // 叶子层
 
@@ -1217,7 +1215,6 @@ bool TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
             continue; // 并发修改导致失效，重试
         }
 
-        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
         int vnode_id ;
         if(snap.sgp_key != 0) {
             vnode_id = snap.sgp_value;
@@ -1304,7 +1301,6 @@ bool TandemIndex::scan(Key_t key, size_t range,
             continue; // 并发修改导致失效，重试
         }
 
-        //mainIndex->populate_cache_shards(key, parent_inode, current_level);
         int vnode_id ;
         if(snap.sgp_key != 0) {
             vnode_id = snap.sgp_value;

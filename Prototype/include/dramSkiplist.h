@@ -229,10 +229,7 @@ public:
     inline size_t shard_of(const Key_t key) {
         return key_hasher(key) % kNumShards;
     }
-    Inode* find_start_node_from_cache(Key_t key, int& start_level);
     Inode* find_start_node_from_cache_shards(Key_t key, int& start_level);
-    void populate_cache(Key_t key, Inode* node);
-    void populate_cache(Key_t key, Inode* node, int current_total_level);
     void populate_cache_shards(Key_t key, Inode* node, int current_total_level);
 
     std::vector<Inode*> nodesCoveringRangeAtLevel(uint64_t a, uint64_t b, int level);
@@ -261,15 +258,11 @@ public:
     std::shared_mutex rebalance_lock;
     DramSkiplist(CkptLog *ckp_log, DramInodePool *dramInodePool, ValueList *valuelist);
     ~DramSkiplist();
-    bool insert(Key_t &key, Val_t &val);
-    bool insert(Key_t &key, Val_t &val, Inode *inodes[], int newlevel);
-    bool insert(Vnode *targetVnode);
     bool update(Key_t &oldKey, Key_t &newKey, Val_t &val);
     bool add(Vnode *targetVnode);
     // return the index in gps of the index node that poionts to the vnode
     //Inode *lookup(Key_t key, Inode *current, int currentHighestLevelIndex, std::shared_lock<std::shared_mutex> &current_lock, int &idx);
     Inode *lookup(Key_t key, Inode *current, int currentHighestLevelIndex, int &idx, InodeSnapShort &snap);
-    Inode *lookup_lambda(Key_t key, Inode *current, int currentHighestLevelIndex, int &idx, InodeSnapShort &snap);
     Inode* lookupForInsert(Key_t key, Inode* &start, int level, int& idx, std::vector<Inode*>& updates);
     Inode* lookupForInsertWithSnap(Key_t key, Inode* &start,
                                    int currentHighestLevelIndex,
@@ -283,12 +276,8 @@ public:
     Inode *getHeader();
     Inode *getHeader(int level);
     void getPivotNodesForInsert(Key_t key, Inode* updates[]);
-    bool checkForActivateGP(Inode &inode);
-    bool checkForRebalance(Inode &inode, bool &activeNewGP);
     bool rebalanceInode(Inode *inode, bool lastLevel);
     int generateRandomLevel();
-    bool rebalanceInode(Inode &inode);
-    bool rebalanceInode(Inode &inode, Vnode &vnode);
     bool rebalanceIndex(Vnode &targetVnode);
     int rebalanceIdx(Vnode &targetVnode, Key_t targetKey);
     bool activateGP(Inode &inode);
@@ -306,7 +295,6 @@ public:
         return (x >> 6) & (kNumParentShards - 1); // 跳过低 6 位
     }
 
-    void recordInodeRelation(Inode* &child, Inode* &parent);
     Inode* getParentInode(Inode* &child);
     //void removeInodeRelation(Inode* &child);
     void acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<std::unique_lock<std::shared_mutex>>& locks);
@@ -331,10 +319,6 @@ public:
     double calculateSearchEfficiency(long count);
     void fillInodeCountEachLevel(int level);
 
-    // 新增辅助函数声明
-    bool find_candidate_parent(Inode* inode, Inode* parent_hint, 
-                              Inode*& candidate_parent, Inode*& candidate_next, 
-                              Inode*& header_above);
     bool find_and_verify_candidate_parent(Inode* inode, Inode* parent_hint, 
                               Inode*& candidate_parent, Inode*& candidate_next, 
                               Inode*& header_above);

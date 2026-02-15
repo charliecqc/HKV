@@ -31,10 +31,8 @@ class TandemIndex {
         void recover(Key_t key);
         bool insertWithNewInodes(Key_t key, Val_t value);
 
-        bool insertWithoutIndex(Key_t key, Val_t value);
         bool insertWithNewInodes(Key_t key, Val_t value, Vnode* &vnode);
         bool insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t key, Val_t value);
-        bool moveToNextVnodeForInsert(Vnode* &vnode, BloomFilter* &bloom, std::unique_lock<std::shared_mutex> &vnode_lock);
         bool handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom, 
                                          Key_t key, Val_t value, Vnode* &newNode, BloomFilter* &newBloom);
         bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level, bool &is_sgp);
@@ -61,8 +59,6 @@ class TandemIndex {
         // 重平衡队列相关方法
         void addToRebalanceQueue(Inode* &inode);
         bool getFromRebalanceQueue(Inode* &inode);
-        void addToRebalanceMap(Inode *child, Inode *parent);
-        bool getFromRebalanceMap(Inode *child, Inode *parent);
 
         void maybeActivateHotRegion();
         bool isDataLoaded()

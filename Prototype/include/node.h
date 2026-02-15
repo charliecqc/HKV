@@ -525,7 +525,7 @@ public:
         return false;
     }
 
-    bool lookupBetterSGP(Key_t key, Key_t gp_key, int sgp_pos)
+    bool lookupBetterSGP(Key_t key, Key_t gp_key, int &sgp_pos)
     {
         // empty inode
         if (hdr.last_sgp < 0) return false;
