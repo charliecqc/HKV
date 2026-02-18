@@ -27,11 +27,11 @@ class BloomFilter {
 public:
     static const size_t FILTER_SIZE = 256;
     static const size_t HASH_FUNCTIONS = 4;
-    alignas(64) uint8_t fingerprints[32];
-    alignas(64) int32_t next_id{-1};
+    std::atomic<uint64_t> version{0};
+    int32_t next_id{-1};
+    Key_t min_key{std::numeric_limits<Key_t>::max()};
+    uint8_t fingerprints[32];
 
-    alignas(64) std::atomic<uint64_t> version{0}; // 独占 cacheline
-    alignas(64) Key_t min_key{std::numeric_limits<Key_t>::max()};
 public:
     // 哈希函数，返回位置
     size_t getPosition(Key_t key, int seed) const {
@@ -45,7 +45,6 @@ public:
         h ^= h >> 29;
         h *= PRIME2;
         h ^= h >> 32;
-        
         return h % FILTER_SIZE;
     }
     

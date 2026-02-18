@@ -183,6 +183,7 @@ struct TLSVnodeShadowCache {
 class DramSkiplist {
 private:
     //全局结构版本（split / rebalance 后 bump）
+#ifdef ENABLE_L1_TLS_CACHE
     std::atomic<uint32_t> global_epoch{0};
 
     struct TlsPivot {
@@ -202,6 +203,7 @@ private:
     void   tls_record_pivot(Inode* node);
     void   tls_mark_fail(Key_t min_key);
     void   bump_epoch(); // 在 split / rebalance 成功后调用
+#endif
 
 public:
     Inode* header[MAX_LEVEL];
@@ -212,9 +214,6 @@ public:
     int level; //level is the current max level of the skiplist
     std::shared_mutex level_lock;
     vector<int> inode_count_on_each_level;
-
-    //std::mutex inodeRelationMutex;
-    //std::unordered_map<Inode*, Inode*> childToParentMap; // map to store child-parent relationships for rebalancing
 
     // **新增：为查找操作设计的快速路径缓存**
     std::map<Key_t, Inode*> lookup_cache;

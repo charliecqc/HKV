@@ -395,13 +395,18 @@ TandemIndex::~TandemIndex() {
     }
 #endif
 
-    tracker_.reset();
+    // 必须先停止所有使用 tracker_ 的线程，再销毁 tracker_
+    // 否则线程仍在执行 tracker_->xxx() 时 tracker_ 已被析构 → SIGSEGV
+    if (speculator_) {
+        speculator_->Stop();
+        speculator_.reset();
+    }
     if (sampler_) {
         sampler_->Stop();
         sampler_.reset();
     }
-    if (speculator_) speculator_->Stop();
-    
+    tracker_.reset();   // 所有使用方线程已停止，最后安全销毁
+
 }
 
 bool TandemIndex::insert(Key_t key, Val_t value)
