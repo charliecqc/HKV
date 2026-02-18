@@ -28,7 +28,6 @@ public:
     static const size_t FILTER_SIZE = 256;
     static const size_t HASH_FUNCTIONS = 4;
     alignas(64) uint8_t fingerprints[32];
-    alignas(64) uint8_t bits[FILTER_SIZE];
     alignas(64) int32_t next_id{-1};
 
     alignas(64) std::atomic<uint64_t> version{0}; // 独占 cacheline
@@ -58,7 +57,6 @@ public:
 public:
     BloomFilter() {
         std::memset(fingerprints, 0, 32);
-        std::memset(bits, 0, FILTER_SIZE);
     }
     
     void add(Key_t key, int pos) {
@@ -67,49 +65,7 @@ public:
         // set bit at all positions determined by the hash functions
         for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
             size_t pos = getPosition(key, i);
-            bits[pos] = 1;
         }
-    }
-    bool mightContain(Key_t key) const {
-    #ifdef __AVX2__
-        const int SIMD_WIDTH = 32;
-        // collect all positions for the hash functions
-        size_t positions[HASH_FUNCTIONS];
-        for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
-            positions[i] = getPosition(key, i);
-            __builtin_prefetch(&bits[positions[i] & ~(SIMD_WIDTH-1)], 0, 0);  // prefetch aligned memory
-        }
-        
-        // check if all positions are set to 1
-        for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
-            size_t pos = positions[i];
-            size_t aligned_pos = pos & ~(SIMD_WIDTH - 1);  // align to 32-byte boundary
-            
-            //load 32 bytes starting from aligned position
-            __m256i data = _mm256_loadu_si256((__m256i*)&bits[aligned_pos]);
-            
-            // create a target vector with all bytes set to 1
-            __m256i target = _mm256_set1_epi8(1);
-            
-            // compare the data with the target
-            __m256i cmp = _mm256_cmpeq_epi8(data, target);
-            int mask = _mm256_movemask_epi8(cmp);
-            
-            // check if the specific bit for this position is set
-            if (!(mask & (1 << (pos - aligned_pos)))) {
-                return false;  //if any position is not set, return false
-            }
-        }
-        return true;
-    #else
-        for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
-            size_t pos = getPosition(key, i);
-            if (bits[pos] != 1) {
-                return false;
-            }
-        }
-        return true;
-    #endif
     }
 
     bool checkFingerprint(Key_t key, int pos) const {
@@ -119,7 +75,6 @@ public:
     
     void clear() {
         std::memset(fingerprints, 0, 32);
-        std::memset(bits, 0, FILTER_SIZE);
     }
 public:
     uint8_t hashKey(Key_t key) const {

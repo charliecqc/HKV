@@ -634,12 +634,11 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
     Key_t next_right_min = read_consistent(right_bloom->version, [&](){
         return right_bloom->getMinKey();
     });
-#if 1
+
     if (sampler_) {sampler_->Submit(next_right_min);} //sample split
     if (tracker_->LastEpochHistogramValid()) { //TODO: currently one thread speculating per round
         speculator_->TrySubmit();   // TODO: optimize: avoid double atomic ops
     }
-#endif
 
     bool ok = false;
     if (key < next_right_min) {
@@ -679,7 +678,6 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         return true;
     } else if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
         parent_inode->gps[idx_to_next_level].covered_nodes++;
-#if ENABLE_DELTA_LOG
         ckptLog->batcher().addDeltaSlot(
             parent_inode->getId(),
             parent_inode->hdr.last_index,
@@ -690,7 +688,6 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
             parent_inode->gps[idx_to_next_level].value,
             parent_inode->gps[idx_to_next_level].covered_nodes
         );
-#endif
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
             parent_inode->hdr.last_index, parent_inode->hdr.next,
             parent_inode->hdr.level, parent_inode->hdr.parent_id);
@@ -1097,99 +1094,6 @@ bool TandemIndex::update(Key_t key, Val_t value)
         return true;
     } // for retry
 }
-
-
-#if 0
-void TandemIndex::update(Key_t key, Val_t value)
-{
-    int idx = -1;
-    Key_t targetKey;
-    Vnode *targetVnode = nullptr; // new vnode to be inserted
-    Inode *inode = mainIndex->lookup(key, idx);
-    if(inode == nullptr) {
-        std::cout << "Failed to find the inode for the key: " << key << std::endl;
-        return;
-    }
-    std::shared_lock<std::shared_mutex> inode_lock(mainIndex->inode_locks[inode->getId()]);
-    Vnode *vnode = valueList->pmemVnodePool->at(inode->gps[idx].value);
-    inode_lock.unlock();
-    if(vnode == nullptr) {
-        std::cout << "Failed to find the vnode for the key: " << key << std::endl;
-        return;
-    }
-    while(true) {
-        //std::unique_lock<std::shared_mutex> lock(vnode->hdr.mtx);
-        BloomFilter *bloom = &valueList->bf[vnode->hdr.id];
-        std::unique_lock<std::shared_mutex> lock(bloom->vnode_mtx);
-        if(key > vnode->getMaxKey() && vnode->hdr.next != -1) {
-        //if(vnode->hdr.next != -1 && !valueList->bf[vnode->hdr.id].mightContain(key)) {
-            vnode = valueList->pmemVnodePool->at(vnode->hdr.next);
-        }else {
-            int pos = -1;
-            if(vnode->lookup(key,pos, &valueList->bf[vnode->hdr.id])) {
-                if(!vnode->isFull()) {
-                    vnode->insert(key, value, &valueList->bf[vnode->hdr.id]);
-                    vnode->hdr.unsetBit(pos);
-                    return;
-                }else {
-                    targetVnode = valueList->pmemVnodePool->getNextNode();  // get a new vnode;
-                    valueList->split(vnode, targetVnode); //redistribute the keys between the two vnodes
-                    if(key <= vnode->getMaxKey()) { // key is smaller than the max key of the previous value node after split
-                        if(!vnode->lookup(key, pos, &valueList->bf[vnode->hdr.id])) {
-                            vnode->insert(key, value, &valueList->bf[vnode->hdr.id]);
-                            vnode->hdr.unsetBit(pos);
-                        }
-                    }else{
-                        //std::unique_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
-                        BloomFilter *target_bloom = &valueList->bf[targetVnode->hdr.id];
-                        std::unique_lock<std::shared_mutex> lock_target(target_bloom->vnode_mtx);
-                        if(!targetVnode->lookup(key, pos, target_bloom)) {
-                            targetVnode->insert(key, value, &valueList->bf[targetVnode->hdr.id]);
-                            targetVnode->hdr.unsetBit(pos);
-                        }
-                    }
-                    break;
-                }
-            }else {
-                std::cout << "Failed to find the key in the vnode: " << vnode->hdr.id << std::endl;
-                return;
-            }
-        }
-    }
-    {
-        
-        std::unique_lock<std::shared_mutex> inode_wlock(mainIndex->inode_locks[inode->getId()]);
-        //inode->hdr.coveredNodes++;
-        if(inode->checkForActivateNextGP(idx)) {
-            //activate GP
-            int pos = -1;
-            {
-                //std::shared_lock<std::shared_mutex> lock_target(targetVnode->hdr.mtx);
-                BloomFilter *target_bloom = &valueList->bf[targetVnode->getId()];
-                std::shared_lock<std::shared_mutex> lock_target(target_bloom->vnode_mtx);
-                targetKey = targetVnode->getMinKey();
-            }
-            if(inode->activateGP(targetKey, targetVnode->getId(), pos, 1)) {
-                dram_log_entry_t *entry = new dram_log_entry_t(inode->getId(), inode->hdr.last_index, inode->hdr.next, inode->hdr.level);
-                for (int i = 0; i <= inode->hdr.last_index; i++) {
-                    entry->setKeyVal(i, inode->gps[i].key, inode->gps[i].value, inode->gps[i].covered_nodes);
-                }
-                // entry->setCoveredNodes(inode->hdr.coveredNodes); // <-- 移除
-                // entry->setLastIndex(inode->hdr.last_index); // <-- 已在构造函数中处理
-                ckptLog->enq(entry);
-            }else {
-                //rebalance the main index, if necessary
-                addToRebalanceQueue(inode);
-            }
-        }else {
-            //no needs to activate GP, just return 
-            return;
-        }
-    } 
-    // 重平衡现在通过队列异步处理
-    
-}
-#endif
 
 bool TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::vector<Key_t>, std::greater<Key_t>> &result)
 {
