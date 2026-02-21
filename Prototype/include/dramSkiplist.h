@@ -43,7 +43,7 @@ struct InodeSnapShort {
 };
 
 struct CachedVnodeImage {
-    uint32_t bitmap;
+    uint64_t bitmap;
     vnode_entry records[vnode_fanout];
 };
 
@@ -97,7 +97,7 @@ struct TlsVnodeCopyCache {
 struct TLSShadowEntry {
     int        vnode_id{-1};
     uint64_t   version{0};     // BloomFilter::version
-    uint32_t   bitmap{0};
+    uint64_t   bitmap{0};
     uint64_t   last_use{0};    // LRU 时间戳
     vnode_entry entries[vnode_fanout];
 };
@@ -130,7 +130,7 @@ struct TLSShadowCache {
 struct TLSVnodeShadowSlot {
     int      vnode_id{-1};
     uint64_t version{0};
-    uint32_t bitmap{0};
+    uint64_t bitmap{0};
     uint64_t last_use{0};
     // 紧凑副本
     uint16_t count{0};

@@ -33,6 +33,10 @@
 #define TLS_PIVOT_MAX 2
 #endif
 
+#ifndef ENABLE_HOTPATH_DEBUG_LOG
+#define ENABLE_HOTPATH_DEBUG_LOG 0
+#endif
+
 #if ENABLE_CACHE_STATS
 #define DBG_CACHE 1
 #endif
@@ -388,7 +392,7 @@ bool DramSkiplist::add(Vnode *targetVnode)
     Key_t targetKey = std::numeric_limits<Key_t>::max();
     Inode* updates[MAX_LEVEL];
     {
-        BloomFilter *bloom = &valueList->bf[targetVnode->hdr.id];
+        BloomFilter *bloom = valueList->getBloom(targetVnode->hdr.id);
         targetKey = read_consistent(bloom->version, [&]() {
             return bloom->getMinKey();
         });
@@ -1045,7 +1049,7 @@ int DramSkiplist::rebalanceIdx(Vnode &targetVnode, Key_t targetKey)
         acquired_locks.emplace_back(inode_locks[node->getId()]);
     }
 
-    BloomFilter *bloom = &valueList->bf[targetVnode.hdr.id];
+    BloomFilter *bloom = valueList->getBloom(targetVnode.hdr.id);
     std::shared_lock<std::shared_mutex> target_lock(bloom->vnode_mtx);
     if(targetKey != targetVnode.getMinKey()) {
         // targetVnode has already been updated with the new key
@@ -1263,6 +1267,7 @@ void DramSkiplist::acquireLocksInOrder(std::vector<Inode*>& nodes, std::vector<s
         if (b->hdr.next == a->getId()) {
             return false; // b is the predecessor of a, b before a
         }
+        return a->getId() < b->getId();
     });
     // 2. remove redundant nodes to avoid locking the same mutex twice
     nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
@@ -1291,7 +1296,7 @@ void DramSkiplist::acquireWriteLocksInOrderByVersion(std::vector<Inode*>& nodes)
         if (b->hdr.next == a->getId()) {
             return false; // b 是 a 的前驱，b 在前
         }
-        //return a->getId() < b->getId(); // level 相同，id 小的在前
+        return a->getId() < b->getId(); // level 相同，id 小的在前
     });
     // 2. 去除重复节点，防止对同一个互斥量加锁两次
     nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
@@ -1532,7 +1537,9 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
             observed_next = read_consistent(parent->version, [&]() { return parent->hdr.next; });
 
             if (observed_next != expected_next_id) {
+#if ENABLE_HOTPATH_DEBUG_LOG
                 cout << "observe_next != expected_next_id" << endl;
+#endif
                 return false;
             }
 
@@ -1618,7 +1625,9 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
             });
             if (!dec.ok) continue;
             if (dec.snap_version != snap_parent) {
+#if ENABLE_HOTPATH_DEBUG_LOG
                 cout << "snap_version != snap_parent for key: " << key << endl;
+#endif
                 continue;
             }
 
@@ -1659,9 +1668,11 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                     if(current->lookupBetterSGP(key, current->gps[idx].key, sgp_pos)){
                         snap.sgp_key   = current->sgps[sgp_pos].key;
                         snap.sgp_value = current->sgps[sgp_pos].value;
+#if ENABLE_HOTPATH_DEBUG_LOG
                         std::cout << "sgp used for key: " << key << " sgp_key: " << snap.sgp_key << " sgp_value: " << snap.sgp_value << endl;
                         if(snap.sgp_key == -1)
                             std::cout << "error sgp key is -1" << endl;
+#endif
                         is_sgp = true;
                     }
                 } else {
@@ -1825,17 +1836,17 @@ void DramSkiplist::tlsShadowEnsure(int vnode_id, BloomFilter* bloom, Vnode* vnod
         return;
     }
 
-    const uint32_t bm_snapshot = vnode->hdr.bitmap & VNODE_FULL_MASK;
+    const uint64_t bm_snapshot = vnode->hdr.bitmap & VNODE_FULL_MASK;
     TLSVnodeShadowSlot* slot = tls_shadow_cache_.victim(vnode_id);
 
     const uint64_t v1 = bloom->version.load(std::memory_order_acquire);
     __builtin_prefetch(vnode->records, 0, 3);
 
     uint16_t cnt = 0;
-    uint32_t bm = bm_snapshot;
+    uint64_t bm = bm_snapshot;
     while (bm) {
-        const int idx = 31 - __builtin_clz(bm);
-        bm &= ~(1u << idx);
+        const int idx = 63 - __builtin_clzll(bm);
+        bm &= ~(1ull << idx);
         const auto& r = vnode->records[idx];
         slot->packed[cnt].key   = r.key;
         slot->packed[cnt].value = r.value;

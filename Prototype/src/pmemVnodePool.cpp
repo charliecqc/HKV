@@ -3,7 +3,12 @@
 using namespace std;
 
 int PmemVnodePool::init(root_obj *root) {
-    size_t vp_size = 10UL * 1024UL * 1024UL * 1024UL; 
+    const size_t min_pool_size = 10UL * 1024UL * 1024UL * 1024UL;
+    const size_t required_data_bytes = static_cast<size_t>(nodeSize) * static_cast<size_t>(numNodes);
+    const size_t pool_headroom = 512UL * 1024UL * 1024UL;
+    size_t vp_size = (required_data_bytes + pool_headroom > min_pool_size)
+        ? (required_data_bytes + pool_headroom)
+        : min_pool_size;
     bool isCreate;
     bool ret = PmemManager::createOrOpenPool(VALUEPOOL, fileName.c_str(), vp_size, (void **)&root, isCreate);
     if (!ret) {
@@ -14,7 +19,7 @@ int PmemVnodePool::init(root_obj *root) {
     // To allocate the vnode pool. 1. allocate memory. 2. cast into vodes 3. pot them into vector.
     PMEMobjpool *pop = (PMEMobjpool *)PmemManager::getPoolStartAddress(VALUEPOOL);
     if(isCreate) {
-        int ret_val = pmemobj_alloc(pop, &root->ptr[0], nodeSize * MAX_NODES, 0, NULL, NULL);
+        int ret_val = pmemobj_alloc(pop, &root->ptr[0], static_cast<size_t>(nodeSize) * static_cast<size_t>(numNodes), 0, NULL, NULL);
         if (ret_val) {
             std::cout << "Failed to allocate memory for root->ptr[0]" << std::endl;
             return -1;

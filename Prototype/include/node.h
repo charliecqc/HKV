@@ -19,9 +19,14 @@
 #include <immintrin.h>
 #endif
 const int32_t fanout = 28;
-const int32_t vnode_fanout =28;
-constexpr uint32_t VNODE_FULL_MASK =
-    (vnode_fanout >= 32u) ? 0xFFFF'FFFFu : ((1u << vnode_fanout) - 1u);
+const int32_t vnode_fanout =63;
+static_assert(vnode_fanout > 0 && vnode_fanout <= 64, "vnode_fanout must be in (0, 64]");
+constexpr uint64_t VNODE_FULL_MASK =
+    (vnode_fanout >= 64u) ? 0xFFFF'FFFF'FFFF'FFFFull : ((1ull << vnode_fanout) - 1ull);
+
+#ifndef ENABLE_BLOOM_FINGERPRINT
+#define ENABLE_BLOOM_FINGERPRINT 1
+#endif
 
 class BloomFilter {
 public:
@@ -30,7 +35,7 @@ public:
     std::atomic<uint64_t> version{0};
     int32_t next_id{-1};
     Key_t min_key{std::numeric_limits<Key_t>::max()};
-    uint8_t fingerprints[32];
+    uint8_t fingerprints[vnode_fanout];
 
 public:
     // 哈希函数，返回位置
@@ -55,16 +60,17 @@ public:
     
 public:
     BloomFilter() {
-        std::memset(fingerprints, 0, 32);
+        std::memset(fingerprints, 0, sizeof(fingerprints));
     }
     
     void add(Key_t key, int pos) {
+#if ENABLE_BLOOM_FINGERPRINT
         uint8_t fp = calculateFingerprint(key);
         fingerprints[pos] = fp;  // store fingerprint at the specified position
-        // set bit at all positions determined by the hash functions
-        for (size_t i = 0; i < HASH_FUNCTIONS; i++) {
-            size_t pos = getPosition(key, i);
-        }
+#else
+        (void)key;
+        (void)pos;
+#endif
     }
 
     bool checkFingerprint(Key_t key, int pos) const {
@@ -73,7 +79,7 @@ public:
     }
     
     void clear() {
-        std::memset(fingerprints, 0, 32);
+        std::memset(fingerprints, 0, sizeof(fingerprints));
     }
 public:
     uint8_t hashKey(Key_t key) const {
@@ -489,11 +495,11 @@ public:
         if (key < sgps[0].key) return false;
 
         for (int i = hdr.last_sgp; i >= 0; --i) {
-            if (sgpVisible.test(i) && (sgps[i].key > gp_key) && sgps[i].value != -1) {
+            if (sgpVisible.test(i) && (sgps[i].key > gp_key) && sgps[i].value != (Val_t)-1) {
                 if (sgps[i].key <= key) {
                     // Found the best possible SGP match that is visible. Stop immediately.
                     sgp_pos = i;
-                    assert(!sgpVisible.test(i) || sgps[i].value != -1);
+                    assert(!sgpVisible.test(i) || sgps[i].value != (Val_t)-1);
                     return true; 
                 }
             }
@@ -708,7 +714,7 @@ bool findLinkingSGPPosExact(Key_t key, int& pos) {
 
 class vnodeHeader {
 public:
-    uint32_t bitmap; // 4 bytes
+    uint64_t bitmap; // 8 bytes
     int next; //4 bytes 
     uint32_t id; //4 bytes
     // used to keep track of the keys are valid or not in the vnode
@@ -721,15 +727,15 @@ public:
     }
 public:
     void setBit(int pos) {
-        bitmap |= (1 << pos);
+        bitmap |= (uint64_t{1} << pos);
     }
 
     void unsetBit(int pos) {
-        bitmap &= ~(1 << pos);
+        bitmap &= ~(uint64_t{1} << pos);
     }
 
     bool isBitSet(int pos) {
-        return (bitmap & (1 << pos)) != 0;
+        return (bitmap & (uint64_t{1} << pos)) != 0;
     }
     friend class Vnode;
 };
@@ -795,18 +801,18 @@ public:
 non_simd:
 #endif // __AVX2__
         // non-SIMD version for fingerprint comparison
-        constexpr uint32_t FULL_MASK = (vnode_fanout >= 32u)
-            ? 0xFFFFFFFFu
-            : ((1u << vnode_fanout) - 1u);
-        uint32_t bm = hdr.bitmap & FULL_MASK;
+        constexpr uint64_t FULL_MASK = (vnode_fanout >= 64u)
+            ? 0xFFFF'FFFF'FFFF'FFFFull
+            : ((1ull << vnode_fanout) - 1ull);
+        uint64_t bm = hdr.bitmap & FULL_MASK;
 
         // 可选的指纹预过滤（bloom 可能为 nullptr）
         uint8_t fp = 0;
-        const bool use_fp = (bloom != nullptr);
+        const bool use_fp = (bloom != nullptr) && ENABLE_BLOOM_FINGERPRINT;
         if (use_fp) fp = bloom->hashKey(key);
 
         while (bm) {
-            int idx = __builtin_ctz(bm);
+            int idx = __builtin_ctzll(bm);
             bm &= (bm - 1);
             if (!use_fp || bloom->fingerprints[idx] == fp) {
                 if (records[idx].key == key) {
@@ -821,9 +827,9 @@ non_simd:
     Key_t getMaxKey()
     {
         Key_t maxKey = std::numeric_limits<Key_t>::min();
-        uint32_t bitmap = hdr.bitmap;
+        uint64_t bitmap = hdr.bitmap;
         while(bitmap) {
-            int idx = __builtin_ctz(bitmap);
+            int idx = __builtin_ctzll(bitmap);
             if(records[idx].key > maxKey) {
                 maxKey = records[idx].key;
             }
@@ -834,9 +840,9 @@ non_simd:
 
     Key_t getMinKey() {
         Key_t minKey = std::numeric_limits<Key_t>::max();
-        uint32_t bitmap = hdr.bitmap;
+        uint64_t bitmap = hdr.bitmap;
         while(bitmap) {
-            int idx = __builtin_ctz(bitmap);  // find the lowest set bit
+            int idx = __builtin_ctzll(bitmap);  // find the lowest set bit
             if(records[idx].key < minKey) {
                 minKey = records[idx].key;
             }
@@ -850,9 +856,9 @@ non_simd:
         std::vector<Key_t> validKeys;
         validKeys.reserve(vnode_fanout);
 
-        uint32_t bitmap = hdr.bitmap;
+        uint64_t bitmap = hdr.bitmap;
         while(bitmap) {
-            int idx = __builtin_ctz(bitmap);  // find the lowest set bit
+            int idx = __builtin_ctzll(bitmap);  // find the lowest set bit
             if(records[idx].key != std::numeric_limits<Key_t>::max()) {
                 validKeys.push_back(records[idx].key);
             }
@@ -868,11 +874,11 @@ non_simd:
     }
 
     template <class F>
-    inline void for_each_set_bit_desc(uint32_t bm, F&& f) {
+    inline void for_each_set_bit_desc(uint64_t bm, F&& f) {
         while (bm) {
-            int idx = 31 - __builtin_clz(bm); // 最高置位
+            int idx = 63 - __builtin_clzll(bm); // 最高置位
             f(idx);
-            bm &= ~(1u << idx);               // 清除最高置位
+            bm &= ~(1ull << idx);               // 清除最高置位
         }
     }
 
@@ -900,7 +906,7 @@ non_simd:
 
     int scan(Key_t key, size_t range, std::vector<Key_t> &result) {
         size_t remaining_range = range;
-        uint32_t bm = hdr.bitmap & VNODE_FULL_MASK;
+        uint64_t bm = hdr.bitmap & VNODE_FULL_MASK;
 
         for_each_set_bit_desc(bm, [&](int idx){
             if (remaining_range == 0) return;
@@ -917,16 +923,16 @@ non_simd:
 //Todo: Implement insert with finger print and bloom filter
 //find the first empty slot and insert the key and value
     inline bool insert(Key_t key, Val_t value, BloomFilter* bloom) {
-        constexpr uint32_t FULL_MASK = (vnode_fanout >= 32u)
-            ? 0xFFFFFFFFu
-            : ((1u << vnode_fanout) - 1u);
-    uint32_t free_mask = (~hdr.bitmap) & FULL_MASK;
+        constexpr uint64_t FULL_MASK = (vnode_fanout >= 64u)
+            ? 0xFFFF'FFFF'FFFF'FFFFull
+            : ((1ull << vnode_fanout) - 1ull);
+    uint64_t free_mask = (~hdr.bitmap) & FULL_MASK;
     if (free_mask == 0) return false;
-    int pos = __builtin_ctz(free_mask);
+    int pos = __builtin_ctzll(free_mask);
     records[pos].key   = key;
     records[pos].value = value;
     hdr.setBit(pos);
-    if (bloom) bloom->add(key, pos);
+    if (bloom && ENABLE_BLOOM_FINGERPRINT) bloom->add(key, pos);
     return true;
 }
 
@@ -935,12 +941,16 @@ non_simd:
     }
 
     void rebuildMetadata(BloomFilter *bloom, int rebuild_count) {
-        bloom->clear();  // 清空布隆过滤器
+        if (ENABLE_BLOOM_FINGERPRINT) {
+            bloom->clear();  // 清空布隆过滤器
+        }
         hdr.bitmap = 0;
         for (int32_t i = 0; i < rebuild_count; i++) {
             if (records[i].key != std::numeric_limits<Key_t>::max()) {
                 hdr.setBit(i);
-                bloom->add(records[i].key, i);  // 添加到布隆过滤器
+                if (ENABLE_BLOOM_FINGERPRINT) {
+                    bloom->add(records[i].key, i);  // 添加到布隆过滤器
+                }
             }
         }
     }
@@ -965,7 +975,7 @@ non_simd:
     
     bool isFull()
     {
-        return hdr.bitmap == static_cast<uint32_t>((1 << vnode_fanout) - 1);
+        return hdr.bitmap == VNODE_FULL_MASK;
     }
 
     bool isEmpty()

@@ -14,6 +14,24 @@
 #include <sstream>
 #include <atomic>
 #include <cstdint>
+#include <stdexcept>
+
+namespace {
+static std::string format_bytes(size_t bytes) {
+    const double mib = static_cast<double>(bytes) / (1024.0 * 1024.0);
+    std::ostringstream oss;
+    oss << bytes << " B (" << std::fixed << std::setprecision(2) << mib << " MiB)";
+    return oss.str();
+}
+
+static constexpr uint64_t kLayoutMetaMagicTag = 0x54414E44454D4C59ull; // "TANDEMLY"
+static inline uint64_t current_layout_magic() {
+    return kLayoutMetaMagicTag
+        ^ (static_cast<uint64_t>(vnode_fanout) << 48)
+        ^ (static_cast<uint64_t>(sizeof(Vnode)) << 24)
+        ^ (static_cast<uint64_t>(sizeof(BloomFilter)));
+}
+}
 
 #ifndef ENABLE_THREAD_KEY_CACHE
 #define ENABLE_THREAD_KEY_CACHE 1
@@ -21,6 +39,10 @@
 
 #ifndef THREAD_KEY_CACHE_CAP
 #define THREAD_KEY_CACHE_CAP 512 
+#endif
+
+#ifndef ENABLE_HOTPATH_DEBUG_LOG
+#define ENABLE_HOTPATH_DEBUG_LOG 0
 #endif
 
 #define THREAD_KEY_CACHE_WAYS 8
@@ -245,21 +267,42 @@ TandemIndex::TandemIndex(string storage_path) {
     g_endTandem.store(false,std::memory_order_relaxed);
     storagePath = storage_path;
     pmemBFPool = new PmemBFPool(MAX_VALUE_NODES, storagePath);
-    valueList = new ValueList(storagePath);
+    valueList = new ValueList(storagePath, pmemBFPool);
+
+    {
+        Vnode *metaVnode = valueList->pmemVnodePool->at(MAX_VALUE_NODES - 1);
+        if (metaVnode != nullptr) {
+            const bool has_persisted_data = (valueList->pmemVnodePool->getCurrentIdx() > 1);
+            const uint64_t expected = current_layout_magic();
+            const uint64_t persisted = metaVnode->records[0].key;
+            if (!has_persisted_data) {
+                metaVnode->records[0].key = expected;
+                metaVnode->records[0].value = static_cast<Val_t>(vnode_fanout);
+                const unsigned long rec_flush = PmemManager::align_uint_to_cacheline(sizeof(vnode_entry));
+                PmemManager::flushToNVM(0, reinterpret_cast<char *>(&metaVnode->records[0]), rec_flush);
+            } else if (persisted != expected) {
+                std::cerr << "[FATAL] PMEM layout mismatch detected. "
+                          << "Current binary expects vnode_fanout=" << vnode_fanout
+                          << ", sizeof(Vnode)=" << sizeof(Vnode)
+                          << ", sizeof(BloomFilter)=" << sizeof(BloomFilter)
+                          << ". Please remove old PMEM files and rerun: "
+                          << "rm -rf " << storagePath << "/pmem* " << storagePath << "/ckpt_log"
+                          << std::endl;
+                throw std::runtime_error("PMEM layout mismatch");
+            }
+        }
+    }
+
     if(valueList->pmemVnodePool->getCurrentIdx() > 1) {
-        if(pmemBFPool->at(0)->next_id != -1) { // shutdown normally
-            PmemManager::memcpyToDRAM(4,
-                reinterpret_cast<char *>(valueList->bf),
-                reinterpret_cast<char *>(pmemBFPool->at(0)),
-                sizeof(BloomFilter) * (valueList->pmemVnodePool->getCurrentIdx() + 1));
-        }else {
+        if(pmemBFPool->at(0)->next_id == -1) {
            for(size_t i = 0; i <= valueList->pmemVnodePool->getCurrentIdx(); i++) {
-               BloomFilter *bloom = &(valueList->bf[i]);
+               BloomFilter *bloom = valueList->getBloom(i);
                Vnode *vnode = valueList->pmemVnodePool->at(i);
+               bloom->clear();
                bloom->next_id  = vnode->hdr.next;
                Key_t min_key = std::numeric_limits<Key_t>::max();
-               for(uint32_t bm = vnode->hdr.bitmap; bm; ) {
-                   int idx = __builtin_ctz(bm);
+               for(uint64_t bm = vnode->hdr.bitmap; bm; ) {
+                   int idx = __builtin_ctzll(bm);
                    bloom->add(vnode->records[idx].key, idx);
                    if(vnode->records[idx].key < min_key) {
                        min_key = vnode->records[idx].key;
@@ -377,12 +420,15 @@ TandemIndex::~TandemIndex() {
         PmemManager::flushToNVM(0, reinterpret_cast<char *>(metaVnode), sizeof(Vnode));
     }
 
-    PmemManager::memcpyToNVM(4,reinterpret_cast<char *>(pmemBFPool->at(0)),
-        reinterpret_cast<char *>(valueList->bf),
+    valueList->syncBloomToPMEM(valueList->pmemVnodePool->getCurrentIdx() + 1);
+
+    PmemManager::flushToNVM(4,
+        reinterpret_cast<char *>(pmemBFPool->at(0)),
         sizeof(BloomFilter) * (valueList->pmemVnodePool->getCurrentIdx() + 1));
 
     //cout << "vnode count: " << valueList->pmemVnodePool->getCurrentIdx() << endl;
     mainIndex->printStats();
+    printStatus();
 
 #if ENABLE_TLS_SHADOW_STATS
     {
@@ -475,7 +521,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             return false;
         }
         target_vnode = start_vnode;
-        BloomFilter *target_vnode_bloom = &valueList->bf[target_vnode->getId()];
+        BloomFilter *target_vnode_bloom = valueList->getBloom(target_vnode->getId());
 
 
         //fast path: insert into vnode chain
@@ -504,7 +550,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vnode)
 {
     Vnode* headerVnode = valueList->getHeader();
-    BloomFilter* headerbloom = &valueList->bf[headerVnode->getId()];
+    BloomFilter* headerbloom = valueList->getBloom(headerVnode->getId());
     //std::unique_lock<std::shared_mutex> vheader_lock(headerbloom->vnode_mtx);
     write_lock(headerbloom->version);
       // create new vnode
@@ -517,7 +563,7 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
     valueList->append(headerVnode, newVnode);
     headerbloom->setNextId(newVnode->getId());
 
-    BloomFilter* bloom = &valueList->bf[newVnode->getId()];
+    BloomFilter* bloom = valueList->getBloom(newVnode->getId());
     //std::unique_lock<std::shared_mutex> vnode_lock(bloom->vnode_mtx);
     write_lock(bloom->version);
 
@@ -558,7 +604,7 @@ bool TandemIndex::insertInVnodeChain(Vnode* &start_vnode, BloomFilter* &start_bl
                     return r;
                 }
 
-                BloomFilter* next_bloom = &valueList->bf[nid]; // get right node's bloom
+                BloomFilter* next_bloom = valueList->getBloom(nid); // get right node's bloom
                 if(!next_bloom) return r;
                 // read next's min under next's version
                 Key_t next_min = read_consistent(next_bloom->version, [&]() {
@@ -572,7 +618,7 @@ bool TandemIndex::insertInVnodeChain(Vnode* &start_vnode, BloomFilter* &start_bl
 
             if (!s.can_move) break;
 
-            BloomFilter* next_bloom = &valueList->bf[s.next_id];
+            BloomFilter* next_bloom = valueList->getBloom(s.next_id);
             if (!next_bloom) break; // defensive
             __builtin_prefetch(&next_bloom->min_key, 0, 1);
             current_bloom = next_bloom;
@@ -586,7 +632,7 @@ bool TandemIndex::insertInVnodeChain(Vnode* &start_vnode, BloomFilter* &start_bl
             write_lock(current_bloom->version);
             int nid = current_bloom->next_id;
             if (nid != -1) {
-                BloomFilter* next_bloom= &valueList->bf[nid];
+                BloomFilter* next_bloom= valueList->getBloom(nid);
                 if (next_bloom) {
                     Key_t next_min = read_consistent(next_bloom->version, [&]() {
                         return next_bloom->getMinKey();
@@ -633,7 +679,7 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
         write_unlock(left_bloom->version);
         return ok;
     }
-    right_bloom = &valueList->bf[right_vnode->getId()];
+    right_bloom = valueList->getBloom(right_vnode->getId());
 
     // 3) Decide which node should receive (key,value), Read nextVnode’s min under its own version to avoid torn reads.
     Key_t next_right_min = read_consistent(right_bloom->version, [&](){
@@ -671,7 +717,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         return true;
     }
 
-    BloomFilter* target_bloom = &valueList->bf[targetVnode->getId()];
+    BloomFilter* target_bloom = valueList->getBloom(targetVnode->getId());
     Key_t targetKey = read_consistent(target_bloom->version, [&](){
         return targetVnode->getMinKey();
     });
@@ -709,10 +755,12 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     int pos = -1;
     if(parent_inode->linkInactiveSGP(targetKey, targetVnode->getId(), pos, 1)) {
         // TODO [ckpt] : log SGP linking
+#if ENABLE_HOTPATH_DEBUG_LOG
         std::cout << "Linking SGP at pos " << pos
               << " key=" << targetKey
               << " -> vnode " << targetVnode->getId()
               << " covering " << parent_inode->sgps[pos].covered_nodes << "\n";
+#endif
         write_unlock(parent_inode->version);
         return true;
     }
@@ -783,7 +831,7 @@ Val_t TandemIndex::lookup(Key_t key)
         }
         const int start_vnode_id = vnode_id;
 
-        BloomFilter *bloom = &valueList->bf[start_vnode_id];
+        BloomFilter *bloom = valueList->getBloom(start_vnode_id);
         if(bloom == nullptr) {
             return -1;
         }
@@ -805,7 +853,7 @@ Val_t TandemIndex::lookup(Key_t key)
                 if(next == -1) {
                     return res;
                 }
-                BloomFilter* nb = &valueList->bf[next];
+                BloomFilter* nb = valueList->getBloom(next);
                 if(!nb) {
                     return res;
                 }
@@ -823,7 +871,7 @@ Val_t TandemIndex::lookup(Key_t key)
             });
 
             if(!s.can_move) {
-                if(s.out != -1) return s.out; // 早期保守
+                if(s.out != (Val_t)-1) return s.out; // 早期保守
                 // 闭包未执行 vnode 查找，这里补做
                 Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
                 if(!vnode) return -1;
@@ -847,7 +895,7 @@ Val_t TandemIndex::lookup(Key_t key)
                 return -1;
             }
 
-            BloomFilter* next_bloom = &valueList->bf[s.next_id];
+            BloomFilter* next_bloom = valueList->getBloom(s.next_id);
             bloom = next_bloom;
             current_vnode_id = s.next_id;
         } 
@@ -1070,7 +1118,7 @@ bool TandemIndex::update(Key_t key, Val_t value)
             return false;
         }
         target_vnode = start_vnode;
-        BloomFilter *target_vnode_bloom = &valueList->bf[target_vnode->getId()];
+        BloomFilter *target_vnode_bloom = valueList->getBloom(target_vnode->getId());
 
         //Vnode *start_vnode_replica = new Vnode(*start_vnode); // create a replica of the target vnode for validation
 
@@ -1132,7 +1180,7 @@ bool TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
         }
         const int start_vnode_id = vnode_id;
 
-        BloomFilter *bloom = &valueList->bf[start_vnode_id];
+        BloomFilter *bloom = valueList->getBloom(start_vnode_id);
         if(bloom == nullptr) {
             return -1;
         }
@@ -1152,7 +1200,7 @@ bool TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
                 if(next == -1) {
                     return res;
                 }
-                BloomFilter* nb = &valueList->bf[next]; // 新增：右节点的版本源
+                BloomFilter* nb = valueList->getBloom(next); // 新增：右节点的版本源
                 if(!nb) {
                     return res;
                 }
@@ -1178,7 +1226,7 @@ bool TandemIndex::scan(Key_t key, size_t range, std::priority_queue<Key_t, std::
                 return true;
             }
 
-            BloomFilter* next_bloom = &valueList->bf[s.next_id];
+            BloomFilter* next_bloom = valueList->getBloom(s.next_id);
             bloom = next_bloom;
             current_vnode_id = s.next_id;
         } 
@@ -1218,7 +1266,7 @@ bool TandemIndex::scan(Key_t key, size_t range,
         }
         const int start_vnode_id = vnode_id;
 
-        BloomFilter *bloom = &valueList->bf[start_vnode_id];
+        BloomFilter *bloom = valueList->getBloom(start_vnode_id);
         if(bloom == nullptr) {
             return -1;
         }
@@ -1240,7 +1288,7 @@ bool TandemIndex::scan(Key_t key, size_t range,
                     res.ret_id = current_vnode_id;
                     return res;
                 }
-                BloomFilter* nb = &valueList->bf[next_id]; // 新增：右节点的版本源
+                BloomFilter* nb = valueList->getBloom(next_id); // 新增：右节点的版本源
                 if(!nb) {
                     return res;
                 }
@@ -1285,13 +1333,13 @@ bool TandemIndex::scan(Key_t key, size_t range,
                 if (remaining_range <= 0) return true;   // 已满足
                 if (s.next_id == -1)    return true;     // 无右邻居，结束
 
-                BloomFilter* next_bloom = &valueList->bf[s.next_id];
+                BloomFilter* next_bloom = valueList->getBloom(s.next_id);
                 bloom = next_bloom;
                 current_vnode_id = s.next_id;
                 continue;
             }
 
-            BloomFilter* next_bloom = &valueList->bf[s.next_id];
+            BloomFilter* next_bloom = valueList->getBloom(s.next_id);
             current_vnode_id = s.next_id;
             bloom = next_bloom;
         }
@@ -1301,7 +1349,7 @@ bool TandemIndex::scan(Key_t key, size_t range,
 void TandemIndex::mergeScanResultsVec(std::vector<Key_t> &src, std::vector<Key_t> &dest)
 {
     for(auto key : src) {
-        if(key == -1) {
+        if(key == (Key_t)-1) {
             continue;
         }
         dest.emplace_back(key);
@@ -1314,7 +1362,7 @@ void TandemIndex::mergeScanResultsPQ(std::priority_queue<Key_t, std::vector<Key_
     while(!src.empty()) {
         Key_t key = src.top();
         src.pop();
-        if(key == -1) {
+        if(key == (Key_t)-1) {
             continue;
         }
         dest.push(key);
@@ -1329,6 +1377,7 @@ struct AnchorParams {
 };
 
 // tiny helper for pretty-printing vectors
+/*
 static std::string join_u64(const std::vector<uint64_t>& v) {
     std::ostringstream oss;
     oss << "[";
@@ -1339,6 +1388,7 @@ static std::string join_u64(const std::vector<uint64_t>& v) {
     oss << "]";
     return oss.str();
 }
+*/
 /*
 void TandemIndex::maybeActivateHotRegion() {
     // Choose a window of buckets to represent the “region” (e.g., 16 buckets)
@@ -1456,6 +1506,29 @@ void TandemIndex::printStatus()
 #endif
     long vnode_count = valueList->pmemVnodePool->getCurrentIdx() + 1;
     mainIndex->calculateSearchEfficiency(vnode_count);
+
+    const size_t inode_size = sizeof(Inode);
+    const size_t bloom_size = sizeof(BloomFilter);
+
+    const size_t dram_inode_used_nodes = static_cast<size_t>(dramInodePool->getCurrentIdx());
+    const size_t dram_inode_alloc_nodes = static_cast<size_t>(dramInodePool->getPoolSize());
+    const size_t pmem_inode_used_nodes = static_cast<size_t>(pmemRecoveryArray->getCurrentIdx());
+    const size_t pmem_inode_alloc_nodes = static_cast<size_t>(MAX_NODES);
+
+    const size_t bloom_used_nodes = static_cast<size_t>(vnode_count);
+    // const size_t bloom_dram_alloc_nodes = valueList->getAllocatedBloomCount();
+    const size_t bloom_pmem_alloc_nodes = static_cast<size_t>(MAX_VALUE_NODES);
+
+    std::cout << "[MemoryUsage] inode.dram.used=" << format_bytes(dram_inode_used_nodes * inode_size)
+              << ", inode.dram.alloc=" << format_bytes(dram_inode_alloc_nodes * inode_size)
+              << ", inode.pmem.used=" << format_bytes(pmem_inode_used_nodes * inode_size)
+              << ", inode.pmem.alloc=" << format_bytes(pmem_inode_alloc_nodes * inode_size)
+              << std::endl;
+
+    std::cout << "[MemoryUsage] bloom.used=" << format_bytes(bloom_used_nodes * bloom_size)
+              << ", bloom.dram.alloc=" << format_bytes(valueList->getAllocatedBloomBytes())
+              << ", bloom.pmem.alloc=" << format_bytes(bloom_pmem_alloc_nodes * bloom_size)
+              << std::endl;
 }
 
 #if 0
@@ -1572,6 +1645,7 @@ void TandemIndex::maybeActivateHotRegion() {
     constexpr size_t WINDOW        = 20;
     constexpr size_t FUTURE_EPOCHS = 1;
 
+    /*
     auto dump_inode_sgp_state = [&](Inode* inode) {
     std::ostringstream oss;
     oss << "  [SGP-STATE] inode " << inode->getId()
@@ -1595,6 +1669,7 @@ void TandemIndex::maybeActivateHotRegion() {
     oss << "]";
     std::cout << oss.str() << "\n";
 };
+*/
 
     // local guards (no AnchorParams changes)
     constexpr double MIN_INODE_PRED = 0.05;  // suppress tiny Zipf noise

@@ -98,18 +98,18 @@ void PmemInodePool::printStats(int level, long vnode_count) {
     }
 
     // 2. 估算数据层（vnode 链表）期望比较次数 E_data
-    double E_data = 0.0;
-    if (level_inode_cnt[0] > 0 && vnode_count > 0) {
-        double Vtotal = static_cast<double>(vnode_count);
-        double avg_vnodes_per_inode = Vtotal / static_cast<double>(level_inode_cnt[0]);
-        E_data = avg_vnodes_per_inode / 2.0;
-    }
+    // double E_data = 0.0;
+    // if (level_inode_cnt[0] > 0 && vnode_count > 0) {
+    //     double Vtotal = static_cast<double>(vnode_count);
+    //     double avg_vnodes_per_inode = Vtotal / static_cast<double>(level_inode_cnt[0]);
+    //     E_data = avg_vnodes_per_inode / 2.0;
+    // }
 
-    double E_search = E_index + E_data;
-    double IndexEfficiency = 0.0;
-    if (E_search > 0.0 && vnode_count > 0) {
-        IndexEfficiency = static_cast<double>(vnode_count) / E_search;
-    }
+    // double E_search = E_index + E_data;  // reserved for future use
+    // double IndexEfficiency = 0.0;
+    // if (E_search > 0.0 && vnode_count > 0) {
+    //     IndexEfficiency = static_cast<double>(vnode_count) / E_search;
+    // }
 
     std::cout << "Estimated E_index : " << E_index <<": "<< level_inode_cnt[0] << std::endl;
     //std::cout << "Estimated E_data  : " << E_data  << std::endl;
