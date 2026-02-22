@@ -41,61 +41,7 @@
 #define DBG_CACHE 1
 #endif
 
-#ifndef ENABLE_TLS_SHADOW_STATS
-#define ENABLE_TLS_SHADOW_STATS 1
-#endif
 
-#ifndef TLS_SHADOW_ENSURE_FREQ_THRESHOLD
-#define TLS_SHADOW_ENSURE_FREQ_THRESHOLD 5   // 同线程访问同一 vnode 达到阈值才复制
-#endif
-
-#ifndef TLS_SHADOW_ENSURE_SAMPLE_MASK
-#define TLS_SHADOW_ENSURE_SAMPLE_MASK 0xFF   // 1/64 采样复制首次冷 vnode
-#endif
-
-#ifndef TLS_SHADOW_MIN_DENSITY
-#define TLS_SHADOW_MIN_DENSITY 14             // bitmap popcount 小于此值不缓存
-#endif
-
-#if ENABLE_TLS_SHADOW_STATS
-// 改为线程本地计数，析构时聚合
-thread_local uint64_t tl_attempts = 0;
-thread_local uint64_t tl_hits = 0;
-std::atomic<uint64_t> g_tlsShadowAttempts{0};
-std::atomic<uint64_t> g_tlsShadowHits{0};
-#endif
-
-// 线程本地热度计数
-thread_local int g_last_vnode_id = -1;
-thread_local int g_last_vnode_freq = 0;
-thread_local uint64_t g_shadow_sample_counter = 0;
-
-#if ENABLE_VNODE_SHADOW_CACHE
-struct TlsLastVnodeSlot {
-    int vnode_id{-1};
-    uint64_t version{0};
-    TLSVnodeShadowSlot* ptr{nullptr};
-};
-thread_local TlsLastVnodeSlot tls_last_vnode;
-
-inline bool tls_should_ensure(int vnode_id, uint32_t popcnt) {
-    if (popcnt < TLS_SHADOW_MIN_DENSITY) return false;
-    if (g_last_vnode_id == vnode_id) {
-        ++g_last_vnode_freq;
-    } else {
-        g_last_vnode_id = vnode_id;
-        g_last_vnode_freq = 1;
-    }
-    if (g_last_vnode_freq >= TLS_SHADOW_ENSURE_FREQ_THRESHOLD) return true;
-    // 低频阶段采用采样
-    return ((++g_shadow_sample_counter & TLS_SHADOW_ENSURE_SAMPLE_MASK) == 0);
-}
-
-static inline size_t vnode_cache_hash(Key_t k) {
-    constexpr uint64_t A = 11400714819323198485ull; // golden ratio
-    return static_cast<size_t>((k * A) >> (64 - 3)) & (TlsVnodeCopyCache::kCap - 1);
-}
-#endif
 
 namespace {
 #ifdef DBG_CACHE
@@ -1326,10 +1272,6 @@ thread_local decltype(DramSkiplist::tls_pivot_set_) DramSkiplist::tls_pivot_set_
 thread_local Key_t  DramSkiplist::tls_pivot_key_  = 0;
 thread_local Inode* DramSkiplist::tls_pivot_node_ = nullptr;
 
-#if ENABLE_VNODE_SHADOW_CACHE
-thread_local TLSVnodeShadowCache DramSkiplist::tls_shadow_cache_{};
-#endif
-
 void DramSkiplist::invalidate_tls_pivot() {
     tls_pivot_node_ = nullptr;
     tls_pivot_key_  = std::numeric_limits<Key_t>::min();
@@ -1797,74 +1739,4 @@ bool DramSkiplist::validateSnapShort(Inode* n, const InodeSnapShort& s, Key_t ke
     });
 }
 
-bool DramSkiplist::tlsShadowLookup(int vnode_id, Key_t key, Val_t &out,
-                                   BloomFilter* bloom, Vnode* vnode)
-{
-#if !ENABLE_VNODE_SHADOW_CACHE
-    return false;
-#else
-    if (!bloom || !vnode) return false;
-    uint64_t ver = bloom->version.load(std::memory_order_acquire);
-    TLSVnodeShadowSlot* slot = tls_shadow_cache_.probe(vnode_id, ver);
-    if (!slot) return false;
 
-    const uint8_t tag = static_cast<uint8_t>(key);
-    auto* arr = slot->packed;
-    const uint16_t n = slot->count;
-    for (uint16_t i = 0; i < n; ++i) {
-        if (arr[i].tag != tag) continue;
-        if (arr[i].key == key) {
-            out = arr[i].value;
-            slot->last_use = ++tls_shadow_cache_.clock;
-            return true;
-        }
-    }
-    slot->last_use = ++tls_shadow_cache_.clock;
-    return false;
-#endif
-}
-
-void DramSkiplist::tlsShadowEnsure(int vnode_id, BloomFilter* bloom, Vnode* vnode)
-{
-#if !ENABLE_VNODE_SHADOW_CACHE
-    return;
-#else
-    if (!bloom || !vnode) return;
-    const uint64_t ver_snap = bloom->version.load(std::memory_order_acquire);
-    if (auto* ex = tls_shadow_cache_.probe(vnode_id, ver_snap)) {
-        ex->last_use = ++tls_shadow_cache_.clock;
-        return;
-    }
-
-    const uint64_t bm_snapshot = vnode->hdr.bitmap & VNODE_FULL_MASK;
-    TLSVnodeShadowSlot* slot = tls_shadow_cache_.victim(vnode_id);
-
-    const uint64_t v1 = bloom->version.load(std::memory_order_acquire);
-    __builtin_prefetch(vnode->records, 0, 3);
-
-    uint16_t cnt = 0;
-    uint64_t bm = bm_snapshot;
-    while (bm) {
-        const int idx = 63 - __builtin_clzll(bm);
-        bm &= ~(1ull << idx);
-        const auto& r = vnode->records[idx];
-        slot->packed[cnt].key   = r.key;
-        slot->packed[cnt].value = r.value;
-        slot->packed[cnt].tag   = static_cast<uint8_t>(r.key);
-        ++cnt;
-    }
-
-    const uint64_t v2 = bloom->version.load(std::memory_order_acquire);
-    if (v1 != v2) return;
-
-    slot->vnode_id = vnode_id;
-    slot->version  = v2;
-    slot->bitmap   = bm_snapshot;
-    slot->count    = cnt;
-    slot->last_use = ++tls_shadow_cache_.clock;
-
-    tls_last_vnode.vnode_id = vnode_id;
-    tls_last_vnode.version  = slot->version;
-    tls_last_vnode.ptr      = slot;
-#endif
-}

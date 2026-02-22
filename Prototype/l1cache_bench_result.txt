@@ -1,0 +1,15 @@
+==========================================
+ ENABLE_L1_TLS_CACHE Performance Benchmark
+ Threads: 16   PMem: /mnt/pmem0
+==========================================
+Workload             KeyType    L1_CACHE=0      L1_CACHE=1      Speedup   
+--------             -------    ----------      ----------      -------   
+
+--- Results ---
+Workload             KeyType    L1_CACHE=0      L1_CACHE=1      Speedup   
+--------             -------    ----------      ----------      -------   
+YCSB_A               zipf       3.79491e+06     3.72966e+06     0.983x    
+YCSB_A               unif       2.70152e+06     2.70486e+06     1.001x    
+YCSB_C               zipf       4.36655e+06     4.30443e+06     0.986x    
+YCSB_C               unif       3.06726e+06     3.01316e+06     0.982x    
+

@@ -105,16 +105,6 @@ struct ThreadKeyCache {
 thread_local ThreadKeyCache g_threadKeyCache;
 #endif // ENABLE_THREAD_KEY_CACHE
 
-#ifndef ENABLE_TLS_SHADOW_STATS
-#define ENABLE_TLS_SHADOW_STATS 1
-#endif
-
-#if ENABLE_TLS_SHADOW_STATS
-#include <atomic>
-extern std::atomic<uint64_t> g_tlsShadowAttempts;
-extern std::atomic<uint64_t> g_tlsShadowHits;
-#endif
-
 std::queue<CheckpointVector *> g_checkpointQueue;
 bool wqReady[WORKERQUEUE_NUM] = {false};
 volatile bool wtInitialized = false;
@@ -429,17 +419,6 @@ TandemIndex::~TandemIndex() {
     //cout << "vnode count: " << valueList->pmemVnodePool->getCurrentIdx() << endl;
     mainIndex->printStats();
     printStatus();
-
-#if ENABLE_TLS_SHADOW_STATS
-    {
-        uint64_t attempts = g_tlsShadowAttempts.load(std::memory_order_relaxed);
-        uint64_t hits     = g_tlsShadowHits.load(std::memory_order_relaxed);
-        double rate = attempts ? (100.0 * (double)hits / (double)attempts) : 0.0;
-        std::cout << std::fixed << std::setprecision(2)
-                  << "tlsShadowLookup hit-rate: " << hits << "/" << attempts
-                  << " (" << rate << "%)" << std::endl;
-    }
-#endif
 
     // 必须先停止所有使用 tracker_ 的线程，再销毁 tracker_
     // 否则线程仍在执行 tracker_->xxx() 时 tracker_ 已被析构 → SIGSEGV
@@ -841,10 +820,6 @@ Val_t TandemIndex::lookup(Key_t key)
                 Val_t out{};
                 bool can_move{false};
                 int  next_id{-1};
-#if ENABLE_TLS_SHADOW_STATS
-                bool tried_tls{false};
-                bool hit_tls{false};
-#endif
             };
 
             Snap s = read_consistent(bloom->version, [&]() -> Snap {
@@ -876,20 +851,10 @@ Val_t TandemIndex::lookup(Key_t key)
                 Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
                 if(!vnode) return -1;
                 Val_t tmp;
-#if ENABLE_TLS_SHADOW_STATS
-                g_tlsShadowAttempts.fetch_add(1, std::memory_order_relaxed);
-#endif
-                if(mainIndex->tlsShadowLookup(current_vnode_id, key, tmp, bloom, vnode)){
-#if ENABLE_TLS_SHADOW_STATS
-                    g_tlsShadowHits.fetch_add(1, std::memory_order_relaxed);
-#endif
-                    return tmp;
-                }
                 if(vnode->lookupWithoutFilter(key, tmp, bloom)) {
 #if ENABLE_THREAD_KEY_CACHE
                     g_threadKeyCache.put(key, tmp);
 #endif
-                    mainIndex->tlsShadowEnsure(current_vnode_id, bloom, vnode);
                     return tmp;
                 }
                 return -1;

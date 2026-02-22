@@ -121,65 +121,6 @@ struct TLSShadowCache {
     }
 };
 
-#ifndef ENABLE_VNODE_SHADOW_CACHE
-#define ENABLE_VNODE_SHADOW_CACHE 1
-#endif
-
-#if ENABLE_VNODE_SHADOW_CACHE
-// 线程本地整 vnode 影子槽（2 路组合：主槽 + 备槽）
-struct TLSVnodeShadowSlot {
-    int      vnode_id{-1};
-    uint64_t version{0};
-    uint64_t bitmap{0};
-    uint64_t last_use{0};
-    // 紧凑副本
-    uint16_t count{0};
-    struct Packed {
-        Key_t  key;
-        Val_t  value;
-        uint8_t tag;
-    } packed[vnode_fanout];
-};
-
-struct TLSVnodeShadowCache {
-    static constexpr int kSlots = 512; // 提升容量
-    TLSVnodeShadowSlot slots[kSlots];
-    uint64_t clock{1};
-
-    inline size_t hash(int id) const {
-        constexpr uint64_t A = 11400714819323198485ull;
-        uint64_t x = (uint64_t)(uint32_t)id * A;
-        int shift = 64 - __builtin_ctzll(kSlots);
-        return (x >> shift) & (kSlots - 1);
-    }
-    inline TLSVnodeShadowSlot* probe(int vnode_id, uint64_t ver) {
-        size_t h = hash(vnode_id);
-        TLSVnodeShadowSlot* c[4] = {
-            &slots[h], &slots[(h+1)&(kSlots-1)],
-            &slots[(h+2)&(kSlots-1)], &slots[(h+3)&(kSlots-1)]
-        };
-        for (int i=0;i<4;i++) {
-            if (c[i]->vnode_id == vnode_id && c[i]->version == ver) return c[i];
-        }
-        return nullptr;
-    }
-    inline TLSVnodeShadowSlot* victim(int vnode_id) {
-        size_t h = hash(vnode_id);
-        TLSVnodeShadowSlot* c[4] = {
-            &slots[h], &slots[(h+1)&(kSlots-1)],
-            &slots[(h+2)&(kSlots-1)], &slots[(h+3)&(kSlots-1)]
-        };
-        TLSVnodeShadowSlot* empty = nullptr;
-        TLSVnodeShadowSlot* oldest = c[0];
-        for (int i=0;i<4;i++) {
-            if (c[i]->vnode_id < 0) { empty = c[i]; break; }
-            if (c[i]->last_use < oldest->last_use) oldest = c[i];
-        }
-        return empty ? empty : oldest;
-    }
-};
-#endif // ENABLE_VNODE_SHADOW_CACHE
-
 class DramSkiplist {
 private:
     //全局结构版本（split / rebalance 后 bump）
@@ -242,10 +183,6 @@ private:
     // 新增：线程本地 vnode 深拷贝缓存
     static thread_local TlsVnodeCopyCache tls_vnode_copy_cache_;
     static thread_local uint64_t          tls_vnode_copy_lru_clock_; // 新增: LRU 时钟
-#if ENABLE_VNODE_SHADOW_CACHE
-    static thread_local TLSVnodeShadowCache tls_shadow_cache_;
-#endif
-
     // 维护接口
     void invalidate_tls_pivot();
     void update_tls_pivot(Key_t key, Inode* node);
@@ -329,21 +266,4 @@ public:
 
     // 校验短快照是否仍然匹配当前 inode 状态（返回 true 表示未被并发修改）
     bool validateSnapShort(Inode* n, const InodeSnapShort& s) const;
-
-    // 影子快速查：命中返回 true，并写出 out
-    bool tlsShadowLookup(int vnode_id, Key_t key, Val_t &out,
-                         BloomFilter* bloom, Vnode* vnode);
-
-    // 确保影子存在并最新（版本不变不刷新）
-    void tlsShadowEnsure(int vnode_id, BloomFilter* bloom, Vnode* vnode);
 };
-
-#ifndef ENABLE_TLS_SHADOW_STATS
-#define ENABLE_TLS_SHADOW_STATS 1
-#endif
-
-#if ENABLE_TLS_SHADOW_STATS
-#include <atomic>
-extern std::atomic<uint64_t> g_tlsShadowAttempts;
-extern std::atomic<uint64_t> g_tlsShadowHits;
-#endif
