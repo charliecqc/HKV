@@ -1,0 +1,25 @@
+### Loading workload file ==================================================
+Number of threads: 16
+Loaded 100000001 keys
+YCSB-E scan Avg length: 1; Variance: 0
+File does not exists: /mnt/pmem0/pmemBFPool
+Created pool: /mnt/pmem0/pmemBFPool
+File does not exists: /mnt/pmem0/pmemVnodePool
+Created pool: /mnt/pmem0/pmemVnodePool
+File does not exists: /mnt/pmem0/pmemInodePool
+Created pool: /mnt/pmem0/pmemInodePool
+File does not exists: /mnt/pmem0/ckpt_log
+Created pool: /mnt/pmem0/ckpt_log
+Populating 100000001 keys using 16 threads
+# of Txn: 100000001
+YCSB_INSERT throughput 2306849.534146
+Elapsed_time 43.349165
+YCSB_C throughput 5161505.625779
+Elapsed_time 19.374192
+Level 0 has 91254 inodes.
+Level 1 has 3652 inodes.
+Level 2 has 240 inodes.
+Level 3 has 17 inodes.
+Level 4 has 1 inodes.
+[MemoryUsage] inode.dram.used=68546880 B (65.37 MiB), inode.dram.alloc=432000000 B (411.99 MiB), inode.pmem.used=0 B (0.00 MiB), inode.pmem.alloc=432000000 B (411.99 MiB)
+[MemoryUsage] bloom.used=200657424 B (191.36 MiB), bloom.dram.alloc=276824064 B (264.00 MiB), bloom.pmem.alloc=1320000000 B (1258.85 MiB)

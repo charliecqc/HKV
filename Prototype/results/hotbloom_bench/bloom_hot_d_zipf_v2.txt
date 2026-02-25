@@ -1,0 +1,2 @@
+### Loading workload file ==================================================
+Number of threads: 16

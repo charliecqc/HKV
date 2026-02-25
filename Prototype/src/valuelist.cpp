@@ -13,6 +13,9 @@ ValueList::ValueList(string storagePath, PmemBFPool *bfPool) {
         slot.store(nullptr, std::memory_order_relaxed);
     }
 #endif
+#if ENABLE_DRAM_BLOOM_HOT
+    hotBloomCache_ = new HotBloomCache(pmemBFPool);
+#endif
     fileName = storagePath;
     if(pmemVnodePool->getCurrentIdx() != 0) {
         head = pmemVnodePool->at(0);
@@ -47,6 +50,10 @@ ValueList::~ValueList()
         }
     }
 #endif
+#if ENABLE_DRAM_BLOOM_HOT
+    delete hotBloomCache_;
+    hotBloomCache_ = nullptr;
+#endif
 }
 
 size_t ValueList::getAllocatedBloomCount() const
@@ -59,6 +66,8 @@ size_t ValueList::getAllocatedBloomCount() const
         }
     }
     return chunks * kBloomChunkSize;
+#elif ENABLE_DRAM_BLOOM_HOT
+    return hotBloomCache_ ? hotBloomCache_->cachedCount() : 0;
 #else
     return pmemVnodePool ? (pmemVnodePool->getCurrentIdx() + 1) : 0;
 #endif
@@ -66,7 +75,11 @@ size_t ValueList::getAllocatedBloomCount() const
 
 size_t ValueList::getAllocatedBloomBytes() const
 {
+#if ENABLE_DRAM_BLOOM_HOT
+    return hotBloomCache_ ? hotBloomCache_->dramBytes() : 0;
+#else
     return getAllocatedBloomCount() * sizeof(BloomFilter);
+#endif
 }
 
 #if ENABLE_DRAM_BLOOM_FULL
@@ -111,7 +124,28 @@ BloomFilter *ValueList::getBloom(size_t vnodeId)
         }
     }
     return &base[offset];
+#elif ENABLE_DRAM_BLOOM_HOT
+    if (vnodeId >= MAX_VALUE_NODES) {
+        return nullptr;
+    }
+    return hotBloomCache_->getBloom(vnodeId);
 #else
+    return pmemBFPool->at(vnodeId);
+#endif
+}
+
+BloomFilter *ValueList::getBloomForWrite(size_t vnodeId)
+{
+#if ENABLE_DRAM_BLOOM_FULL
+    // Full DRAM mode: same as getBloom — everything is in DRAM already
+    return getBloom(vnodeId);
+#elif ENABLE_DRAM_BLOOM_HOT
+    if (vnodeId >= MAX_VALUE_NODES) {
+        return nullptr;
+    }
+    return hotBloomCache_->getBloomForWrite(vnodeId);
+#else
+    // No DRAM cache: direct PMEM
     return pmemBFPool->at(vnodeId);
 #endif
 }
@@ -132,6 +166,10 @@ void ValueList::syncBloomToPMEM(size_t count)
         dst->next_id = src->next_id;
         dst->min_key = src->min_key;
         std::memcpy(dst->fingerprints, src->fingerprints, sizeof(src->fingerprints));
+    }
+#elif ENABLE_DRAM_BLOOM_HOT
+    if (hotBloomCache_) {
+        hotBloomCache_->syncToPmem();
     }
 #else
     (void)count;
@@ -230,8 +268,8 @@ bool ValueList::split(Vnode* &curNode, Vnode* &nextNode)
 
     nextNode = pmemVnodePool->getNextNode();
     // 构建 nextNode：写入对应槽位并置位 bitmap；curNode 仅清除位（不清空数据）
-    BloomFilter *srcBloom = getBloom(curNode->hdr.id);
-    BloomFilter *dstBloom = getBloom(nextNode->hdr.id);
+    BloomFilter *srcBloom = getBloomForWrite(curNode->hdr.id);
+    BloomFilter *dstBloom = getBloomForWrite(nextNode->hdr.id);
 
     nextNode->hdr.bitmap = 0;
     for (uint64_t mm = move_mask; mm; mm &= (mm - 1)) {

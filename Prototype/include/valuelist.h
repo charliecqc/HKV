@@ -13,11 +13,24 @@
 // Value list class on pmem
 
 #ifndef ENABLE_DRAM_BLOOM_FULL
-#define ENABLE_DRAM_BLOOM_FULL 1
+#define ENABLE_DRAM_BLOOM_FULL 0
+#endif
+
+#ifndef ENABLE_DRAM_BLOOM_HOT
+#define ENABLE_DRAM_BLOOM_HOT 1
+#endif
+
+// Sanity: at most one DRAM bloom mode can be active
+#if ENABLE_DRAM_BLOOM_FULL && ENABLE_DRAM_BLOOM_HOT
+#error "Cannot enable both ENABLE_DRAM_BLOOM_FULL and ENABLE_DRAM_BLOOM_HOT"
 #endif
 
 #ifndef DRAM_BLOOM_CHUNK_SIZE
 #define DRAM_BLOOM_CHUNK_SIZE 1048576UL
+#endif
+
+#if ENABLE_DRAM_BLOOM_HOT
+#include "hotBloomCache.h"
 #endif
 
 class ValueList {
@@ -32,6 +45,9 @@ public:
         (MAX_VALUE_NODES + kBloomChunkSize - 1) / kBloomChunkSize;
     std::array<std::atomic<BloomFilter *>, kMaxBloomChunks> dramBloomChunks;
     std::mutex bloomAllocMutex;
+#endif
+#if ENABLE_DRAM_BLOOM_HOT
+    HotBloomCache *hotBloomCache_ = nullptr;
 #endif
 public:
     ValueList(string storagePath, PmemBFPool *bfPool);
@@ -54,9 +70,16 @@ public:
 
     void syncBloomToPMEM(size_t count);
     BloomFilter *getBloom(size_t vnodeId);
+    BloomFilter *getBloomForWrite(size_t vnodeId);
 
 #if ENABLE_DRAM_BLOOM_FULL
 private:
     void ensureBloomForCount(size_t count);
+#endif
+
+#if ENABLE_DRAM_BLOOM_HOT
+public:
+    /// Access the hot bloom cache (for promoting blooms from external callers).
+    HotBloomCache* hotBloomCache() { return hotBloomCache_; }
 #endif
 };

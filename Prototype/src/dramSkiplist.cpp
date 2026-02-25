@@ -1106,16 +1106,6 @@ Inode* DramSkiplist::getParentInode(Inode* &child) {
         return nullptr;
 }
 
-#if 0
-void DramSkiplist::removeInodeRelation(Inode* &child) {
-    if (child == nullptr) return;
-    size_t s = parent_shard_of(child);
-    std::unique_lock<std::shared_mutex> lk(parent_shards[s].mtx, std::try_to_lock);
-    if (!lk.owns_lock()) return; 
-    parent_shards[s].map.erase(child);
-}
-#endif
-
 void DramSkiplist::printStats()
 {
     for (int i = 0; i < level; ++i) {
@@ -1612,7 +1602,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                         snap.sgp_value = current->sgps[sgp_pos].value;
 #if ENABLE_HOTPATH_DEBUG_LOG
                         std::cout << "sgp used for key: " << key << " sgp_key: " << snap.sgp_key << " sgp_value: " << snap.sgp_value << endl;
-                        if(snap.sgp_key == -1)
+                        if(snap.sgp_key == (Val_t)-1)
                             std::cout << "error sgp key is -1" << endl;
 #endif
                         is_sgp = true;

@@ -286,7 +286,7 @@ TandemIndex::TandemIndex(string storage_path) {
     if(valueList->pmemVnodePool->getCurrentIdx() > 1) {
         if(pmemBFPool->at(0)->next_id == -1) {
            for(size_t i = 0; i <= valueList->pmemVnodePool->getCurrentIdx(); i++) {
-               BloomFilter *bloom = valueList->getBloom(i);
+               BloomFilter *bloom = valueList->getBloomForWrite(i);
                Vnode *vnode = valueList->pmemVnodePool->at(i);
                bloom->clear();
                bloom->next_id  = vnode->hdr.next;
@@ -500,7 +500,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
             return false;
         }
         target_vnode = start_vnode;
-        BloomFilter *target_vnode_bloom = valueList->getBloom(target_vnode->getId());
+        BloomFilter *target_vnode_bloom = valueList->getBloomForWrite(target_vnode->getId());
 
 
         //fast path: insert into vnode chain
@@ -529,7 +529,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vnode)
 {
     Vnode* headerVnode = valueList->getHeader();
-    BloomFilter* headerbloom = valueList->getBloom(headerVnode->getId());
+    BloomFilter* headerbloom = valueList->getBloomForWrite(headerVnode->getId());
     //std::unique_lock<std::shared_mutex> vheader_lock(headerbloom->vnode_mtx);
     write_lock(headerbloom->version);
       // create new vnode
@@ -542,7 +542,7 @@ bool TandemIndex::insertWithNewInodes(Key_t key, Val_t value, Vnode *&target_vno
     valueList->append(headerVnode, newVnode);
     headerbloom->setNextId(newVnode->getId());
 
-    BloomFilter* bloom = valueList->getBloom(newVnode->getId());
+    BloomFilter* bloom = valueList->getBloomForWrite(newVnode->getId());
     //std::unique_lock<std::shared_mutex> vnode_lock(bloom->vnode_mtx);
     write_lock(bloom->version);
 
@@ -597,7 +597,7 @@ bool TandemIndex::insertInVnodeChain(Vnode* &start_vnode, BloomFilter* &start_bl
 
             if (!s.can_move) break;
 
-            BloomFilter* next_bloom = valueList->getBloom(s.next_id);
+            BloomFilter* next_bloom = valueList->getBloomForWrite(s.next_id);
             if (!next_bloom) break; // defensive
             __builtin_prefetch(&next_bloom->min_key, 0, 1);
             current_bloom = next_bloom;
@@ -611,7 +611,7 @@ bool TandemIndex::insertInVnodeChain(Vnode* &start_vnode, BloomFilter* &start_bl
             write_lock(current_bloom->version);
             int nid = current_bloom->next_id;
             if (nid != -1) {
-                BloomFilter* next_bloom= valueList->getBloom(nid);
+                BloomFilter* next_bloom= valueList->getBloomForWrite(nid);
                 if (next_bloom) {
                     Key_t next_min = read_consistent(next_bloom->version, [&]() {
                         return next_bloom->getMinKey();
@@ -658,7 +658,7 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
         write_unlock(left_bloom->version);
         return ok;
     }
-    right_bloom = valueList->getBloom(right_vnode->getId());
+    right_bloom = valueList->getBloomForWrite(right_vnode->getId());
 
     // 3) Decide which node should receive (key,value), Read nextVnode’s min under its own version to avoid torn reads.
     Key_t next_right_min = read_consistent(right_bloom->version, [&](){
@@ -1083,9 +1083,7 @@ bool TandemIndex::update(Key_t key, Val_t value)
             return false;
         }
         target_vnode = start_vnode;
-        BloomFilter *target_vnode_bloom = valueList->getBloom(target_vnode->getId());
-
-        //Vnode *start_vnode_replica = new Vnode(*start_vnode); // create a replica of the target vnode for validation
+        BloomFilter *target_vnode_bloom = valueList->getBloomForWrite(target_vnode->getId());
 
         // 快路径：尝试直接插入
         if (insertInVnodeChain(target_vnode, target_vnode_bloom, key, value)) {
@@ -1494,6 +1492,17 @@ void TandemIndex::printStatus()
               << ", bloom.dram.alloc=" << format_bytes(valueList->getAllocatedBloomBytes())
               << ", bloom.pmem.alloc=" << format_bytes(bloom_pmem_alloc_nodes * bloom_size)
               << std::endl;
+
+#if ENABLE_DRAM_BLOOM_HOT
+    if (valueList->hotBloomCache()) {
+        auto* hbc = valueList->hotBloomCache();
+        std::cout << "[HotBloomCache] cached=" << hbc->cachedCount()
+                  << "/" << hbc->maxCapacity()
+                  << ", evictions=" << hbc->evictionCount()
+                  << ", dram_bytes=" << format_bytes(hbc->dramBytes())
+                  << std::endl;
+    }
+#endif
 }
 
 #if 0
@@ -1741,6 +1750,19 @@ void TandemIndex::maybeActivateHotRegion() {
             inode->activateSGP(k);
 
         }
+
+        // ---- PHASE 4: promote hot VNode blooms to DRAM ----
+#if ENABLE_DRAM_BLOOM_HOT
+        {
+            auto hotVnodes = HotBloomCache::collectVnodeIds(inode);
+            HotBloomCache *cache = valueList->hotBloomCache();
+            if (cache && !hotVnodes.empty()) {
+                for (int vid : hotVnodes) {
+                    cache->promoteVnodeChain(static_cast<size_t>(vid), 4);
+                }
+            }
+        }
+#endif
         //dump_inode_sgp_state(inode);
     }
 
