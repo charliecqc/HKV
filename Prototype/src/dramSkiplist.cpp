@@ -266,15 +266,15 @@ DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool, ValueList *val
     inode_count_on_each_level.reserve(MAX_LEVEL);
     if(dramInodePool->getCurrentIdx() == 0) {
         header[MAX_LEVEL - 1] = dramInodePool->getNextNode();
-        header[MAX_LEVEL - 1]->gps[0].key = std::numeric_limits<Key_t>::min();
-        header[MAX_LEVEL - 1]->gps[fanout/2 - 1].key = std::numeric_limits<Key_t>::min();
+        header[MAX_LEVEL - 1]->gp_keys[0] = std::numeric_limits<Key_t>::min();
+        header[MAX_LEVEL - 1]->gp_keys[fanout/2 - 1] = std::numeric_limits<Key_t>::min();
         header[MAX_LEVEL - 1]->hdr.last_index = 0;
         header[MAX_LEVEL - 1]->hdr.level = MAX_LEVEL - 1;
         inode_count_on_each_level[MAX_LEVEL - 1]++;
         for(int i = MAX_LEVEL - 2; i >= 0; i--) {
             header[i] = dramInodePool->getNextNode();
-            header[i+1]->gps[0].value = header[i]->getId();
-            header[i]->gps[0].key = std::numeric_limits<Key_t>::min();
+            header[i+1]->gp_values[0] = header[i]->getId();
+            header[i]->gp_keys[0] = std::numeric_limits<Key_t>::min();
             header[i]->hdr.next = std::numeric_limits<uint32_t>::max();
             assert(header[i]->hdr.next != 0);
             header[i]->hdr.last_index = 0;
@@ -288,9 +288,9 @@ DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool, ValueList *val
         inode_count_on_each_level[MAX_LEVEL - 1]++;
         for(int i = MAX_LEVEL - 2; i >= 0; i--) {
             tail[i] = dramInodePool->getNextNode();
-            tail[i+1]->gps[0].value = tail[i]->getId();
-            tail[i]->gps[0].key = std::numeric_limits<Key_t>::max();
-            tail[i]->gps[fanout/2 - 1].key = std::numeric_limits<Key_t>::max();
+            tail[i+1]->gp_values[0] = tail[i]->getId();
+            tail[i]->gp_keys[0] = std::numeric_limits<Key_t>::max();
+            tail[i]->gp_keys[fanout/2 - 1] = std::numeric_limits<Key_t>::max();
             tail[i]->hdr.next = std::numeric_limits<uint32_t>::max();
             assert(tail[i]->hdr.next != 0);
             tail[i]->hdr.level = i;
@@ -303,14 +303,14 @@ DramSkiplist::DramSkiplist(CkptLog *ckp_log, DramInodePool* pool, ValueList *val
 
             // **修改：使用新的构造函数，并正确设置初始 covered_nodes**
             // header 的 GP 指向下一层，初始覆盖数为1（或0，如果它是最底层）
-            header[i]->gps[0].covered_nodes = (i > 0) ? 1 : 0;
+            header[i]->gp_covered[0] = (i > 0) ? 1 : 0;
             dram_log_entry_t *header_entry = new dram_log_entry_t(header[i]->getId(), header[i]->hdr.last_index, header[i]->hdr.next, header[i]->hdr.level, header[i]->hdr.parent_id);
-            header_entry->setKeyVal(0, header[i]->gps[0].key, header[i]->gps[0].value, header[i]->gps[0].covered_nodes);
+            header_entry->setKeyVal(0, header[i]->gp_keys[0], header[i]->gp_values[0], header[i]->gp_covered[0]);
 
             // tail 的 GP 不覆盖任何东西
-            tail[i]->gps[0].covered_nodes = 0;
+            tail[i]->gp_covered[0] = 0;
             dram_log_entry_t *tail_entry = new dram_log_entry_t(tail[i]->getId(), tail[i]->hdr.last_index, tail[i]->hdr.next, tail[i]->hdr.level, tail[i]->hdr.parent_id);
-            tail_entry->setKeyVal(0, tail[i]->gps[0].key, tail[i]->gps[0].value, tail[i]->gps[0].covered_nodes);
+            tail_entry->setKeyVal(0, tail[i]->gp_keys[0], tail[i]->gp_values[0], tail[i]->gp_covered[0]);
 
             ckpt_log->batcher().addFull(tail_entry);
             ckpt_log->batcher().addFull(header_entry);
@@ -346,14 +346,13 @@ bool DramSkiplist::add(Vnode *targetVnode)
     int newlevel = generateRandomLevel();
     bool level_grew = false;          //record whether the level of skiplist grows
     {
-        std::shared_lock<std::shared_mutex> read_lock(level_lock);
-        if (newlevel > level) {
-            read_lock.unlock();
-            std::unique_lock<std::shared_mutex> write_lock(level_lock);
-            if (newlevel > level) {
-                level = newlevel;
+        int cur = level.load(std::memory_order_acquire);
+        while (newlevel > cur) {
+            if (level.compare_exchange_weak(cur, newlevel,
+                    std::memory_order_acq_rel, std::memory_order_acquire)) {
                 level_grew = true;
                 bump_epoch();         // if level grows, bump the global epoch
+                break;
             }
         }
     }
@@ -433,8 +432,7 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
 {
     int currentHighestLevelIndex = -1;
     {
-        std::shared_lock<std::shared_mutex> lock(level_lock); //to protect level
-        currentHighestLevelIndex = level - 1;
+        currentHighestLevelIndex = level.load(std::memory_order_acquire) - 1;
     }
     Inode *target = header[currentHighestLevelIndex];
     //CheckpointVector checkVec[currentHighestLevelIndex + 1];
@@ -453,7 +451,7 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
             std::unique_lock<std::shared_mutex> lock3(inode_locks[target->getId()]);
             int idx = target->findKeyPos(oldKey);
 #if 0
-            if(target->gps[idx].key == oldKey) {
+            if(target->gp_keys[idx] == oldKey) {
                 target->updateKeyVal(newKey,idx);
 #if ENABLE_DELTA_LOG
                 ckpt_log_single_slot_delta(ckpt_log, target, static_cast<int16_t>(idx));
@@ -461,19 +459,19 @@ bool DramSkiplist::update(Key_t &oldKey, Key_t &newKey, Val_t &val)
             }   
 #else
             int sgp_pos = -1;
-            if (target->lookupBetterSGP(oldKey, target->gps[idx].key, sgp_pos)) {
+            if (target->lookupBetterSGP(oldKey, target->gp_keys[idx], sgp_pos)) {
                 if(i != 0) {
-                target = dramInodePool->at(target->sgps[sgp_pos].value);
+                target = dramInodePool->at(target->sgp_values[sgp_pos]);
                 }
             }else {
-                if(target->gps[idx].key == oldKey) {
+                if(target->gp_keys[idx] == oldKey) {
                 target->updateKeyVal(newKey,idx);
 #if ENABLE_DELTA_LOG
                 ckpt_log_single_slot_delta(ckpt_log, target, static_cast<int16_t>(idx));
 #endif
                 }
                 if(i != 0) {
-                target = dramInodePool->at(target->gps[idx].value);
+                target = dramInodePool->at(target->gp_values[idx]);
                 }
             }
 #endif
@@ -487,8 +485,7 @@ void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
 {
     int currentHighestLevelIndex = -1;
     {
-        std::shared_lock<std::shared_mutex> lock(level_lock);
-        currentHighestLevelIndex = level - 1;
+        currentHighestLevelIndex = level.load(std::memory_order_acquire) - 1;
     }
     Inode *current = header[currentHighestLevelIndex]; 
     for(int i = currentHighestLevelIndex; i >= 0; i--) {
@@ -519,12 +516,12 @@ void DramSkiplist::getPivotNodesForInsert(Key_t key, Inode *updates[])
                     assert(false);
                 int sgp_pos = -1;
                 Inode *temp = nullptr;
-                if(current->lookupBetterSGP(key, current->gps[pos].key, sgp_pos)){
-                    temp = dramInodePool->at(current->sgps[sgp_pos].value);
+                if(current->lookupBetterSGP(key, current->gp_keys[pos], sgp_pos)){
+                    temp = dramInodePool->at(current->sgp_values[sgp_pos]);
                 } else {
-                    temp = dramInodePool->at(current->gps[pos].value);
+                    temp = dramInodePool->at(current->gp_values[pos]);
                 }
-                //Inode *temp = dramInodePool->at(current->gps[pos].value);
+                //Inode *temp = dramInodePool->at(current->gp_values[pos]);
                 assert(temp != nullptr);
                 current = temp;
             }
@@ -605,15 +602,15 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
                 v_cur = spin_load_version(current->version);
                 
                 if (current->isHeader()) {
-                    child_id = current->gps[0].value; 
+                    child_id = current->gp_values[0]; 
                 } else {
                     //find key position inside current inode
                     int pos = current->findKeyPos(key);
                     if (pos >= 0) {
-                        child_id = current->gps[pos].value;
+                        child_id = current->gp_values[pos];
                     } else {
                         // exception handling, should not reach here
-                        child_id = current->gps[0].value; 
+                        child_id = current->gp_values[0]; 
                     }
                 }
                 
@@ -638,10 +635,28 @@ Inode *DramSkiplist::lookup(Key_t key, Inode *current, int currentHighestLevelIn
         //fill snapshot
         snap.ver_snap = v_leaf;
         snap.idx = static_cast<int16_t>(idx);
-        snap.gp_key = current->gps[idx].key;
-        snap.gp_value = current->gps[idx].value;
+        snap.gp_key = current->gp_keys[idx];
+        snap.gp_value = current->gp_values[idx];
         snap.last_index = current->hdr.last_index;
-        
+
+        // Plan-A: SGP lookup on read path — skip vnode chain hops
+        // Fast pre-check: last_sgp lives in hdr (cache-line 0, already loaded).
+        // When no SGP exists we skip lookupBetterSGP entirely, avoiding
+        // cold cache-line touches on sgp_keys/sgp_values/sgpVisible.
+        if (current->hdr.last_sgp >= 0) [[unlikely]] {
+            int sgp_pos = -1;
+            if (current->lookupBetterSGP(key, current->gp_keys[idx], sgp_pos)) {
+                snap.sgp_key   = current->sgp_keys[sgp_pos];
+                snap.sgp_value = current->sgp_values[sgp_pos];
+            } else {
+                snap.sgp_key   = 0;
+                snap.sgp_value = -1;
+            }
+        } else {
+            snap.sgp_key   = 0;
+            snap.sgp_value = -1;
+        }
+
         std::atomic_thread_fence(std::memory_order_acquire);
         if (current->version.load(std::memory_order_relaxed) == v_leaf) [[likely]] break;
     }
@@ -793,9 +808,9 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                     verified_parent->hdr.parent_id);
                 verified_parent_entry->setKeyVal(
                     0,
-                    verified_parent->gps[0].key,
-                    verified_parent->gps[0].value,
-                    verified_parent->gps[0].covered_nodes);
+                    verified_parent->gp_keys[0],
+                    verified_parent->gp_values[0],
+                    verified_parent->gp_covered[0]);
 
                 header_above_entry = new dram_log_entry_t(
                     header_above->getId(),
@@ -805,9 +820,9 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                     header_above->hdr.parent_id);
                 header_above_entry->setKeyVal(
                     0,
-                    header_above->gps[0].key,
-                    header_above->gps[0].value,
-                    header_above->gps[0].covered_nodes);
+                    header_above->gp_keys[0],
+                    header_above->gp_values[0],
+                    header_above->gp_covered[0]);
             } else {
                 releaseWriteLocksInOrderByVersion(nodes_to_lock);
                 continue;// retry // header above changed
@@ -848,7 +863,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
 
         // if parent is balanced at pos, then just increase the covered_nodes
         if (!verified_parent->isUnbalanced(pos)) {
-            verified_parent->gps[pos].covered_nodes++;
+            verified_parent->gp_covered[pos]++;
             next_node->setParent(verified_parent->getId());
             commit_full_logs();
 #if ENABLE_DELTA_LOG
@@ -858,7 +873,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
         }
         //parent is not balance and full, commit log first and handle it in slow path
         else if (verified_parent->isFull()) {
-            verified_parent->gps[pos].covered_nodes++;
+            verified_parent->gp_covered[pos]++;
             next_node->setParent(verified_parent->getId());
             commit_full_logs();
 #if ENABLE_DELTA_LOG
@@ -867,16 +882,16 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
             ret = 2;
         }
         else {
-            verified_parent->gps[pos].covered_nodes++;
+            verified_parent->gp_covered[pos]++;
 
             //calculate relative_pos, which is the position of inode in the child list of verified_parent at pos
             int16_t relative_pos = 0;
             {
-                Inode *cur = dramInodePool->at(verified_parent->gps[pos].value);
+                Inode *cur = dramInodePool->at(verified_parent->gp_values[pos]);
                 int idx = 0;
                 Key_t upper_bound_key =
                     (pos + 1 <= verified_parent->hdr.last_index)
-                    ? verified_parent->gps[pos + 1].key
+                    ? verified_parent->gp_keys[pos + 1]
                     : dramInodePool->at(verified_parent->hdr.next)->getMinKey();
 
                 while (cur && !isTail(cur->getId())) {
@@ -943,16 +958,14 @@ int DramSkiplist::rebalanceIdx(Vnode &targetVnode, Key_t targetKey)
     getPivotNodesForInsert(targetKey, updates);
 
     {
-        std::shared_lock<std::shared_mutex> read_lock(level_lock);
-        if (newlevel > level) {
-            read_lock.unlock();
-            std::unique_lock<std::shared_mutex> write_lock(level_lock);
-            // double check the level after acquiring the write lock
-            if (newlevel > level) {
-                for(int i = level; i < newlevel; i++) {
+        int cur = level.load(std::memory_order_acquire);
+        while (newlevel > cur) {
+            if (level.compare_exchange_weak(cur, newlevel,
+                    std::memory_order_acq_rel, std::memory_order_acquire)) {
+                for (int i = cur; i < newlevel; i++) {
                     updates[i] = header[i];
                 }
-                level = newlevel;
+                break;
             }
         }
     }
@@ -1073,16 +1086,14 @@ int DramSkiplist::rebalanceIdx(Vnode &targetVnode, Key_t targetKey)
 }
 #endif
 
-void DramSkiplist::setLevel(int level)
+void DramSkiplist::setLevel(int lv)
 {
-    std::unique_lock<std::shared_mutex> lock(level_lock);
-    this->level = level;
+    level.store(lv, std::memory_order_release);
 }
 
 int DramSkiplist::getLevel()
 {
-    std::shared_lock<std::shared_mutex> lock(level_lock);
-    return level;
+    return level.load(std::memory_order_acquire);
 }
 
 dram_log_entry_t *DramSkiplist::create_log_entry(Inode *inode)
@@ -1090,7 +1101,7 @@ dram_log_entry_t *DramSkiplist::create_log_entry(Inode *inode)
     assert(inode->getId() >=0);
     auto entry = new dram_log_entry_t(inode->getId(), inode->hdr.last_index, inode->hdr.next, inode->hdr.level, inode->hdr.parent_id);
     for(int j = 0; j <= inode->hdr.last_index; j++) {
-        entry->setKeyVal(j, inode->gps[j].key, inode->gps[j].value, inode->gps[j].covered_nodes);
+        entry->setKeyVal(j, inode->gp_keys[j], inode->gp_values[j], inode->gp_covered[j]);
     }
     return entry;
 }
@@ -1138,8 +1149,7 @@ double DramSkiplist::calculateSearchEfficiency(long vnode)
     long vnode_count = valueList->pmemVnodePool->getCurrentIdx() + 1;
     int cur_level = 0;
     {
-        std::shared_lock<std::shared_mutex> lock(level_lock);
-        cur_level = level;
+        cur_level = level.load(std::memory_order_acquire);
     }
     if (cur_level <= 0) {
         std::cout << "[SearchEfficiency] level = " << cur_level
@@ -1292,12 +1302,11 @@ Key_t DramSkiplist::get_node_upper_bound(Inode* node) {
 void DramSkiplist::ckpt_log_single_slot_delta(CkptLog *log, Inode *inode, int16_t slot) {
     if (!log || !inode) return;
     if (slot < 0 || slot > inode->hdr.last_index) return;
-    const auto& gp = inode->gps[slot];
     log->batcher().addDeltaSlot(inode->hdr.id,
                   inode->hdr.last_index,
                   inode->hdr.next,
                   inode->hdr.parent_id,
-                  slot, gp.key, gp.value, gp.covered_nodes);
+                  slot, inode->gp_keys[slot], inode->gp_values[slot], inode->gp_covered[slot]);
 }
 
 void DramSkiplist::ckpt_log_multi_slots_delta(CkptLog *log,
@@ -1310,9 +1319,9 @@ void DramSkiplist::ckpt_log_multi_slots_delta(CkptLog *log,
         if (s < 0 || s > inode->hdr.last_index) continue;
         buf[n++] = WalDeltaEntry{
             .slot    = s,
-            .covered = inode->gps[s].covered_nodes,
-            .key     = inode->gps[s].key,
-            .value   = inode->gps[s].value
+            .covered = inode->gp_covered[s],
+            .key     = inode->gp_keys[s],
+            .value   = inode->gp_values[s]
         };
         if (n == buf.size()) break;
     }
@@ -1492,10 +1501,10 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                 return false;
             }
             if (!validate_snapshot(parent->version, snap_p)) {
-                Key_t range_start = parent->gps[leaf_pos].key;
+                Key_t range_start = parent->gp_keys[leaf_pos];
                 Key_t range_end =(leaf_pos == parent->hdr.last_index)
                                     ? std::numeric_limits<Key_t>::max()
-                                    : parent->gps[leaf_pos + 1].key;
+                                    : parent->gp_keys[leaf_pos + 1];
                 bool still_in_range = (range_start <= key) && (key < range_end);
                 if(!still_in_range) {
                     return false;
@@ -1533,17 +1542,17 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                     int pos = cur->isHeader() ? 0 : cur->findKeyPos(key);
 #if 1
                     int sgp_pos = -1;
-                    if(cur->lookupBetterSGP(key, cur->gps[pos].key, sgp_pos)){
-                        x.child_id = cur->sgps[sgp_pos].value;
+                    if(cur->lookupBetterSGP(key, cur->gp_keys[pos], sgp_pos)){
+                        x.child_id = cur->sgp_values[sgp_pos];
                         x.leaf_pos = sgp_pos;
                         is_sgp = true;
                     }else{
-                        x.child_id = cur->gps[pos].value;
+                        x.child_id = cur->gp_values[pos];
                         x.leaf_pos = pos;
                         is_sgp = false;
                     }
 #else
-                    x.child_id = cur->gps[pos].value;
+                    x.child_id = cur->gp_values[pos];
                     x.leaf_pos = pos;
 #endif
                     x.ok = true;
@@ -1589,17 +1598,17 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                 snap.next       = current->hdr.next;
                 snap.idx        = static_cast<int16_t>(idx);
                 if (idx >= 0 && idx <= current->hdr.last_index) {
-                    snap.gp_key   = current->gps[idx].key;
-                    snap.gp_value = current->gps[idx].value;
-                    snap.lb_key   = current->gps[idx].key;
+                    snap.gp_key   = current->gp_keys[idx];
+                    snap.gp_value = current->gp_values[idx];
+                    snap.lb_key   = current->gp_keys[idx];
                     snap.ub_key   = (idx < current->hdr.last_index)
-                                    ? current->gps[idx + 1].key
+                                    ? current->gp_keys[idx + 1]
                                     : std::numeric_limits<Key_t>::max();
                     is_sgp = false;
                     
-                    if(current->lookupBetterSGP(key, current->gps[idx].key, sgp_pos)){
-                        snap.sgp_key   = current->sgps[sgp_pos].key;
-                        snap.sgp_value = current->sgps[sgp_pos].value;
+                    if(current->lookupBetterSGP(key, current->gp_keys[idx], sgp_pos)){
+                        snap.sgp_key   = current->sgp_keys[sgp_pos];
+                        snap.sgp_value = current->sgp_values[sgp_pos];
 #if ENABLE_HOTPATH_DEBUG_LOG
                         std::cout << "sgp used for key: " << key << " sgp_key: " << snap.sgp_key << " sgp_value: " << snap.sgp_value << endl;
                         if(snap.sgp_key == (Val_t)-1)
@@ -1618,11 +1627,11 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                 snap.next       = current->hdr.next;
                 snap.idx        = static_cast<int16_t>(idx);
                 if (idx >= 0 && idx <= current->hdr.last_index) {
-                    snap.gp_key   = current->gps[idx].key;
-                    snap.gp_value = current->gps[idx].value;
-                    snap.lb_key   = current->gps[idx].key;
+                    snap.gp_key   = current->gp_keys[idx];
+                    snap.gp_value = current->gp_values[idx];
+                    snap.lb_key   = current->gp_keys[idx];
                     snap.ub_key   = (idx < current->hdr.last_index)
-                                    ? current->gps[idx + 1].key
+                                    ? current->gp_keys[idx + 1]
                                     : std::numeric_limits<Key_t>::max();
                 } else {
                     snap.gp_key = 0; snap.gp_value = -1;
@@ -1668,7 +1677,7 @@ bool DramSkiplist::validateSnapShort(Inode* n, const InodeSnapShort& s, Key_t ke
 
     // 2)if the version check fails, do full validation
     return read_consistent(n->version, [&]() -> bool {
-        Key_t cur_lb = n->gps[0].key;
+        Key_t cur_lb = n->gp_keys[0];
         Key_t cur_ub = std::numeric_limits<Key_t>::max();
         int next_id = n->hdr.next;
         Inode *next_inode = dramInodePool->at(next_id);
@@ -1697,9 +1706,9 @@ bool DramSkiplist::validateSnapShort(Inode* n, const InodeSnapShort& s, Key_t ke
         }
 
 
-        Key_t cur_lb = n->gps[s.idx].key;
+        Key_t cur_lb = n->gp_keys[s.idx];
         Key_t cur_ub = (s.idx < n->hdr.last_index)
-                       ? n->gps[s.idx + 1].key
+                       ? n->gp_keys[s.idx + 1]
                        : std::numeric_limits<Key_t>::max();
 
         if (cur_lb != s.lb_key) {
@@ -1715,12 +1724,12 @@ bool DramSkiplist::validateSnapShort(Inode* n, const InodeSnapShort& s, Key_t ke
             return false;
         }
 
-        if (n->gps[s.idx].key   != s.gp_key){   
-            cout << "validateSnapShort: gp_key mismatch " << n->gps[s.idx].key << " vs " << s.gp_key << endl;
+        if (n->gp_keys[s.idx]   != s.gp_key){   
+            cout << "validateSnapShort: gp_key mismatch " << n->gp_keys[s.idx] << " vs " << s.gp_key << endl;
             return false;
         }
-        if (n->gps[s.idx].value != s.gp_value){ 
-            cout << "validateSnapShort: gp_value mismatch " << n->gps[s.idx].value << " vs " << s.gp_value << endl;
+        if (n->gp_values[s.idx] != s.gp_value){ 
+            cout << "validateSnapShort: gp_value mismatch " << n->gp_values[s.idx] << " vs " << s.gp_value << endl;
             return false;
         }
 

@@ -89,9 +89,9 @@ static size_t parseApplySpan(CkptLog* self,
 
             for (int i = 0; i < fh->count; ++i) {
                 int gi = entries[i].gp_idx;
-                inode->gps[gi].key           = entries[i].key;
-                inode->gps[gi].value         = entries[i].value;
-                inode->gps[gi].covered_nodes = entries[i].covered_nodes;
+                inode->gp_keys[gi]    = entries[i].key;
+                inode->gp_values[gi]  = entries[i].value;
+                inode->gp_covered[gi] = entries[i].covered_nodes;
             }
             PmemManager::flushNoDrain(1, inode, sizeof(Inode)); //1: INDEXPOOL
 
@@ -273,11 +273,15 @@ void CkptLog::applyDeltaEntries(Inode *inode,
     for (size_t i = 0; i < entry_count; ++i) {
         int16_t s = entries[i].slot;
         if (s < 0 || s >= fanout) continue;
-        auto &gp = inode->gps[s];
-        gp.key = entries[i].key;
-        gp.value = entries[i].value;
-        gp.covered_nodes = entries[i].covered;
-        PmemManager::flushNoDrain(1, &gp, sizeof(gp)); // i is INDEXPOOL
+        auto &gp_k = inode->gp_keys[s];
+        auto &gp_v = inode->gp_values[s];
+        auto &gp_c = inode->gp_covered[s];
+        gp_k = entries[i].key;
+        gp_v = entries[i].value;
+        gp_c = entries[i].covered;
+        PmemManager::flushNoDrain(1, &gp_k, sizeof(gp_k));
+        PmemManager::flushNoDrain(1, &gp_v, sizeof(gp_v));
+        PmemManager::flushNoDrain(1, &gp_c, sizeof(gp_c));
     }
     if (new_last_index != WAL_META_KEEP) {
         inode->hdr.last_index = new_last_index;

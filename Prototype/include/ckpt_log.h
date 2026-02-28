@@ -89,8 +89,7 @@ public:
     Val_t value[fanout];
     int16_t covered_nodes[fanout/2]; 
 
-    WalDeltaHeader delta_hdr{};                  // 新增：增量日志头
-    WalDeltaEntry  delta_entries[fanout]{};      // 新增：增量槽位集合
+    // delta fields removed: Batcher handles delta logs independently via EvDelta
 
     void initArrays()
     {
@@ -100,7 +99,6 @@ public:
         memset(covered_nodes, 0, sizeof(covered_nodes));
     }
 
-    // **修改构造函数以匹配新的 log_entry_hdr**
     dram_log_entry_t(int32_t id, int16_t last_index, int32_t next, int16_t level, int32_t parent_id) : hdr(id, last_index, next, level, parent_id) {
         initArrays();
     }
@@ -141,32 +139,6 @@ public:
     size_t getPayLoadSize() {
         size_t activated_count = hdr.count;
         return sizeof(nvm_log_entry_t) * activated_count;
-        //return sizeof(Key_t) * activated_count + sizeof(Val_t) * activated_count + sizeof(int32_t) * activated_count;
-    }
-
-    inline void initDelta(int32_t inode_id,
-                          int32_t last_index,
-                          int32_t next) {
-        delta_hdr.type = WAL_LOG_TYPE_DELTA;
-        delta_hdr.count = 0;
-        delta_hdr.inode_id = inode_id;
-        delta_hdr.last_index = last_index;
-        delta_hdr.next = next;
-    }
-
-    inline void pushDeltaSlot(int16_t slot,
-                              const Key_t &k,
-                              const Val_t &v,
-                              int16_t covered) {
-        auto idx = delta_hdr.count++;
-        delta_entries[idx].slot = slot;
-        delta_entries[idx].key = k;
-        delta_entries[idx].value = v;
-        delta_entries[idx].covered = covered;
-    }
-
-    inline size_t deltaPayloadSize() const {
-        return sizeof(WalDeltaEntry) * delta_hdr.count;
     }
 };
 

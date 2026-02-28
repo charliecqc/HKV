@@ -9,12 +9,11 @@ bool DramInodePool::init() {
         return false;
     }
 
-    // To allocate the vnode pool. 1. allocate memory. 2. cast into vodes 3. pot them into vector.
+    // Contiguous allocation: place Inodes directly in the pool
     void *indexPool = DramManager::getPoolStartAddress(DRAMINDEXPOOL);
+    pool_base_ = static_cast<Inode*>(indexPool);
     for(int i = 0; i < numNodes; i++) {
-        Inode *inode = (Inode *) new (indexPool) Inode(i, 0, 0);
-        dramInodePool.push_back(inode);
-        indexPool = static_cast<char *>(indexPool) + nodeSize;
+        new (&pool_base_[i]) Inode(i, 0, 0);
     }
     return true;    
 }
@@ -24,11 +23,11 @@ bool DramInodePool::extend(void *indexPool, size_t extendNumNodes) {
         std::cout << "Exceeding the maximum number of nodes" << std::endl;
         exit(-1);
     }
-    void *currentPoolAddr = static_cast<char *>(indexPool) + this->numNodes * nodeSize;
-    for (size_t i = this->numNodes; i < extendNumNodes; ++i) {
-        Inode *inode = (Inode *) new (currentPoolAddr) Inode(i, 0, 0);
-        dramInodePool.push_back(inode);
-        currentPoolAddr = static_cast<char *>(currentPoolAddr) + nodeSize;
+    // pool_base_ already covers the contiguous region;
+    // just construct new nodes at the tail
+    for (size_t i = this->numNodes; i < this->numNodes + extendNumNodes; ++i) {
+        new (&pool_base_[i]) Inode(i, 0, 0);
     }
+    this->numNodes += extendNumNodes;
     return true;
 }

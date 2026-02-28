@@ -18,7 +18,7 @@
 #ifdef __AVX2__
 #include <immintrin.h>
 #endif
-const int32_t fanout = 28;
+const int32_t fanout = 64;
 const int32_t vnode_fanout =63;
 static_assert(vnode_fanout > 0 && vnode_fanout <= 64, "vnode_fanout must be in (0, 64]");
 constexpr uint64_t VNODE_FULL_MASK =
@@ -148,16 +148,25 @@ public:
     friend class Inode;
 };
 
-class Inode
+class alignas(64) Inode
 {
 public:
-    header hdr;
-    entry gps[fanout/2];
-    entry sgps[fanout/2];
+    // --- cache-line 0: hot fields read on every lookup ---
+    std::atomic<uint64_t> version{0};              // offset 0  (seqlock)
+    std::atomic<uint64_t> structure_version{0};    // offset 8
+    header hdr;                                     // offset 16 (20B)
+
+    // ---- SoA layout: gp fields grouped, then sgp fields ----
+    // gp_keys[] starts at offset 40 (after 4B padding for 8B alignment)
+    Key_t    gp_keys[fanout/2];       // 32×8 = 256B  (findKeyPos hot path)
+    Val_t    gp_values[fanout/2];     // 32×8 = 256B
+    int16_t  gp_covered[fanout/2];    // 32×2 =  64B
+
+    Key_t    sgp_keys[fanout/2];      // 32×8 = 256B
+    Val_t    sgp_values[fanout/2];    // 32×8 = 256B
+    int16_t  sgp_covered[fanout/2];   // 32×2 =  64B
+
     std::bitset<fanout/2> sgpVisible;
-	std::atomic<uint64_t> version{0};
-    std::atomic<uint64_t> structure_version;
-    
 
     Inode(uint32_t level)
     {
@@ -170,14 +179,16 @@ public:
         hdr.next = next;
         hdr.level = level;
         for(int32_t i = 0; i < fanout/2; i++) {
-            gps[i].key = std::numeric_limits<Key_t>::max();
-            gps[i].value = std::numeric_limits<Val_t>::max();
-            sgps[i].key = std::numeric_limits<Key_t>::max();
-            sgps[i].value = std::numeric_limits<Val_t>::max();
-            sgpVisible.reset();
-			version.store(0, std::memory_order_relaxed);
-            structure_version.store(0, std::memory_order_relaxed);
+            gp_keys[i] = std::numeric_limits<Key_t>::max();
+            gp_values[i] = std::numeric_limits<Val_t>::max();
+            gp_covered[i] = 0;
+            sgp_keys[i] = std::numeric_limits<Key_t>::max();
+            sgp_values[i] = std::numeric_limits<Val_t>::max();
+            sgp_covered[i] = 0;
         }
+        sgpVisible.reset();
+        version.store(0, std::memory_order_relaxed);
+        structure_version.store(0, std::memory_order_relaxed);
     }
 
     int getId()
@@ -217,12 +228,12 @@ public:
                 return false;
             }
             assert(pos != 0);
-            int old_covered_nodes = gps[pos-1].covered_nodes;
+            int old_covered_nodes = gp_covered[pos-1];
             assert(old_covered_nodes >= 1);
             assert(old_covered_nodes - relative_pos - 1 >= 0);
             this->insertAtPos(targetKey, value, pos, old_covered_nodes - relative_pos - 1);
-            this->gps[pos-1].covered_nodes = relative_pos + 1; // set new covered nodes for the previous GP
-            assert(this->gps[pos-1].covered_nodes >= 1);
+            this->gp_covered[pos-1] = relative_pos + 1; // set new covered nodes for the previous GP
+            assert(this->gp_covered[pos-1] >= 1);
             return true;
         }
     }
@@ -269,16 +280,16 @@ public:
         if (li < 0) return 0;
 
         // 缓存首/末位，避免重复访问
-        const Key_t first_key = gps[0].key;
+        const Key_t first_key = gp_keys[0];
         if (key < first_key) return 0;
 
-        const Key_t tail_key = gps[li].key;
+        const Key_t tail_key = gp_keys[li];
         if (key >= tail_key) return li + 1;
 
         // 小 n 线性：找第一个 > key 的位置
         if (li < 6) {
             for (int i = 0; i <= li; ++i) {
-                if (key < gps[i].key) return i;
+                if (key < gp_keys[i]) return i;
             }
             return li + 1; // 理论上不会走到这里（已由边界处理）
         }
@@ -287,7 +298,7 @@ public:
         int left = 0, right = li;
         while (left < right) {
             int mid = left + ((right - left) >> 1);
-            if (gps[mid].key <= key) {
+            if (gp_keys[mid] <= key) {
                 left = mid + 1;
             } else {
                 right = mid;
@@ -298,31 +309,56 @@ public:
 
     int findKeyPos(Key_t key)
     {
-        // 约定：返回最大 i 使得 gps[i].key <= key
+        // 约定：返回最大 i 使得 gp_keys[i] <= key
         const int li = hdr.last_index;
         if (li <= 0) return 0;
 
-        const Key_t first_key = gps[0].key;
+        const Key_t first_key = gp_keys[0];
         if (key < first_key) return 0;
 
-        const Key_t tail_key = gps[li].key;
+        const Key_t tail_key = gp_keys[li];
         if (key >= tail_key) return li;
 
+#if defined(__AVX2__)
+        // SIMD 路径：li==31时（满32个key）
+        if (li == 31) {
+            __m256i keyvec = _mm256_set1_epi64x((int64_t)key);
+            int pos = 0;
+            for (int i = 0; i < 32; i += 4) {
+                __m256i k = _mm256_loadu_si256((const __m256i*)&gp_keys[i]);
+                // 无符号比较：gp_keys[i] <= key
+                // 方案：若 Key_t=uint64_t，需转补码域
+                __m256i xk = _mm256_xor_si256(k, _mm256_set1_epi64x(0x8000000000000000ULL));
+                __m256i xkey = _mm256_xor_si256(keyvec, _mm256_set1_epi64x(0x8000000000000000ULL));
+                __m256i cmp = _mm256_cmpgt_epi64(xkey, xk); // xkey > xk <=> key > gp_keys[i]
+                int mask = _mm256_movemask_pd(_mm256_castsi256_pd(cmp));
+                for (int j = 0; j < 4; ++j) {
+                    if (!(mask & (1 << j))) {
+                        // key <= gp_keys[i+j]
+                        if (gp_keys[i+j] <= key) pos = i+j;
+                        else return pos;
+                    } else {
+                        pos = i+j;
+                    }
+                }
+            }
+            return pos;
+        }
+#endif
         // 小 n 线性：向前推进直到第一个 > key，返回其前一个
         if (li < 6) {
             int pos = 0;
             for (int i = 1; i <= li; ++i) {
-                if (gps[i].key <= key) pos = i;
+                if (gp_keys[i] <= key) pos = i;
                 else break;
             }
             return pos;
         }
-
         // 大 n 二分：upper_bound(key) - 1
         int left = 0, right = li, result = 0;
         while (left <= right) {
             int mid = left + ((right - left) >> 1);
-            if (gps[mid].key <= key) {
+            if (gp_keys[mid] <= key) {
                 result = mid;
                 left = mid + 1;
             } else {
@@ -333,20 +369,23 @@ public:
     }
 
     bool shift(int oldIdx) { // shift data from oldIdx to newIdx
-        memmove(&gps[oldIdx+1], &gps[oldIdx], sizeof(entry) * (hdr.last_index - oldIdx + 1));
+        const int cnt = hdr.last_index - oldIdx + 1;
+        memmove(&gp_keys[oldIdx+1],    &gp_keys[oldIdx],    sizeof(Key_t)   * cnt);
+        memmove(&gp_values[oldIdx+1],  &gp_values[oldIdx],  sizeof(Val_t)   * cnt);
+        memmove(&gp_covered[oldIdx+1], &gp_covered[oldIdx], sizeof(int16_t) * cnt);
         return true;
     }
 
     Key_t getMaxKey() {
-        return gps[hdr.last_index].key;
+        return gp_keys[hdr.last_index];
     }
 
     Key_t getMinKey() {
-        return gps[0].key;
+        return gp_keys[0];
     }
 
     Key_t getMidKey() {
-        return gps[hdr.last_index / 2].key;
+        return gp_keys[hdr.last_index / 2];
     }
 
     bool split(Inode *targetInode) {
@@ -358,9 +397,10 @@ public:
         int second_half_count = total_entries - first_half_count;
         int split_point_index = first_half_count;
 
-        // memmove 会将整个 entry 结构体（包括 key, value, 和 covered_nodes）一起移动
-        // 负载信息被正确地分区到新的节点，无需额外操作
-        memmove(targetInode->gps, &gps[split_point_index], sizeof(entry) * second_half_count);
+        // SoA: memmove each field separately
+        memmove(targetInode->gp_keys,    &gp_keys[split_point_index],    sizeof(Key_t)   * second_half_count);
+        memmove(targetInode->gp_values,  &gp_values[split_point_index],  sizeof(Val_t)   * second_half_count);
+        memmove(targetInode->gp_covered, &gp_covered[split_point_index], sizeof(int16_t) * second_half_count);
         
         // 更新各自的 last_index
         hdr.last_index = first_half_count - 1;
@@ -369,10 +409,10 @@ public:
         assert(this->getMaxKey() <= targetInode->getMinKey());
     #if 0
         for(int i = 0; i <= hdr.last_index; i++) {
-            std::cout << "After split, left inode id: " << this->getId() << " pos: " << i << " key: "<<this->gps[i].key << " covered_nodes: "<< this->gps[i].covered_nodes<< std::endl;
+            std::cout << "After split, left inode id: " << this->getId() << " pos: " << i << " key: "<<this->gp_keys[i] << " covered_nodes: "<< this->gp_covered[i]<< std::endl;
         }
         for(int i = 0; i <= targetInode->hdr.last_index; i++) {
-            std::cout << "After split, right inode id: " << targetInode->getId() << " pos: " << i << " key: "<<targetInode->gps[i].key << " covered_nodes: "<< targetInode->gps[i].covered_nodes<< std::endl;
+            std::cout << "After split, right inode id: " << targetInode->getId() << " pos: " << i << " key: "<<targetInode->gp_keys[i] << " covered_nodes: "<< targetInode->gp_covered[i]<< std::endl;
         }
     #endif
         return true;
@@ -386,11 +426,11 @@ public:
         if(pos <= hdr.last_index) {
             shift(pos);
         }
-        gps[pos].key = key;
-        gps[pos].value = value;
+        gp_keys[pos] = key;
+        gp_values[pos] = value;
         // **为新GP的 covered_nodes 赋初始值**
-        gps[pos].covered_nodes = initial_covered_nodes;
-        assert(gps[pos].covered_nodes >= 1);
+        gp_covered[pos] = initial_covered_nodes;
+        assert(gp_covered[pos] >= 1);
 
         hdr.last_index++;
         return true;
@@ -400,7 +440,7 @@ public:
         if(isHeader()) {
             std::cout << " this is weird 2" << std::endl;
         }
-        gps[pos].key = newKey;
+        gp_keys[pos] = newKey;
     }
 
     bool isUnbalanced() {
@@ -412,7 +452,7 @@ public:
         //to check if any gp's covered nodes exceed the coefficient
         for (int i = 0; i <= this->hdr.last_index; ++i) {
             //every gp's covered nodes exceed the coefficient, then it will be considered unbalanced
-            if (this->gps[i].covered_nodes > coefficient) {
+            if (this->gp_covered[i] > coefficient) {
                  return true;
             }
         }
@@ -425,12 +465,12 @@ public:
                              SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
                              SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
 #if 0
-        int16_t temp_covered_nodes = this->gps[idx].covered_nodes; 
+        int16_t temp_covered_nodes = this->gp_covered[idx]; 
         if(temp_covered_nodes == 4 && this->hdr.level == 1) {
             std::cout << "GP at index " << idx << " has exactly 4 covered nodes." << std::endl;
         }
 #endif
-        if (this->gps[idx].covered_nodes > coefficient) {
+        if (this->gp_covered[idx] > coefficient) {
             return true;
         }
         return false;
@@ -456,10 +496,11 @@ public:
     }
 
     bool shiftSGP(int oldIdx) {
-    // shift entries
-    memmove(&sgps[oldIdx + 1],
-            &sgps[oldIdx],
-            sizeof(entry) * (hdr.last_sgp - oldIdx + 1));
+    // shift entries (SoA: 3 separate memmoves)
+    const int cnt = hdr.last_sgp - oldIdx + 1;
+    memmove(&sgp_keys[oldIdx + 1],    &sgp_keys[oldIdx],    sizeof(Key_t)   * cnt);
+    memmove(&sgp_values[oldIdx + 1],  &sgp_values[oldIdx],  sizeof(Val_t)   * cnt);
+    memmove(&sgp_covered[oldIdx + 1], &sgp_covered[oldIdx], sizeof(int16_t) * cnt);
 
     // shift visibility bits
     for (int i = hdr.last_sgp; i >= oldIdx; --i) {
@@ -479,7 +520,7 @@ public:
         double coefficient = (current_level < MAX_LEVEL) ? 
                              SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
                              SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
-        if (this->sgps[idx].covered_nodes > coefficient) {
+        if (this->sgp_covered[idx] > coefficient) {
             return true;
         }
         return false;
@@ -491,21 +532,32 @@ public:
         if (hdr.last_sgp < 0) return false;
 
         // handle the boundary cases
-        if (sgps[hdr.last_sgp].key < gp_key) return false;
-        if (key < sgps[0].key) return false;
+        if (sgp_keys[hdr.last_sgp] <= gp_key) return false;
+        if (key < sgp_keys[0]) return false;
 
-        for (int i = hdr.last_sgp; i >= 0; --i) {
-            if (sgpVisible.test(i) && (sgps[i].key > gp_key) && sgps[i].value != (Val_t)-1) {
-                if (sgps[i].key <= key) {
-                    // Found the best possible SGP match that is visible. Stop immediately.
-                    sgp_pos = i;
-                    assert(!sgpVisible.test(i) || sgps[i].value != (Val_t)-1);
-                    return true; 
-                }
+        // Binary search: find rightmost i with sgp_keys[i] <= key
+        int lo = 0, hi = hdr.last_sgp, upper = -1;
+        while (lo <= hi) {
+            int mid = lo + ((hi - lo) >> 1);
+            if (sgp_keys[mid] <= key) {
+                upper = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
             }
         }
-        sgp_pos = -1; // Set index to -1 to indicate no match found.
-        return false;   // No suitable visible SGP found.
+        if (upper < 0) return false;
+
+        // Scan from upper backwards; stop as soon as sgp_keys[i] <= gp_key
+        for (int i = upper; i >= 0; --i) {
+            if (sgp_keys[i] <= gp_key) break;
+            if (sgpVisible.test(i) && sgp_values[i] != (Val_t)-1) {
+                sgp_pos = i;
+                return true;
+            }
+        }
+        sgp_pos = -1;
+        return false;
     }
 
     bool insertSGPAtPos(Key_t key, int pos) {
@@ -519,9 +571,9 @@ public:
         // TODO: make sure it's not already a GP
         // TODO: add sgppos to vnode entry
 
-        sgps[pos].key = key;
-        sgps[pos].value = -1; 
-        sgps[pos].covered_nodes = 0; 
+        sgp_keys[pos] = key;
+        sgp_values[pos] = -1; 
+        sgp_covered[pos] = 0; 
         sgpVisible.reset(pos);
 
         hdr.last_sgp++;
@@ -533,13 +585,18 @@ public:
         std::vector<entry> merged_entries;
         for (int i = 0; i <= hdr.last_index; i++)
         {
-            merged_entries.push_back(gps[i]); //add existing gps
+            entry e;
+            e.key = gp_keys[i]; e.value = gp_values[i]; e.covered_nodes = gp_covered[i];
+            merged_entries.push_back(e);
         }
         
         if (hdr.last_sgp>=0){
             for (int i = 0; i <= hdr.last_sgp; ++i) {
-                if (sgpVisible.test(i)) 
-                    merged_entries.push_back(sgps[i]); //add visible sgps
+                if (sgpVisible.test(i)) {
+                    entry e;
+                    e.key = sgp_keys[i]; e.value = sgp_values[i]; e.covered_nodes = sgp_covered[i];
+                    merged_entries.push_back(e);
+                }
             }
         }
 
@@ -551,19 +608,29 @@ public:
         int first_half_count = total_entries / 2;
         int second_half_count = total_entries - first_half_count;
 
-        memcpy(gps, merged_entries.data(), sizeof(entry) * first_half_count);
+        // scatter back to SoA
+        for (int i = 0; i < first_half_count; ++i) {
+            gp_keys[i]    = merged_entries[i].key;
+            gp_values[i]  = merged_entries[i].value;
+            gp_covered[i] = merged_entries[i].covered_nodes;
+        }
         hdr.last_index = first_half_count - 1;
 
-        memcpy(targetInode->gps, merged_entries.data() + first_half_count, sizeof(entry) * second_half_count);
+        for (int i = 0; i < second_half_count; ++i) {
+            targetInode->gp_keys[i]    = merged_entries[first_half_count + i].key;
+            targetInode->gp_values[i]  = merged_entries[first_half_count + i].value;
+            targetInode->gp_covered[i] = merged_entries[first_half_count + i].covered_nodes;
+        }
         targetInode->hdr.last_index = second_half_count - 1;
 
-        // 替换 memset，用循环调用默认构造函数清理 sgps
+        // reset sgps
         for (int i = 0; i < fanout/2; ++i) {
-            this->sgps[i] = entry();
+            this->sgp_keys[i]    = std::numeric_limits<Key_t>::max();
+            this->sgp_values[i]  = std::numeric_limits<Val_t>::max();
+            this->sgp_covered[i] = 0;
         }
         this->sgpVisible.reset();
         this->hdr.last_sgp = -1;
-        //this->onRebalanceComplete();
 
         assert(this->getMaxKey() <= targetInode->getMinKey());
         return true;
@@ -573,14 +640,14 @@ public:
     {
         //handle the boundary cases
         if (hdr.last_sgp < 0) return 0;
-        if (key < sgps[0].key) return 0;
-        if (key >= sgps[hdr.last_sgp].key) return hdr.last_sgp + 1;
+        if (key < sgp_keys[0]) return 0;
+        if (key >= sgp_keys[hdr.last_sgp]) return hdr.last_sgp + 1;
         
         // binary search for the position
         int left = 0, right = hdr.last_sgp;
         while (left < right) {
             int mid = left + (right - left) / 2;
-            if (sgps[mid].key <= key) {
+            if (sgp_keys[mid] <= key) {
                 left = mid + 1;
             } else {
                 right = mid;
@@ -603,8 +670,8 @@ public:
         }
 
         // ---- O(1) redundancy check ----
-        if (pos > 0 && sgps[pos - 1].key == targetKey) return false;
-        if (pos <= cur_index && sgps[pos].key == targetKey) return false;
+        if (pos > 0 && sgp_keys[pos - 1] == targetKey) return false;
+        if (pos <= cur_index && sgp_keys[pos] == targetKey) return false;
         // --------------------------------
         //assert(pos != 0);
         this->insertSGPAtPos(targetKey, pos);
@@ -614,27 +681,26 @@ public:
 
     bool findLinkingSGPPos(Key_t key, int& pos)
     {
-        //handle the boundary cases
+        // boundary cases
         if (hdr.last_sgp < 0) return false;
-        if (key < sgps[0].key) return false;
+        if (key < sgp_keys[0]) return false;
 
-        if (key >= sgps[hdr.last_sgp].key && !sgpVisible.test(hdr.last_sgp)) {
-            pos = hdr.last_sgp;
-            return true;
-        }
-        
-        for (int i = hdr.last_sgp; i >= 0; --i) {
-            if (sgps[i].key <= key) {
-                if (!sgpVisible.test(i)) {
-                    pos = i;
-                    return true;
-                } else {
-                    return false;
-                }
-
+        // binary search: find rightmost sgp_keys[i] <= key
+        int lo = 0, hi = hdr.last_sgp;
+        int candidate = -1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >> 1;
+            if (sgp_keys[mid] <= key) {
+                candidate = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
             }
         }
-        return false;
+        if (candidate < 0) return false;
+        if (sgpVisible.test(candidate)) return false;
+        pos = candidate;
+        return true;
     }
 
     /*bool linkInactiveSGP(Key_t key, int vnode_id, int pos, int covered_nodes) {
@@ -662,14 +728,14 @@ bool findLinkingSGPPosExact(Key_t key, int& pos) {
     int l = 0, r = hdr.last_sgp;
     while (l <= r) {
         int m = (l + r) >> 1;
-        if (sgps[m].key == key) {
+        if (sgp_keys[m] == key) {
             if (!sgpVisible.test(m)) {
                 pos = m;
                 return true;
             }
             return false; // already visible
         }
-        if (sgps[m].key < key) l = m + 1;
+        if (sgp_keys[m] < key) l = m + 1;
         else r = m - 1;
     }
     return false;
@@ -681,16 +747,13 @@ bool findLinkingSGPPosExact(Key_t key, int& pos) {
     if (hdr.last_sgp < 0) return false;
 
     int sgp_pos = -1;
-    if (!findLinkingSGPPosExact(key, sgp_pos)) return false;
+    if (!findLinkingSGPPos(key, sgp_pos)) return false;
 
     if (sgp_pos < 0 || sgp_pos > hdr.last_sgp) return false;
 
-    // 🔒 SAFETY: key must already match
-    assert(sgps[sgp_pos].key == key &&
-           "Linking SGP with mismatched key");
-
-    sgps[sgp_pos].value = vnode_id;        // DOWN POINTER ✔
-    sgps[sgp_pos].covered_nodes = covered_nodes;
+    sgp_keys[sgp_pos] = key;              // update anchor to actual split key
+    sgp_values[sgp_pos] = vnode_id;        // DOWN POINTER ✔
+    sgp_covered[sgp_pos] = covered_nodes;
 
     std::atomic_thread_fence(std::memory_order_release);
     sgpVisible.set(sgp_pos);
@@ -760,53 +823,47 @@ public:
 
     bool lookupWithoutFilter(Key_t key, Val_t &value, BloomFilter *bloom) 
     {
-#if 0
-        // 如果没有 bloom filter，则退回非 SIMD 的线性扫描
-        if (bloom == nullptr) {
-            goto non_simd;
-        }
+#ifdef __AVX2__
+        if (bloom != nullptr) {
+            // --- AVX2 fingerprint SIMD filter (P2) ---
+            const __m256i target_fp = _mm256_set1_epi8(bloom->hashKey(key));
 
-        // 1. SIMD 并行比较指纹
-    {
-        // 创建一个包含 32 个目标指纹的向量
-        const __m256i target_fp_vec = _mm256_set1_epi8(bloom->hashKey(key));
-        // 加载 vnode 中存储的 32 个指纹（即使 fanout 是 28，加载 32 也是安全的，因为数组大小是 32）
-        const __m256i stored_fp_vec = _mm256_load_si256((const __m256i*)bloom->fingerprints);
-        // 比较两个向量，生成一个掩码，每个匹配的字节对应一个置位
-        uint32_t fp_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(target_fp_vec, stored_fp_vec));
+            // Compare fingerprints for slots 0-31
+            const __m256i stored_lo = _mm256_loadu_si256(
+                (const __m256i*)&bloom->fingerprints[0]);
+            uint32_t m_lo = (uint32_t)_mm256_movemask_epi8(
+                _mm256_cmpeq_epi8(target_fp, stored_lo));
 
-        // 2. 结合 bitmap 过滤
-        // 将指纹匹配的掩码与记录有效数据的 bitmap 进行“与”操作
-        // 得到既有效又指纹匹配的最终候选项掩码
-        uint32_t final_mask = fp_mask & hdr.bitmap;
+            // Compare fingerprints for slots 32-62
+            // (reads bytes 32-63; byte 63 is struct padding, safe)
+            const __m256i stored_hi = _mm256_loadu_si256(
+                (const __m256i*)&bloom->fingerprints[32]);
+            uint32_t m_hi = (uint32_t)_mm256_movemask_epi8(
+                _mm256_cmpeq_epi8(target_fp, stored_hi));
 
-        // 3. 遍历候选项并进行精确 Key 比较
-        while (final_mask) {
-            // 获取最低置位（set bit）的索引，即第一个候选项的位置
-            int idx = __builtin_ctz(final_mask);
-            
-            // 精确比较 Key
-            if (records[idx].key == key) {
-                value = records[idx].value;
-                return true; // 找到匹配项
+            // Combine into 64-bit fingerprint-match mask
+            uint64_t fp_mask = (uint64_t)m_lo | ((uint64_t)m_hi << 32);
+
+            // Intersect with valid bitmap
+            uint64_t final_mask = fp_mask & hdr.bitmap & VNODE_FULL_MASK;
+
+            while (final_mask) {
+                int idx = __builtin_ctzll(final_mask);
+                if (records[idx].key == key) {
+                    value = records[idx].value;
+                    return true;
+                }
+                final_mask &= (final_mask - 1);
             }
-            
-            // 从掩码中移除已检查过的位，继续下一次循环
-            final_mask &= (final_mask - 1);
+            return false;
         }
-        // SIMD 路径未找到，返回 false
-        return false;
-    }
-
-non_simd:
 #endif // __AVX2__
-        // non-SIMD version for fingerprint comparison
+        // Scalar fallback (bloom == nullptr, or no AVX2)
         constexpr uint64_t FULL_MASK = (vnode_fanout >= 64u)
             ? 0xFFFF'FFFF'FFFF'FFFFull
             : ((1ull << vnode_fanout) - 1ull);
         uint64_t bm = hdr.bitmap & FULL_MASK;
 
-        // 可选的指纹预过滤（bloom 可能为 nullptr）
         uint8_t fp = 0;
         const bool use_fp = (bloom != nullptr) && ENABLE_BLOOM_FINGERPRINT;
         if (use_fp) fp = bloom->hashKey(key);

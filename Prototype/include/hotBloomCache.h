@@ -86,7 +86,10 @@ public:
     //  Primary interface
     // ======================================================================
 
-    /// Read-path: returns DRAM copy if cached (and touches ref), else PMEM.
+    /// Read-path: returns DRAM copy if cached, else PMEM.
+    /// Does NOT touch ref — PMEM read ≈ DRAM read, so ref should only
+    /// reflect write-hotness.  This ensures CLOCK evicts write-cold entries
+    /// first, reserving DRAM for write-hot VNodes.
     BloomFilter* getBloom(size_t vnodeId) {
         size_t ci  = vnodeId / kChunkSize;
         size_t off = vnodeId % kChunkSize;
@@ -94,13 +97,7 @@ public:
         DirChunk* c = chunks_[ci].load(std::memory_order_acquire);
         if (c) {
             BloomFilter* dram = c->ptrs[off].load(std::memory_order_acquire);
-            if (dram) {
-                // Touch reference counter (cap at 3 to avoid starvation)
-                uint8_t old = c->refs[off].load(std::memory_order_relaxed);
-                if (old < 3)
-                    c->refs[off].store(old + 1, std::memory_order_relaxed);
-                return dram;
-            }
+            if (dram) return dram;  // use DRAM copy but don't touch ref
         }
         return pmemPool_->at(vnodeId);
     }
@@ -124,9 +121,9 @@ public:
                 return dram;
             }
         }
-        // Only promote if cache has room — never evict on inserts
-        if (population_.load(std::memory_order_relaxed) < kMaxCached) {
-            if (promoteInternal(vnodeId, 1)) {
+        // Promote without eviction — if cache full, fall through to PMEM
+        {
+            if (promoteInternal(vnodeId, 1, /*allowEviction=*/false)) {
                 c = chunks_[ci].load(std::memory_order_acquire);
                 if (c) {
                     BloomFilter* dram = c->ptrs[off].load(std::memory_order_acquire);
@@ -154,11 +151,13 @@ public:
     // ======================================================================
 
     /// Normal promotion (ref=1). Called from getBloomForWrite.
+    /// Never evicts — if cache is full, returns false.
     bool promote(size_t vnodeId) {
-        return promoteInternal(vnodeId, 1);
+        return promoteInternal(vnodeId, 1, /*allowEviction=*/false);
     }
 
     /// Hot-region promotion (ref=3). Called from maybeActivateHotRegion.
+    /// MAY evict cold entries — this is the ONLY path that triggers eviction.
     bool promoteHot(size_t vnodeId) {
         if (isCached(vnodeId)) {
             // Already cached — boost its ref to 3 (protects from eviction)
@@ -168,7 +167,7 @@ public:
             if (c) c->refs[off].store(3, std::memory_order_relaxed);
             return false;
         }
-        return promoteInternal(vnodeId, 3);
+        return promoteInternal(vnodeId, 3, /*allowEviction=*/true);
     }
 
     /// Batch promote multiple VNode IDs with hot priority.
@@ -245,13 +244,13 @@ public:
         std::vector<int> ids;
         if (!inode || inode->hdr.level != 0) return ids;
         for (int i = 0; i <= inode->hdr.last_index; ++i) {
-            int vid = static_cast<int>(inode->gps[i].value);
+            int vid = static_cast<int>(inode->gp_values[i]);
             if (vid >= 0 && vid < static_cast<int>(MAX_VALUE_NODES))
                 ids.push_back(vid);
         }
         for (int i = 0; i <= inode->hdr.last_sgp; ++i) {
             if (inode->sgpVisible.test(i)) {
-                int vid = static_cast<int>(inode->sgps[i].value);
+                int vid = static_cast<int>(inode->sgp_values[i]);
                 if (vid >= 0 && vid < static_cast<int>(MAX_VALUE_NODES))
                     ids.push_back(vid);
             }
@@ -279,19 +278,23 @@ private:
     std::atomic<size_t>     retireGen_{0};
 
     // ------------------------------------------------------------------
-    //  Core: promote with eviction when at capacity
+    //  Core: promote, optionally with eviction when at capacity
+    //
+    //  allowEviction=false  →  write-path: bail out if cache full (no CLOCK overhead)
+    //  allowEviction=true   →  prediction-path: evict a cold entry to make room
     // ------------------------------------------------------------------
-    bool promoteInternal(size_t vnodeId, uint8_t initialRef) {
+    bool promoteInternal(size_t vnodeId, uint8_t initialRef,
+                         bool allowEviction = false) {
         if (vnodeId >= MAX_VALUE_NODES) return false;
         if (isCached(vnodeId)) return false;
 
         BloomFilter* pmem = pmemPool_->at(vnodeId);
         if (!pmem) return false;
 
-        // Possibly evict to make room
+        // Make room if at capacity
         if (population_.load(std::memory_order_relaxed) >= kMaxCached) {
-            if (!evictOne()) {
-                return false;   // all entries heavily referenced — skip
+            if (!allowEviction || !evictOne()) {
+                return false;   // cache full — write-path falls back to PMEM
             }
         }
 

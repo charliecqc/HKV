@@ -152,8 +152,8 @@ public:
     DramInodePool *dramInodePool;
     CkptLog *ckpt_log;
     ValueList *valueList;
-    int level; //level is the current max level of the skiplist
-    std::shared_mutex level_lock;
+    std::atomic<int> level{0}; //level is the current max level of the skiplist
+    // level_lock removed: replaced by atomic CAS on level
     vector<int> inode_count_on_each_level;
 
     // **新增：为查找操作设计的快速路径缓存**
@@ -244,10 +244,11 @@ public:
 
     bool increaseLevel()
     {
-        std::unique_lock<std::shared_mutex> lock(level_lock);
-        if (level < MAX_LEVEL - 1) {
-            level++;
-            return true;
+        int cur = level.load(std::memory_order_acquire);
+        while (cur < MAX_LEVEL - 1) {
+            if (level.compare_exchange_weak(cur, cur + 1,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+                return true;
         }
         return false;
     }

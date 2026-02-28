@@ -16,7 +16,7 @@
 
 class DramInodePool {
 private:
-    std::vector<Inode*> dramInodePool;
+    Inode* pool_base_{nullptr};   // contiguous block base address
     int nodeSize;
     int numNodes;
     std::atomic<int> currentIdx;
@@ -29,9 +29,12 @@ public:
     bool init();
 
     ~DramInodePool() {
-        // Deallocate memory blocks
-        for (Inode* node : dramInodePool) {
-            delete[] node;
+        // Nodes are placement-new'd in DramManager pool;
+        // call destructors but don't free (DramManager owns the memory)
+        if (pool_base_) {
+            for (int i = 0; i < numNodes; i++) {
+                pool_base_[i].~Inode();
+            }
         }
     }
 
@@ -44,7 +47,7 @@ public:
     }
 
     Inode* getCurrentNode() {
-        return dramInodePool[currentIdx.load()];
+        return &pool_base_[currentIdx.load()];
     }
 
     Inode* getNextNode() {
@@ -53,7 +56,7 @@ public:
             std::cout << "Exceeding the maximum number of nodes in dramInodePool, idx: " << idx << std::endl;
             return nullptr;
         }
-        Inode *node = dramInodePool[idx];
+        Inode *node = &pool_base_[idx];
         assert(node->getId() >= 0);
 #ifdef DBG
         int id = node->getId();
@@ -64,31 +67,22 @@ public:
         return node;
     }
 
-    Inode* popNode() {
-        if (dramInodePool.empty()) {
-            return nullptr;
-        }
-
-        Inode* inode = dramInodePool.back();
-        dramInodePool.pop_back();
-        return inode;
+    Inode* __attribute__((always_inline)) at(size_t index) {
+        return &pool_base_[index];
     }
 
-    void push(Inode *inode) {
-        dramInodePool.push_back(inode);
-    }
-
-    Inode * at(size_t index) {
-        if (index >= dramInodePool.size()) {
-            std::cout << "invalid index " << index <<" beyond dramInodePool capacity" << std::endl;
+    // Debug mode: bounds-checked version, use during development
+    Inode* at_checked(size_t index) {
+        if (__builtin_expect(index >= static_cast<size_t>(numNodes), 0)) {
+            std::cout << "invalid index " << index << " beyond dramInodePool capacity " << numNodes << std::endl;
             return nullptr;
         }
-        return dramInodePool[index];
+        return &pool_base_[index];
     }
 
     bool extend(void *indexPool, size_t extendNumNodes);
 
     int getPoolSize() {
-        return dramInodePool.size();
+        return numNodes;
     }
 };

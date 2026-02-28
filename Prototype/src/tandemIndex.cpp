@@ -16,6 +16,22 @@
 #include <cstdint>
 #include <stdexcept>
 
+#ifndef ENABLE_SPLITPATH_STATS
+#define ENABLE_SPLITPATH_STATS 0
+#endif
+
+// ---- Split-path counters (SGP effectiveness) ----
+#if ENABLE_SPLITPATH_STATS
+static std::atomic<uint64_t> g_splitPath_A{0}; // is_sgp → sgp_covered++ (zero log)
+static std::atomic<uint64_t> g_splitPath_B{0}; // GP covered++ (delta+full log)
+static std::atomic<uint64_t> g_splitPath_C{0}; // linkInactiveSGP (zero log)
+static std::atomic<uint64_t> g_splitPath_D{0}; // activateGPForVnode (full log)
+static std::atomic<uint64_t> g_splitPath_E{0}; // inode full → rebalance queue
+#define SPLITPATH_INC(counter) counter.fetch_add(1, std::memory_order_relaxed)
+#else
+#define SPLITPATH_INC(counter) ((void)0)
+#endif
+
 namespace {
 static std::string format_bytes(size_t bytes) {
     const double mib = static_cast<double>(bytes) / (1024.0 * 1024.0);
@@ -331,11 +347,11 @@ TandemIndex::TandemIndex(string storage_path) {
     createRebalanceThread();
     Inode *index_header = mainIndex->getHeader();
     Vnode *value_header = valueList->getHeader();
-    index_header->gps[0].value = value_header->getId();
+    index_header->gp_values[0] = value_header->getId();
     dram_log_entry_t *header_entry = new dram_log_entry_t(index_header->getId(),
         index_header->hdr.last_index,index_header->hdr.next,
         index_header->hdr.level, index_header->hdr.parent_id);
-    header_entry->setKeyVal(0, index_header->gps[0].key, index_header->gps[0].value, 1);
+    header_entry->setKeyVal(0, index_header->gp_keys[0], index_header->gp_values[0], 1);
     ckptLog->batcher().addFull(header_entry);
     
     for(int i = 0; i < MAX_REBALANCE_THREADS; i++) {
@@ -419,6 +435,32 @@ TandemIndex::~TandemIndex() {
     //cout << "vnode count: " << valueList->pmemVnodePool->getCurrentIdx() << endl;
     mainIndex->printStats();
     printStatus();
+
+    // ---- Split-path stats ----
+#if ENABLE_SPLITPATH_STATS
+    {
+        uint64_t a = g_splitPath_A.load(std::memory_order_relaxed);
+        uint64_t b = g_splitPath_B.load(std::memory_order_relaxed);
+        uint64_t c = g_splitPath_C.load(std::memory_order_relaxed);
+        uint64_t d = g_splitPath_D.load(std::memory_order_relaxed);
+        uint64_t e = g_splitPath_E.load(std::memory_order_relaxed);
+        uint64_t total = a + b + c + d + e;
+        uint64_t log_avoided = a + c;  // paths with zero logging
+        uint64_t log_needed  = b + d;  // paths that wrote checkpoint log
+        std::cout << "[SplitPath] A(sgp_covered++)=" << a
+                  << " B(gp_covered+log)=" << b
+                  << " C(linkSGP)=" << c
+                  << " D(activateGP+log)=" << d
+                  << " E(rebalance)=" << e
+                  << " | total=" << total
+                  << " log_avoided=" << log_avoided
+                  << " log_needed=" << log_needed;
+        if (total > 0)
+            std::cout << " avoid_rate=" << std::fixed << std::setprecision(1)
+                      << (100.0 * log_avoided / total) << "%";
+        std::cout << std::endl;
+    }
+#endif
 
     // 必须先停止所有使用 tracker_ 的线程，再销毁 tracker_
     // 否则线程仍在执行 tracker_->xxx() 时 tracker_ 已被析构 → SIGSEGV
@@ -666,8 +708,8 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
     });
 
     if (sampler_) {sampler_->Submit(next_right_min);} //sample split
-    if (tracker_->LastEpochHistogramValid()) { //TODO: currently one thread speculating per round
-        speculator_->TrySubmit();   // TODO: optimize: avoid double atomic ops
+    if (tracker_ && tracker_->LastEpochHistogramValid()) { //TODO: currently one thread speculating per round
+        if (speculator_) speculator_->TrySubmit();   // TODO: optimize: avoid double atomic ops
     }
 
     bool ok = false;
@@ -701,59 +743,71 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         return targetVnode->getMinKey();
     });
     
+    // Path A: already linked SGP, just bump covered (zero log)
     if (is_sgp && !parent_inode->isSGPUnbalanced(idx_to_next_level)) {
-        parent_inode->sgps[idx_to_next_level].covered_nodes++; 
+        parent_inode->sgp_covered[idx_to_next_level]++; 
         //TODO [ckpt] : log SGP update
+        SPLITPATH_INC(g_splitPath_A);
         write_unlock(parent_inode->version);
         return true;
-    } else if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
-        parent_inode->gps[idx_to_next_level].covered_nodes++;
+    }
+
+    // Path C (promoted): try to link an inactive SGP BEFORE burning a log write
+    {
+        int pos = -1;
+        if (parent_inode->linkInactiveSGP(targetKey, targetVnode->getId(), pos, 1)) {
+#if ENABLE_HOTPATH_DEBUG_LOG
+            std::cout << "Linking SGP at pos " << pos
+                  << " key=" << targetKey
+                  << " -> vnode " << targetVnode->getId()
+                  << " covering " << parent_inode->sgp_covered[pos] << "\n";
+#endif
+            SPLITPATH_INC(g_splitPath_C);
+            write_unlock(parent_inode->version);
+            return true;
+        }
+    }
+
+    // Path B: GP not yet unbalanced → covered++ with delta+full log
+    if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
+        parent_inode->gp_covered[idx_to_next_level]++;
         ckptLog->batcher().addDeltaSlot(
             parent_inode->getId(),
             parent_inode->hdr.last_index,
             parent_inode->hdr.next,
             parent_inode->hdr.parent_id,
             static_cast<int16_t>(idx_to_next_level),
-            parent_inode->gps[idx_to_next_level].key,
-            parent_inode->gps[idx_to_next_level].value,
-            parent_inode->gps[idx_to_next_level].covered_nodes
+            parent_inode->gp_keys[idx_to_next_level],
+            parent_inode->gp_values[idx_to_next_level],
+            parent_inode->gp_covered[idx_to_next_level]
         );
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
             parent_inode->hdr.last_index, parent_inode->hdr.next,
             parent_inode->hdr.level, parent_inode->hdr.parent_id);
         for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
-            entry->setKeyVal(i, parent_inode->gps[i].key,
-                                parent_inode->gps[i].value,
-                                parent_inode->gps[i].covered_nodes);
+            entry->setKeyVal(i, parent_inode->gp_keys[i],
+                                parent_inode->gp_values[i],
+                                parent_inode->gp_covered[i]);
         }
         ckptLog->batcher().addFull(entry);
+        SPLITPATH_INC(g_splitPath_B);
         write_unlock(parent_inode->version);
         return true;
     }
 
+    // Path D: GP unbalanced, activate new GP with full log
     int pos = -1;
-    if(parent_inode->linkInactiveSGP(targetKey, targetVnode->getId(), pos, 1)) {
-        // TODO [ckpt] : log SGP linking
-#if ENABLE_HOTPATH_DEBUG_LOG
-        std::cout << "Linking SGP at pos " << pos
-              << " key=" << targetKey
-              << " -> vnode " << targetVnode->getId()
-              << " covering " << parent_inode->sgps[pos].covered_nodes << "\n";
-#endif
-        write_unlock(parent_inode->version);
-        return true;
-    }
-
     if (parent_inode->activateGPForVnode(targetKey, targetVnode->getId(), pos, 1)) {
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
             parent_inode->hdr.last_index, parent_inode->hdr.next,
             parent_inode->hdr.level, parent_inode->hdr.parent_id);
         for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
-            entry->setKeyVal(i, parent_inode->gps[i].key,
-                                parent_inode->gps[i].value,
-                                parent_inode->gps[i].covered_nodes);
+            entry->setKeyVal(i, parent_inode->gp_keys[i],
+                                parent_inode->gp_values[i],
+                                parent_inode->gp_covered[i]);
         }
         ckptLog->batcher().addFull(entry);
+        SPLITPATH_INC(g_splitPath_D);
         write_unlock(parent_inode->version);
         return true;
     } else {
@@ -762,6 +816,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         }
         assert(parent_inode->hdr.last_index == fanout / 2 - 1);
         addToRebalanceQueue(parent_inode);
+        SPLITPATH_INC(g_splitPath_E);
         write_unlock(parent_inode->version);
         return true;
     }
@@ -794,6 +849,28 @@ Val_t TandemIndex::lookup(Key_t key)
         if(parent_inode == nullptr) {
             cout << " Failed to lookup the key in the main index." << endl;
             return -1;
+        }
+
+        // P3: prefetch BloomFilter & Vnode while validateSnapShort runs
+        {
+            const int likely_vid = (snap.sgp_key != 0) ? snap.sgp_value
+                                                        : snap.gp_value;
+            if (likely_vid >= 0) {
+                // Prefetch BloomFilter (DRAM or PMEM — getBloom pointer indirection is cheap)
+                BloomFilter *bf_hint = valueList->getBloom(likely_vid);
+                if (bf_hint) {
+                    __builtin_prefetch(bf_hint, 0, 1);                 // BF header + fingerprints line 0
+                    __builtin_prefetch((const char*)bf_hint + 64, 0, 1); // fingerprints line 1
+                }
+                // Prefetch Vnode (PMEM — the expensive one)
+                Vnode *vn_hint = valueList->pmemVnodePool->at(likely_vid);
+                if (vn_hint) {
+                    __builtin_prefetch(vn_hint, 0, 0);                 // records line 0
+                    __builtin_prefetch((const char*)vn_hint + 64, 0, 0);  // records line 1
+                    __builtin_prefetch((const char*)vn_hint + 128, 0, 0); // records line 2
+                    __builtin_prefetch((const char*)vn_hint + 192, 0, 0); // records line 3
+                }
+            }
         }
 
         if (!mainIndex->validateSnapShort(parent_inode, snap, key)) { //validate sgp [TODO]
@@ -1559,8 +1636,8 @@ void TandemIndex::remove(int key)
         for (int i = 0; i < last_gp; ++i) {
             std::vector<IntervalCandidate> hot_intervals;
             double inode_pressure = 0.0;
-            uint64_t lo = inode->gps[i].key;
-            uint64_t hi = inode->gps[i + 1].key;
+            uint64_t lo = inode->gp_keys[i];
+            uint64_t hi = inode->gp_keys[i + 1];
 
             // intersect with hot region
             uint64_t S = std::max(lo, hot.start);
@@ -1574,7 +1651,7 @@ void TandemIndex::remove(int key)
 
             // predict stability violation
             double coeff = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[inode->hdr.level];
-            double future_nodes = inode->gps[i].covered_nodes + pred;
+            double future_nodes = inode->gp_covered[i] + pred;
 
             if (future_nodes <= coeff)
                 continue;
@@ -1629,14 +1706,14 @@ void TandemIndex::maybeActivateHotRegion() {
         << " | GPs=[";
 
     for (int i = 0; i <= inode->hdr.last_index; ++i) {
-        oss << inode->gps[i].key;
+        oss << inode->gp_keys[i];
         if (i < inode->hdr.last_index) oss << ",";
     }
 
     oss << "] SGPs=[";
 
     for (int i = 0; i < inode->hdr.last_sgp; ++i) {
-        oss << inode->sgps[i].key;
+        oss << inode->sgp_keys[i];
         if (i + 1 < inode->hdr.last_sgp) oss << ",";
     }
 
@@ -1647,7 +1724,7 @@ void TandemIndex::maybeActivateHotRegion() {
 
     // local guards (no AnchorParams changes)
     constexpr double MIN_INODE_PRED = 0.05;  // suppress tiny Zipf noise
-    constexpr int    MAX_ANCHORS_PER_INODE = 3;
+    constexpr int    MAX_ANCHORS_PER_INODE = 8;
 
     tl::Region hot{};
     if (!tracker_->GetHottestRegion(WINDOW, &hot))
@@ -1685,8 +1762,8 @@ void TandemIndex::maybeActivateHotRegion() {
 
         // ---- PHASE 1: scan GP intervals & COLLECT anchors ----
         for (int i = 0; i < last_gp; ++i) {
-            uint64_t lo = inode->gps[i].key;
-            uint64_t hi = inode->gps[i + 1].key;
+            uint64_t lo = inode->gp_keys[i];
+            uint64_t hi = inode->gp_keys[i + 1];
 
             uint64_t S = std::max(lo, hot.start);
             uint64_t E = std::min(hi, hot.end);
@@ -1700,7 +1777,7 @@ void TandemIndex::maybeActivateHotRegion() {
 
             double coeff =
                 SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[inode->hdr.level];
-            double future_nodes = inode->gps[i].covered_nodes + pred;
+            double future_nodes = inode->gp_covered[i] + pred;
 
             if (future_nodes <= coeff)
                 continue;
@@ -1748,7 +1825,6 @@ void TandemIndex::maybeActivateHotRegion() {
                 break;
             //std::cout << "  [SGP] activating" << k << "\n";
             inode->activateSGP(k);
-
         }
 
         // ---- PHASE 4: promote hot VNode blooms to DRAM ----
