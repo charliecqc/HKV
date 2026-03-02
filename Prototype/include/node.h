@@ -166,7 +166,7 @@ public:
     Val_t    sgp_values[fanout/2];    // 32×8 = 256B
     int16_t  sgp_covered[fanout/2];   // 32×2 =  64B
 
-    std::bitset<fanout/2> sgpVisible;
+    std::atomic<uint32_t> sgpVisible{0};
 
     Inode(uint32_t level)
     {
@@ -186,7 +186,7 @@ public:
             sgp_values[i] = std::numeric_limits<Val_t>::max();
             sgp_covered[i] = 0;
         }
-        sgpVisible.reset();
+        sgpVisible.store(0, std::memory_order_relaxed);
         version.store(0, std::memory_order_relaxed);
         structure_version.store(0, std::memory_order_relaxed);
     }
@@ -502,14 +502,12 @@ public:
     memmove(&sgp_values[oldIdx + 1],  &sgp_values[oldIdx],  sizeof(Val_t)   * cnt);
     memmove(&sgp_covered[oldIdx + 1], &sgp_covered[oldIdx], sizeof(int16_t) * cnt);
 
-    // shift visibility bits
-    for (int i = hdr.last_sgp; i >= oldIdx; --i) {
-        if (sgpVisible.test(i))
-            sgpVisible.set(i + 1);
-        else
-            sgpVisible.reset(i + 1);
-    }
-    sgpVisible.reset(oldIdx); // new slot starts invisible
+    // Shift visibility bits: [oldIdx..last_sgp] → [oldIdx+1..last_sgp+1]
+    // bit at oldIdx becomes 0 (new slot invisible). Single atomic store.
+    uint32_t vis = sgpVisible.load(std::memory_order_relaxed);
+    uint32_t mask_below = (oldIdx > 0) ? ((1u << oldIdx) - 1) : 0u;
+    uint32_t new_vis = (vis & mask_below) | ((vis & ~mask_below) << 1);
+    sgpVisible.store(new_vis, std::memory_order_relaxed);
 
     return true;
     }
@@ -549,9 +547,10 @@ public:
         if (upper < 0) return false;
 
         // Scan from upper backwards; stop as soon as sgp_keys[i] <= gp_key
+        uint32_t vis = sgpVisible.load(std::memory_order_acquire);
         for (int i = upper; i >= 0; --i) {
             if (sgp_keys[i] <= gp_key) break;
-            if (sgpVisible.test(i) && sgp_values[i] != (Val_t)-1) {
+            if (((vis >> i) & 1u) && sgp_values[i] != (Val_t)-1) {
                 sgp_pos = i;
                 return true;
             }
@@ -572,9 +571,9 @@ public:
         // TODO: add sgppos to vnode entry
 
         sgp_keys[pos] = key;
-        sgp_values[pos] = -1; 
-        sgp_covered[pos] = 0; 
-        sgpVisible.reset(pos);
+        sgp_values[pos] = -1;
+        sgp_covered[pos] = 0;
+        sgpVisible.fetch_and(~(1u << pos), std::memory_order_relaxed);
 
         hdr.last_sgp++;
         return true;
@@ -582,54 +581,74 @@ public:
 
     bool splitWithSGP(Inode *targetInode)
     {
-        std::vector<entry> merged_entries;
-        for (int i = 0; i <= hdr.last_index; i++)
-        {
-            entry e;
-            e.key = gp_keys[i]; e.value = gp_values[i]; e.covered_nodes = gp_covered[i];
-            merged_entries.push_back(e);
-        }
-        
-        if (hdr.last_sgp>=0){
-            for (int i = 0; i <= hdr.last_sgp; ++i) {
-                if (sgpVisible.test(i)) {
-                    entry e;
-                    e.key = sgp_keys[i]; e.value = sgp_values[i]; e.covered_nodes = sgp_covered[i];
-                    merged_entries.push_back(e);
-                }
+        // Zero-allocation two-pointer merge: GP and visible SGP are both sorted
+        Key_t    tmp_keys[fanout];
+        Val_t    tmp_values[fanout];
+        int16_t  tmp_covered[fanout];
+
+        uint32_t vis = (hdr.last_sgp >= 0)
+                           ? sgpVisible.load(std::memory_order_acquire) : 0u;
+        int gi = 0, gEnd = hdr.last_index + 1;
+        int si = 0, sEnd = hdr.last_sgp + 1;
+        int out = 0;
+
+        // Advance si to next visible SGP entry
+        while (si < sEnd && !((vis >> si) & 1u)) ++si;
+
+        // Merge two sorted sequences
+        while (gi < gEnd && si < sEnd) {
+            if (gp_keys[gi] <= sgp_keys[si]) {
+                tmp_keys[out]    = gp_keys[gi];
+                tmp_values[out]  = gp_values[gi];
+                tmp_covered[out] = gp_covered[gi];
+                ++gi;
+            } else {
+                tmp_keys[out]    = sgp_keys[si];
+                tmp_values[out]  = sgp_values[si];
+                tmp_covered[out] = sgp_covered[si];
+                ++si;
+                while (si < sEnd && !((vis >> si) & 1u)) ++si;
             }
+            ++out;
+        }
+        while (gi < gEnd) {
+            tmp_keys[out]    = gp_keys[gi];
+            tmp_values[out]  = gp_values[gi];
+            tmp_covered[out] = gp_covered[gi];
+            ++gi; ++out;
+        }
+        while (si < sEnd) {
+            tmp_keys[out]    = sgp_keys[si];
+            tmp_values[out]  = sgp_values[si];
+            tmp_covered[out] = sgp_covered[si];
+            ++si; ++out;
+            while (si < sEnd && !((vis >> si) & 1u)) ++si;
         }
 
-        std::sort(merged_entries.begin(), merged_entries.end(), [](const entry &a, const entry &b) {
-            return a.key < b.key; // Sort merged entries by key
-        });
+        int first_half  = out / 2;
+        int second_half = out - first_half;
 
-        int total_entries = static_cast<int>(merged_entries.size());
-        int first_half_count = total_entries / 2;
-        int second_half_count = total_entries - first_half_count;
-
-        // scatter back to SoA
-        for (int i = 0; i < first_half_count; ++i) {
-            gp_keys[i]    = merged_entries[i].key;
-            gp_values[i]  = merged_entries[i].value;
-            gp_covered[i] = merged_entries[i].covered_nodes;
+        // Scatter to this (left) inode
+        for (int i = 0; i < first_half; ++i) {
+            gp_keys[i]    = tmp_keys[i];
+            gp_values[i]  = tmp_values[i];
+            gp_covered[i] = tmp_covered[i];
         }
-        hdr.last_index = first_half_count - 1;
+        hdr.last_index = first_half - 1;
 
-        for (int i = 0; i < second_half_count; ++i) {
-            targetInode->gp_keys[i]    = merged_entries[first_half_count + i].key;
-            targetInode->gp_values[i]  = merged_entries[first_half_count + i].value;
-            targetInode->gp_covered[i] = merged_entries[first_half_count + i].covered_nodes;
+        // Scatter to target (right) inode
+        for (int i = 0; i < second_half; ++i) {
+            targetInode->gp_keys[i]    = tmp_keys[first_half + i];
+            targetInode->gp_values[i]  = tmp_values[first_half + i];
+            targetInode->gp_covered[i] = tmp_covered[first_half + i];
         }
-        targetInode->hdr.last_index = second_half_count - 1;
+        targetInode->hdr.last_index = second_half - 1;
 
-        // reset sgps
-        for (int i = 0; i < fanout/2; ++i) {
-            this->sgp_keys[i]    = std::numeric_limits<Key_t>::max();
-            this->sgp_values[i]  = std::numeric_limits<Val_t>::max();
+        // Reset SGPs
+        for (int i = 0; i < fanout / 2; ++i) {
             this->sgp_covered[i] = 0;
         }
-        this->sgpVisible.reset();
+        this->sgpVisible.store(0, std::memory_order_relaxed);
         this->hdr.last_sgp = -1;
 
         assert(this->getMaxKey() <= targetInode->getMinKey());
@@ -698,7 +717,7 @@ public:
             }
         }
         if (candidate < 0) return false;
-        if (sgpVisible.test(candidate)) return false;
+        if ((sgpVisible.load(std::memory_order_relaxed) >> candidate) & 1u) return false;
         pos = candidate;
         return true;
     }
@@ -729,7 +748,7 @@ bool findLinkingSGPPosExact(Key_t key, int& pos) {
     while (l <= r) {
         int m = (l + r) >> 1;
         if (sgp_keys[m] == key) {
-            if (!sgpVisible.test(m)) {
+            if (!((sgpVisible.load(std::memory_order_relaxed) >> m) & 1u)) {
                 pos = m;
                 return true;
             }
@@ -755,8 +774,9 @@ bool findLinkingSGPPosExact(Key_t key, int& pos) {
     sgp_values[sgp_pos] = vnode_id;        // DOWN POINTER ✔
     sgp_covered[sgp_pos] = covered_nodes;
 
-    std::atomic_thread_fence(std::memory_order_release);
-    sgpVisible.set(sgp_pos);
+    // fetch_or with release ordering: data writes above are visible to any
+    // reader that observes this bit set (replaces separate fence + bitset::set).
+    sgpVisible.fetch_or(1u << sgp_pos, std::memory_order_release);
 
     pos = sgp_pos;
 

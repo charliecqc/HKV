@@ -32,7 +32,7 @@
 // ---------------------------------------------------------------------------
 
 #ifndef HOT_BLOOM_MAX_CACHED
-#define HOT_BLOOM_MAX_CACHED 1000000UL
+#define HOT_BLOOM_MAX_CACHED 1200000UL
 #endif
 
 class HotBloomCache {
@@ -248,11 +248,14 @@ public:
             if (vid >= 0 && vid < static_cast<int>(MAX_VALUE_NODES))
                 ids.push_back(vid);
         }
-        for (int i = 0; i <= inode->hdr.last_sgp; ++i) {
-            if (inode->sgpVisible.test(i)) {
-                int vid = static_cast<int>(inode->sgp_values[i]);
-                if (vid >= 0 && vid < static_cast<int>(MAX_VALUE_NODES))
-                    ids.push_back(vid);
+        {
+            uint32_t vis = inode->sgpVisible.load(std::memory_order_acquire);
+            for (int i = 0; i <= inode->hdr.last_sgp; ++i) {
+                if ((vis >> i) & 1u) {
+                    int vid = static_cast<int>(inode->sgp_values[i]);
+                    if (vid >= 0 && vid < static_cast<int>(MAX_VALUE_NODES))
+                        ids.push_back(vid);
+                }
             }
         }
         return ids;

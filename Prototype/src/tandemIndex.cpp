@@ -781,6 +781,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
             parent_inode->gp_values[idx_to_next_level],
             parent_inode->gp_covered[idx_to_next_level]
         );
+#if 0
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
             parent_inode->hdr.last_index, parent_inode->hdr.next,
             parent_inode->hdr.level, parent_inode->hdr.parent_id);
@@ -790,6 +791,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
                                 parent_inode->gp_covered[i]);
         }
         ckptLog->batcher().addFull(entry);
+#endif
         SPLITPATH_INC(g_splitPath_B);
         write_unlock(parent_inode->version);
         return true;
@@ -1724,7 +1726,7 @@ void TandemIndex::maybeActivateHotRegion() {
 
     // local guards (no AnchorParams changes)
     constexpr double MIN_INODE_PRED = 0.05;  // suppress tiny Zipf noise
-    constexpr int    MAX_ANCHORS_PER_INODE = 8;
+    constexpr int    MAX_ANCHORS_PER_INODE = 16;
 
     tl::Region hot{};
     if (!tracker_->GetHottestRegion(WINDOW, &hot))
@@ -1820,12 +1822,14 @@ void TandemIndex::maybeActivateHotRegion() {
         std::cout << "  [SGP] skipped \n";
             continue;}
 
+        write_lock(inode->version);
         for (uint64_t k : inode_anchors) {
             if (inode->isSGPFull())
                 break;
             //std::cout << "  [SGP] activating" << k << "\n";
             inode->activateSGP(k);
         }
+        write_unlock(inode->version);
 
         // ---- PHASE 4: promote hot VNode blooms to DRAM ----
 #if ENABLE_DRAM_BLOOM_HOT
