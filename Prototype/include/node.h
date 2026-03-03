@@ -229,8 +229,12 @@ public:
             }
             assert(pos != 0);
             int old_covered_nodes = gp_covered[pos-1];
-            assert(old_covered_nodes >= 1);
-            assert(old_covered_nodes - relative_pos - 1 >= 0);
+            if (old_covered_nodes < 1 || old_covered_nodes - relative_pos - 1 < 1) {
+                // Edge case: not enough covered children to split
+                // This can happen after SGP path incremented gp_covered
+                // but actual GP coverage is too thin
+                return false;
+            }
             this->insertAtPos(targetKey, value, pos, old_covered_nodes - relative_pos - 1);
             this->gp_covered[pos-1] = relative_pos + 1; // set new covered nodes for the previous GP
             assert(this->gp_covered[pos-1] >= 1);
@@ -533,7 +537,7 @@ public:
         if (sgp_keys[hdr.last_sgp] <= gp_key) return false;
         if (key < sgp_keys[0]) return false;
 
-        // Binary search: find rightmost i with sgp_keys[i] <= key
+        // Binary search: find rightmost i with sgp_keys[i] <= key  (upper bound)
         int lo = 0, hi = hdr.last_sgp, upper = -1;
         while (lo <= hi) {
             int mid = lo + ((hi - lo) >> 1);
@@ -546,15 +550,39 @@ public:
         }
         if (upper < 0) return false;
 
-        // Scan from upper backwards; stop as soon as sgp_keys[i] <= gp_key
-        uint32_t vis = sgpVisible.load(std::memory_order_acquire);
-        for (int i = upper; i >= 0; --i) {
-            if (sgp_keys[i] <= gp_key) break;
-            if (((vis >> i) & 1u) && sgp_values[i] != (Val_t)-1) {
-                sgp_pos = i;
-                return true;
+        // Binary search: find first i with sgp_keys[i] > gp_key  (lower bound)
+        int lower = upper + 1;  // default: no valid slot
+        {
+            int l2 = 0, r2 = upper;
+            while (l2 <= r2) {
+                int m = l2 + ((r2 - l2) >> 1);
+                if (sgp_keys[m] > gp_key) {
+                    lower = m;
+                    r2 = m - 1;
+                } else {
+                    l2 = m + 1;
+                }
             }
         }
+        if (lower > upper) return false;
+
+        // Bitmap-accelerated scan: mask sgpVisible to bits [lower..upper]
+        uint32_t vis = sgpVisible.load(std::memory_order_acquire);
+        // Build mask for bits [lower..upper] inclusive
+        uint32_t range_mask = ((upper < 31) ? ((1u << (upper + 1)) - 1u) : 0xFFFFFFFFu)
+                            & ~((1u << lower) - 1u);
+        uint32_t candidates = vis & range_mask;
+
+        // Find the highest set bit (closest to key) in O(1) per iteration
+        while (candidates) {
+            int idx = 31 - __builtin_clz(candidates);   // highest visible in range
+            if (sgp_values[idx] != (Val_t)-1) {
+                sgp_pos = idx;
+                return true;
+            }
+            candidates &= ~(1u << idx);                 // clear and retry next
+        }
+
         sgp_pos = -1;
         return false;
     }

@@ -220,6 +220,29 @@ placeAnchorsInsideInterval(
     return anchors;
 }
 
+// Plan B: equidistant anchor placement inside GP interval [lo, hi].
+// Places m anchors at equal spacing, which more closely approximates
+// actual vnode split midKeys than histogram-quantile interpolation.
+static std::vector<uint64_t>
+placeAnchorsEquidistant(uint64_t lo, uint64_t hi, size_t m)
+{
+    if (hi <= lo + 2 || m == 0) return {};
+
+    uint64_t guard = std::max<uint64_t>(1, (hi - lo) / 16);
+    uint64_t S = lo + guard;
+    uint64_t E = hi - guard;
+    if (S >= E) return {};
+
+    std::vector<uint64_t> anchors;
+    anchors.reserve(m);
+    for (size_t j = 1; j <= m; ++j) {
+        uint64_t k = S + (uint64_t)((double)(E - S) * j / (m + 1));
+        if (k > lo && k < hi)
+            anchors.push_back(k);
+    }
+    return anchors;
+}
+
 
  private:
   // See Algorithm L: https://en.wikipedia.org/wiki/Reservoir_sampling

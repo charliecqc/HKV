@@ -7,7 +7,9 @@
 #include "spinLock.h"
 #include "valuelist.h"
 #include "workerThread.h"
+#if ENABLE_SGP
 #include "insert_tracker.h"
+#endif
 #include <boost/lockfree/spsc_queue.hpp>
 #include <thread>
 #include <queue>
@@ -60,7 +62,9 @@ class TandemIndex {
         void addToRebalanceQueue(Inode* &inode);
         bool getFromRebalanceQueue(Inode* &inode);
 
+#if ENABLE_SGP
         void maybeActivateHotRegion();
+#endif
         bool isDataLoaded()
         {
             return is_data_loaded;

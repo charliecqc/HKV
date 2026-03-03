@@ -249,6 +249,7 @@ public:
                 ids.push_back(vid);
         }
         {
+#if ENABLE_SGP
             uint32_t vis = inode->sgpVisible.load(std::memory_order_acquire);
             for (int i = 0; i <= inode->hdr.last_sgp; ++i) {
                 if ((vis >> i) & 1u) {
@@ -257,6 +258,7 @@ public:
                         ids.push_back(vid);
                 }
             }
+#endif
         }
         return ids;
     }

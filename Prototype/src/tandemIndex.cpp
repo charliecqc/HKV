@@ -8,7 +8,9 @@
 #include "common.h"
 #include "concurrentqueue/concurrentqueue.h"
 #include <sys/syscall.h>
+#if ENABLE_SGP
 #include "insert_tracker.h"
+#endif
 #include <iomanip>
 #include <numeric>
 #include <sstream>
@@ -27,6 +29,11 @@ static std::atomic<uint64_t> g_splitPath_B{0}; // GP covered++ (delta+full log)
 static std::atomic<uint64_t> g_splitPath_C{0}; // linkInactiveSGP (zero log)
 static std::atomic<uint64_t> g_splitPath_D{0}; // activateGPForVnode (full log)
 static std::atomic<uint64_t> g_splitPath_E{0}; // inode full → rebalance queue
+// ---- Rebalance-level SGP counters (higher-level SGP effectiveness) ----
+// Non-static: accessed from dramSkiplist.cpp via extern
+std::atomic<uint64_t> g_rebalSGP_A{0}; // rebalance: sgp_covered++ (zero log)
+std::atomic<uint64_t> g_rebalSGP_C{0}; // rebalance: linkInactiveSGP (zero log)
+std::atomic<uint64_t> g_rebalSGP_total{0}; // rebalance: total parent updates
 #define SPLITPATH_INC(counter) counter.fetch_add(1, std::memory_order_relaxed)
 #else
 #define SPLITPATH_INC(counter) ((void)0)
@@ -128,6 +135,7 @@ volatile bool mgInitialized = false;
 std::atomic<bool> g_endTandem;
 SpinLock g_spinLock;
 
+#if ENABLE_SGP
 class AsyncSampler {
 public:
     // Constructor now takes shared_ptr
@@ -234,8 +242,6 @@ std::shared_ptr<tl::InsertTracker> tracker_;
 std::unique_ptr<AsyncSampler> sampler_;
 std::unique_ptr<AsyncSpeculator> speculator_;
 
-
-
 struct InsertForecastingOptions {
     bool use_insert_forecasting = true;
     size_t num_inserts_per_epoch = 1000; // The number of inserts in each InsertTracker epoch; the total elements of the equi-depth histogram used for insert forecasting.
@@ -247,6 +253,7 @@ struct InsertForecastingOptions {
 };
 
 std::atomic<bool> speculation_running_{false};
+
 struct SpeculationToken {
   std::atomic<bool>& flag;
   bool is_leader{false};
@@ -266,6 +273,7 @@ struct SpeculationToken {
   SpeculationToken(const SpeculationToken&) = delete;
   SpeculationToken& operator=(const SpeculationToken&) = delete;
 };
+#endif // ENABLE_SGP
 
 #define LOG_SIZE 10UL*1024UL*1024UL*1024UL
 
@@ -358,6 +366,7 @@ TandemIndex::TandemIndex(string storage_path) {
         rebalanceThread[i] = nullptr;
     }
     
+#if ENABLE_SGP
     InsertForecastingOptions forecasting;
     if (forecasting.use_insert_forecasting) {
         tracker_ = std::make_shared<tl::InsertTracker>(
@@ -374,6 +383,7 @@ TandemIndex::TandemIndex(string storage_path) {
         tracker_.reset(); // or leave null
         sampler_.reset();
     }
+#endif
     if(is_data_loaded == false) {
         insert(0,1); 
         ckptLog->drainAndPersistOnce();
@@ -459,9 +469,23 @@ TandemIndex::~TandemIndex() {
             std::cout << " avoid_rate=" << std::fixed << std::setprecision(1)
                       << (100.0 * log_avoided / total) << "%";
         std::cout << std::endl;
+
+        // Rebalance-level SGP stats (higher-level inode splits)
+        uint64_t ra = g_rebalSGP_A.load(std::memory_order_relaxed);
+        uint64_t rc = g_rebalSGP_C.load(std::memory_order_relaxed);
+        uint64_t rt = g_rebalSGP_total.load(std::memory_order_relaxed);
+        uint64_t r_avoided = ra + rc;
+        std::cout << "[RebalSGP] A(sgp_covered++)=" << ra
+                  << " C(linkSGP)=" << rc
+                  << " total_parent_updates=" << rt;
+        if (rt > 0)
+            std::cout << " avoid_rate=" << std::fixed << std::setprecision(1)
+                      << (100.0 * r_avoided / rt) << "%";
+        std::cout << std::endl;
     }
 #endif
 
+#if ENABLE_SGP
     // 必须先停止所有使用 tracker_ 的线程，再销毁 tracker_
     // 否则线程仍在执行 tracker_->xxx() 时 tracker_ 已被析构 → SIGSEGV
     if (speculator_) {
@@ -473,6 +497,7 @@ TandemIndex::~TandemIndex() {
         sampler_.reset();
     }
     tracker_.reset();   // 所有使用方线程已停止，最后安全销毁
+#endif
 
 }
 
@@ -707,10 +732,12 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
         return right_bloom->getMinKey();
     });
 
+#if ENABLE_SGP
     if (sampler_) {sampler_->Submit(next_right_min);} //sample split
     if (tracker_ && tracker_->LastEpochHistogramValid()) { //TODO: currently one thread speculating per round
         if (speculator_) speculator_->TrySubmit();   // TODO: optimize: avoid double atomic ops
     }
+#endif
 
     bool ok = false;
     if (key < next_right_min) {
@@ -743,6 +770,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         return targetVnode->getMinKey();
     });
     
+#if ENABLE_SGP
     // Path A: already linked SGP, just bump covered (zero log)
     if (is_sgp && !parent_inode->isSGPUnbalanced(idx_to_next_level)) {
         parent_inode->sgp_covered[idx_to_next_level]++; 
@@ -767,6 +795,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
             return true;
         }
     }
+#endif
 
     // Path B: GP not yet unbalanced → covered++ with delta+full log
     if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
@@ -1694,6 +1723,7 @@ void TandemIndex::remove(int key)
     tracker_->DropLastEpochHistogram();
 }*/
 
+#if ENABLE_SGP
 void TandemIndex::maybeActivateHotRegion() {
     constexpr size_t WINDOW        = 20;
     constexpr size_t FUTURE_EPOCHS = 1;
@@ -1737,12 +1767,12 @@ void TandemIndex::maybeActivateHotRegion() {
     if (!tracker_->GetLastEpochHistogram(B, C))
         return;
 
-    int L = 0;
+    int currentLevel = mainIndex->getLevel();
+    // Multi-level SGP activation: place anchors at all levels, not just L0
+    for (int L = 0; L < currentLevel - 1; ++L) {
     auto inodes = mainIndex->nodesCoveringRangeAtLevel(hot.start, hot.end, L);
-    if (inodes.empty()) {
-        tracker_->DropLastEpochHistogram();
-        return;
-    }
+    if (inodes.empty())
+        continue;
 
     for (Inode* inode : inodes) {
         if (!inode)
@@ -1794,7 +1824,7 @@ void TandemIndex::maybeActivateHotRegion() {
                 continue;
 
             auto anchors =
-                tracker_->placeAnchorsInsideInterval(B, C, lo, hi, m);
+                tl::InsertTracker::placeAnchorsEquidistant(lo, hi, m);
 
             for (uint64_t k : anchors) {
                 if ((int)inode_anchors.size() >= MAX_ANCHORS_PER_INODE)
@@ -1818,15 +1848,15 @@ void TandemIndex::maybeActivateHotRegion() {
 #endif
 
         // ---- PHASE 3: activate SGPs ONCE ----
-        if (inode->structure_version.load(std::memory_order_acquire) != version_snapshot) {
-        std::cout << "  [SGP] skipped \n";
-            continue;}
-
         write_lock(inode->version);
+        if (inode->structure_version.load(std::memory_order_acquire) != version_snapshot) {
+            std::cout << "  [SGP] skipped \n";
+            write_unlock(inode->version);
+            continue;
+        }
         for (uint64_t k : inode_anchors) {
             if (inode->isSGPFull())
                 break;
-            //std::cout << "  [SGP] activating" << k << "\n";
             inode->activateSGP(k);
         }
         write_unlock(inode->version);
@@ -1845,6 +1875,8 @@ void TandemIndex::maybeActivateHotRegion() {
 #endif
         //dump_inode_sgp_state(inode);
     }
+    } // end multi-level loop
 
     tracker_->DropLastEpochHistogram();
 }
+#endif // ENABLE_SGP
