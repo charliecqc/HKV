@@ -264,9 +264,9 @@ public:
     {
 #if 0
         int current_level = this->hdr.level;
-        double coefficient = (current_level < MAX_LEVEL) ? 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+        int coefficient = (current_level < MAX_LEVEL) ? 
+                          SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
+                          SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
         if(this->hdr.coveredNodes == 0)
             return true;
         if(this->hdr.coveredNodes > coefficient * (this->hdr.last_index + 1)) {
@@ -449,9 +449,9 @@ public:
 
     bool isUnbalanced() {
         int current_level = this->hdr.level;
-        double coefficient = (current_level < MAX_LEVEL) ? 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+        int coefficient = (current_level < MAX_LEVEL) ? 
+                          SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
+                          SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
         
         //to check if any gp's covered nodes exceed the coefficient
         for (int i = 0; i <= this->hdr.last_index; ++i) {
@@ -465,9 +465,9 @@ public:
 
     bool isUnbalanced(int idx) {
         int current_level = this->hdr.level;
-        double coefficient = (current_level < MAX_LEVEL) ? 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+        int coefficient = (current_level < MAX_LEVEL) ? 
+                          SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
+                          SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
 #if 0
         int16_t temp_covered_nodes = this->gp_covered[idx]; 
         if(temp_covered_nodes == 4 && this->hdr.level == 1) {
@@ -519,9 +519,9 @@ public:
 
     bool isSGPUnbalanced(int idx) {
         int current_level = this->hdr.level;
-        double coefficient = (current_level < MAX_LEVEL) ? 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
-                             SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+        int coefficient = (current_level < MAX_LEVEL) ? 
+                          SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[current_level] : 
+                          SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
         if (this->sgp_covered[idx] > coefficient) {
             return true;
         }

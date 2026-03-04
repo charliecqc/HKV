@@ -29,14 +29,27 @@ static std::atomic<uint64_t> g_splitPath_B{0}; // GP covered++ (delta+full log)
 static std::atomic<uint64_t> g_splitPath_C{0}; // linkInactiveSGP (zero log)
 static std::atomic<uint64_t> g_splitPath_D{0}; // activateGPForVnode (full log)
 static std::atomic<uint64_t> g_splitPath_E{0}; // inode full → rebalance queue
+// ---- Per-level split-path counters for coefficient tuning ----
+static std::atomic<uint64_t> g_lvl_A[MAX_LEVEL]{};
+static std::atomic<uint64_t> g_lvl_B[MAX_LEVEL]{};
+static std::atomic<uint64_t> g_lvl_C[MAX_LEVEL]{};
+static std::atomic<uint64_t> g_lvl_D[MAX_LEVEL]{};
+static std::atomic<uint64_t> g_lvl_E[MAX_LEVEL]{};
+// ---- Lookup chain-hop counter ----
+static std::atomic<uint64_t> g_chain_hops{0};
+static std::atomic<uint64_t> g_lookup_count{0};
 // ---- Rebalance-level SGP counters (higher-level SGP effectiveness) ----
 // Non-static: accessed from dramSkiplist.cpp via extern
 std::atomic<uint64_t> g_rebalSGP_A{0}; // rebalance: sgp_covered++ (zero log)
 std::atomic<uint64_t> g_rebalSGP_C{0}; // rebalance: linkInactiveSGP (zero log)
 std::atomic<uint64_t> g_rebalSGP_total{0}; // rebalance: total parent updates
 #define SPLITPATH_INC(counter) counter.fetch_add(1, std::memory_order_relaxed)
+#define SPLITPATH_LVL_INC(arr, lvl) do { \
+    if ((lvl) < MAX_LEVEL) arr[(lvl)].fetch_add(1, std::memory_order_relaxed); \
+} while(0)
 #else
 #define SPLITPATH_INC(counter) ((void)0)
+#define SPLITPATH_LVL_INC(arr, lvl) ((void)0)
 #endif
 
 namespace {
@@ -482,6 +495,88 @@ TandemIndex::~TandemIndex() {
             std::cout << " avoid_rate=" << std::fixed << std::setprecision(1)
                       << (100.0 * r_avoided / rt) << "%";
         std::cout << std::endl;
+
+        // ---- Per-level split-path breakdown ----
+        int max_active_level = 0;
+        for (int l = MAX_LEVEL - 1; l >= 0; --l) {
+            if (g_lvl_A[l].load(std::memory_order_relaxed) +
+                g_lvl_B[l].load(std::memory_order_relaxed) +
+                g_lvl_C[l].load(std::memory_order_relaxed) +
+                g_lvl_D[l].load(std::memory_order_relaxed) +
+                g_lvl_E[l].load(std::memory_order_relaxed) > 0) {
+                max_active_level = l;
+                break;
+            }
+        }
+        for (int l = 0; l <= max_active_level; ++l) {
+            uint64_t la = g_lvl_A[l].load(std::memory_order_relaxed);
+            uint64_t lb = g_lvl_B[l].load(std::memory_order_relaxed);
+            uint64_t lc = g_lvl_C[l].load(std::memory_order_relaxed);
+            uint64_t ld = g_lvl_D[l].load(std::memory_order_relaxed);
+            uint64_t le = g_lvl_E[l].load(std::memory_order_relaxed);
+            uint64_t lt = la + lb + lc + ld + le;
+            uint64_t sgp_rate = la + lc;
+            double coeff = (l < MAX_LEVEL) ? SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[l]
+                                           : SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL-1];
+            std::cout << "[Level " << l << "] coeff=" << std::fixed << std::setprecision(1) << coeff
+                      << " A=" << la << " B=" << lb << " C=" << lc
+                      << " D=" << ld << " E=" << le << " total=" << lt;
+            if (lt > 0)
+                std::cout << " sgp_avoid=" << std::fixed << std::setprecision(1)
+                          << (100.0 * sgp_rate / lt) << "%";
+            std::cout << std::endl;
+        }
+
+        // ---- Chain-hop stats ----
+        uint64_t hops_total = g_chain_hops.load(std::memory_order_relaxed);
+        uint64_t lookups = g_lookup_count.load(std::memory_order_relaxed);
+        std::cout << "[ChainHop] total_hops=" << hops_total
+                  << " lookups=" << lookups;
+        if (lookups > 0)
+            std::cout << " avg_hops=" << std::fixed << std::setprecision(2)
+                      << (double)hops_total / lookups;
+        std::cout << std::endl;
+
+        // ---- Optimal coefficient computation (integer) ----
+        // Cost model: c* = sqrt(2 * S * (1-p_sgp) * rho / R)
+        // Since gp_covered is int16_t and comparison is strict >,
+        // the effective trigger point for int coefficient c is covered=c+1.
+        // We evaluate TC(c) = A/c + B*c at both floor(c*) and ceil(c*),
+        // then pick the integer with lower total cost.
+        //   A = S*(1-p_sgp)*rho,  B = R/2
+        //   rho = 68 (calibrated: C_full-C_delta=6800ns, C_hop=100ns)
+        if (lookups > 0) {
+            std::cout << "[OptCoeff] ";
+            for (int l = 0; l <= max_active_level; ++l) {
+                uint64_t la = g_lvl_A[l].load(std::memory_order_relaxed);
+                uint64_t lb = g_lvl_B[l].load(std::memory_order_relaxed);
+                uint64_t lc = g_lvl_C[l].load(std::memory_order_relaxed);
+                uint64_t ld = g_lvl_D[l].load(std::memory_order_relaxed);
+                uint64_t le = g_lvl_E[l].load(std::memory_order_relaxed);
+                uint64_t lt = la + lb + lc + ld + le;
+                if (lt == 0) continue;
+                double p_sgp = (double)(la + lc) / lt;
+                double S = (double)lt;              // splits at this level
+                double R = (double)lookups;         // all lookups traverse L0
+                // Only L0 chains matter for hop cost; higher levels don't chain
+                if (l > 0) R = (double)lt * 0.1;   // higher levels: rough proxy
+                double rho = 68.0;                  // (C_full - C_delta) / C_hop
+                double c_star = std::sqrt(2.0 * S * (1.0 - p_sgp) * rho / R);
+                // Evaluate cost at floor and ceil
+                int c_lo = std::max(1, (int)std::floor(c_star));
+                int c_hi = c_lo + 1;
+                double A = S * (1.0 - p_sgp) * rho;
+                double B = R / 2.0;
+                double tc_lo = A / c_lo + B * c_lo;
+                double tc_hi = A / c_hi + B * c_hi;
+                int c_opt = (tc_lo <= tc_hi) ? c_lo : c_hi;
+                std::cout << "L" << l << "=" << c_opt
+                          << "(c*=" << std::fixed << std::setprecision(1) << c_star
+                          << ",TC_" << c_lo << "=" << std::setprecision(0) << tc_lo
+                          << ",TC_" << c_hi << "=" << tc_hi << ") ";
+            }
+            std::cout << std::endl;
+        }
     }
 #endif
 
@@ -776,6 +871,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         parent_inode->sgp_covered[idx_to_next_level]++; 
         //TODO [ckpt] : log SGP update
         SPLITPATH_INC(g_splitPath_A);
+        SPLITPATH_LVL_INC(g_lvl_A, parent_inode->hdr.level);
         write_unlock(parent_inode->version);
         return true;
     }
@@ -791,6 +887,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
                   << " covering " << parent_inode->sgp_covered[pos] << "\n";
 #endif
             SPLITPATH_INC(g_splitPath_C);
+            SPLITPATH_LVL_INC(g_lvl_C, parent_inode->hdr.level);
             write_unlock(parent_inode->version);
             return true;
         }
@@ -822,6 +919,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         ckptLog->batcher().addFull(entry);
 #endif
         SPLITPATH_INC(g_splitPath_B);
+        SPLITPATH_LVL_INC(g_lvl_B, parent_inode->hdr.level);
         write_unlock(parent_inode->version);
         return true;
     }
@@ -839,6 +937,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         }
         ckptLog->batcher().addFull(entry);
         SPLITPATH_INC(g_splitPath_D);
+        SPLITPATH_LVL_INC(g_lvl_D, parent_inode->hdr.level);
         write_unlock(parent_inode->version);
         return true;
     } else {
@@ -848,6 +947,7 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         assert(parent_inode->hdr.last_index == fanout / 2 - 1);
         addToRebalanceQueue(parent_inode);
         SPLITPATH_INC(g_splitPath_E);
+        SPLITPATH_LVL_INC(g_lvl_E, parent_inode->hdr.level);
         write_unlock(parent_inode->version);
         return true;
     }
@@ -923,6 +1023,9 @@ Val_t TandemIndex::lookup(Key_t key)
             return -1;
         }
         int current_vnode_id = start_vnode_id;
+#if ENABLE_SPLITPATH_STATS
+        int hops = 0;
+#endif
         for (;;) {
             struct Snap {
                 Val_t out{};
@@ -954,6 +1057,10 @@ Val_t TandemIndex::lookup(Key_t key)
             });
 
             if(!s.can_move) {
+#if ENABLE_SPLITPATH_STATS
+                g_chain_hops.fetch_add(hops, std::memory_order_relaxed);
+                g_lookup_count.fetch_add(1, std::memory_order_relaxed);
+#endif
                 if(s.out != (Val_t)-1) return s.out; // 早期保守
                 // 闭包未执行 vnode 查找，这里补做
                 Vnode* vnode = valueList->pmemVnodePool->at(current_vnode_id);
@@ -971,6 +1078,9 @@ Val_t TandemIndex::lookup(Key_t key)
             BloomFilter* next_bloom = valueList->getBloom(s.next_id);
             bloom = next_bloom;
             current_vnode_id = s.next_id;
+#if ENABLE_SPLITPATH_STATS
+            hops++;
+#endif
         } 
     }
 }
@@ -1681,7 +1791,7 @@ void TandemIndex::remove(int key)
                 continue;
 
             // predict stability violation
-            double coeff = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[inode->hdr.level];
+            int coeff = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[inode->hdr.level];
             double future_nodes = inode->gp_covered[i] + pred;
 
             if (future_nodes <= coeff)
@@ -1807,8 +1917,7 @@ void TandemIndex::maybeActivateHotRegion() {
                     S, E, FUTURE_EPOCHS, &pred))
                 continue;
 
-            double coeff =
-                SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[inode->hdr.level];
+            int coeff = SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[inode->hdr.level];
             double future_nodes = inode->gp_covered[i] + pred;
 
             if (future_nodes <= coeff)
@@ -1824,7 +1933,7 @@ void TandemIndex::maybeActivateHotRegion() {
                 continue;
 
             auto anchors =
-                tl::InsertTracker::placeAnchorsEquidistant(lo, hi, m);
+                tl::InsertTracker::placeAnchorsInsideInterval(B, C, lo, hi, m);
 
             for (uint64_t k : anchors) {
                 if ((int)inode_anchors.size() >= MAX_ANCHORS_PER_INODE)
