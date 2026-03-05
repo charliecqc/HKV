@@ -182,9 +182,11 @@ bool ValueList::append(Vnode *curNode, Vnode *nextNode)
 {
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next = nextNode->getId();
+    // Sfence Batching: flushNoDrain (CLWB only) + single drain
     unsigned long hdr_flush = PmemManager::align_uint_to_cacheline(sizeof(vnodeHeader));
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(&nextNode->hdr), hdr_flush);
-    PmemManager::flushToNVM(0, reinterpret_cast<char *>(&curNode->hdr), hdr_flush);
+    PmemManager::flushNoDrain(0, reinterpret_cast<char *>(&nextNode->hdr), hdr_flush);
+    PmemManager::flushNoDrain(0, reinterpret_cast<char *>(&curNode->hdr), hdr_flush);
+    PmemManager::drain(0); // single sfence
     return true;
 }
 
@@ -274,41 +276,39 @@ bool ValueList::split(Vnode* &curNode, Vnode* &nextNode)
     nextNode->hdr.bitmap = 0;
     for (uint64_t mm = move_mask; mm; mm &= (mm - 1)) {
         int i = __builtin_ctzll(mm);
-        nextNode->records[i] = curNode->records[i];
+        // NT-Store: bypass cache, stream record directly to PMem WPQ
+        PmemManager::memcpyNTNoDrain(&nextNode->records[i],
+                                      &curNode->records[i],
+                                      sizeof(vnode_entry));
         nextNode->hdr.bitmap |= (1ull << i);
     }
     curNode->hdr.bitmap &= ~move_mask; // 仅无效化被移除的 bit
     srcBloom->setMinKey(left_min_key);
     dstBloom->setMinKey(right_min_key);
 
-    // 重建 Bloom（简单起见全量重建，也可按位增量更新）
-    {
-        srcBloom->clear();
-        for (uint64_t bm = curNode->hdr.bitmap; bm; bm &= (bm - 1)) {
-            int i = __builtin_ctzll(bm);
-            srcBloom->add(curNode->records[i].key, i);
-        }
+    // Bloom Filter 增量状态转移：直接按位做 Fingerprint 迁移（第三项优化）
+    if (ENABLE_BLOOM_FINGERPRINT) {
         dstBloom->clear();
-        for (uint64_t bm = nextNode->hdr.bitmap; bm; bm &= (bm - 1)) {
-            int i = __builtin_ctzll(bm);
-            dstBloom->add(nextNode->records[i].key, i);
+        for (uint64_t mm = move_mask; mm; mm &= (mm - 1)) {
+            int i = __builtin_ctzll(mm);
+            dstBloom->fingerprints[i] = srcBloom->fingerprints[i];
+            srcBloom->fingerprints[i] = 0; // 保持原结构干净
         }
     }
 
     // 链接
     nextNode->hdr.next = curNode->hdr.next;
     curNode->hdr.next  = nextNode->getId();
-    
 
-     // 仅持久化被改动的区域
-    const unsigned long rec_flush = PmemManager::align_uint_to_cacheline(sizeof(vnode_entry));
-    for (uint64_t mm = move_mask; mm; mm &= (mm - 1)) {
-        int i = __builtin_ctzll(mm);
-        PmemManager::flushToNVM(0, reinterpret_cast<char*>(&nextNode->records[i]), rec_flush);
-    }
+    // 集中持久化 (Sfence Batching — 第一项优化)
+    // NT-Store records 经 _mm_stream_si128 直接流入 iMC WPQ (ADR 保护域),
+    // sfence 保证全局可见性即完成持久化，无需再对 records 做 CLWB。
+    // 仅需 flushNoDrain headers (bitmap/next 是普通 store) + 单次 drain。
+    _mm_sfence();  // NT-Store records 到达持久化域 — 足够
     const unsigned long hdr_flush = PmemManager::align_uint_to_cacheline(sizeof(vnodeHeader));
-    PmemManager::flushToNVM(0, reinterpret_cast<char*>(&nextNode->hdr), hdr_flush);
-    PmemManager::flushToNVM(0, reinterpret_cast<char*>(&curNode->hdr),  hdr_flush);
+    PmemManager::flushNoDrain(0, reinterpret_cast<char*>(&nextNode->hdr), hdr_flush);
+    PmemManager::flushNoDrain(0, reinterpret_cast<char*>(&curNode->hdr),  hdr_flush);
+    PmemManager::drain(0); // 唯一一次 sfence，覆盖 headers
 
     dstBloom->setNextId(nextNode->hdr.next);
     srcBloom->setNextId(nextNode->getId());

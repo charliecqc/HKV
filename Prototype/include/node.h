@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include "common.h"
+#include "pmemManager.h"
 #include <bitset>
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -1038,6 +1039,13 @@ public:
     records[pos].value = value;
     hdr.setBit(pos);
     if (bloom && ENABLE_BLOOM_FINGERPRINT) bloom->add(key, pos);
+
+    // Persist record + header (Sfence Batching: 2× CLWB + 1× sfence)
+    const unsigned long rec_flush = PmemManager::align_uint_to_cacheline(sizeof(vnode_entry));
+    const unsigned long hdr_flush = PmemManager::align_uint_to_cacheline(sizeof(vnodeHeader));
+    PmemManager::flushNoDrain(0, reinterpret_cast<char*>(&records[pos]), rec_flush);
+    PmemManager::flushNoDrain(0, reinterpret_cast<char*>(&hdr), hdr_flush);
+    PmemManager::drain(0);
     return true;
 }
 

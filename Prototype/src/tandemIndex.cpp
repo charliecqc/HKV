@@ -674,8 +674,9 @@ bool TandemIndex::insert(Key_t key, Val_t value)
         Vnode* new_vnode = nullptr; //new_vnode and target_vnode share the contents of old target_vnode before split
         BloomFilter* new_bloom = nullptr;
         if (!handleNodeFullAndSplit(target_vnode, target_vnode_bloom, key, value, new_vnode, new_bloom)) {
-            std::cerr << "Failed to handle node full and split." << std::endl;
-            return false;
+            // A concurrent modification/split happened, or split failed!
+            // Retry the whole insert from the root.
+            continue;
         }
 
         //update parent inode after split
@@ -813,9 +814,13 @@ bool TandemIndex::insertInVnodeChain(Vnode* &start_vnode, BloomFilter* &start_bl
 bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_bloom,  
                                          Key_t key, Val_t value, Vnode* &right_vnode, BloomFilter* &right_bloom)
 {
-    write_lock(left_bloom->version);
-    valueList->split(left_vnode, right_vnode);
+    // NO write_lock here! It was moved inside valueList->split to minimize critical section.
+    if (!valueList->split(left_vnode, right_vnode)) {
+        return false; // Another thread modified/split it, let upper caller retry
+    }
+
     if(right_vnode == nullptr) { // this is the case that all the keys in left vnode are the same. we don't split but invalid all the other keys except one key.
+        write_lock(left_bloom->version);
         bool ok = left_vnode->insert(key, value, left_bloom);
         write_unlock(left_bloom->version);
         return ok;
@@ -836,17 +841,16 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
 
     bool ok = false;
     if (key < next_right_min) {
+        write_lock(left_bloom->version);
         ok = left_vnode->insert(key, value, left_bloom);
         write_unlock(left_bloom->version);
     } else {
         // Insert into RIGHT (new) vnode
         write_lock(right_bloom->version);
-        write_unlock(left_bloom->version);
         ok = right_vnode->insert(key, value, right_bloom);
         write_unlock(right_bloom->version);
     }
-    if (!ok) return false;
-    return true;
+    return ok;
 }
 
 bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode,
@@ -1312,8 +1316,8 @@ bool TandemIndex::update(Key_t key, Val_t value)
         Vnode* new_vnode = nullptr; //new_vnode and target_vnode share the contents of old target_vnode before split
         BloomFilter* new_bloom = nullptr;
         if (!handleNodeFullAndSplit(target_vnode, target_vnode_bloom, key, value, new_vnode, new_bloom)) {
-            std::cerr << "Failed to handle node full and split." << std::endl;
-            return false;
+            // 已由其他线程分裂或修改，直接重试
+            continue;
         }
         if(new_vnode == nullptr) {// no split happened, all keys are the same.
             return true;

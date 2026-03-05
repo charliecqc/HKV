@@ -2,6 +2,8 @@
 #include <string>
 #include <iostream>
 #include <unistd.h>
+#include <immintrin.h>   // AVX2 NT-Store intrinsics
+#include <cstring>
 #include "common.h"
 #pragma once
 using namespace std;
@@ -94,6 +96,34 @@ public:
         static inline void memcpyToDRAM(int poolId, char *dest, char *src, size_t size) {
             [[maybe_unused]]PMEMobjpool *pop = (PMEMobjpool *)pmemPool[poolId];
             memcpy(dest, src, size);
+        }
+
+        // Non-temporal memcpy: bypass CPU cache, stream directly to memory controller WPQ.
+        // Uses SSE2 _mm_stream_si128 (16-byte granularity) — matches vnode_entry size exactly.
+        // Requires dest 16-byte aligned; does NOT issue sfence/drain.
+        static inline void memcpyNTNoDrain(void *dest, const void *src, size_t len) {
+            auto d = reinterpret_cast<char *>(dest);
+            auto s = reinterpret_cast<const char *>(src);
+
+            // Fast path: 16-byte aligned destination and length >= 16
+            if (len >= 16 &&
+                (reinterpret_cast<uintptr_t>(d) & 15) == 0) {
+                size_t chunks = len / 16;
+                auto *dst128 = reinterpret_cast<__m128i *>(d);
+                auto *src128 = reinterpret_cast<const __m128i *>(s);
+                for (size_t i = 0; i < chunks; ++i) {
+                    __m128i v = _mm_loadu_si128(src128 + i);
+                    _mm_stream_si128(dst128 + i, v);
+                }
+                size_t done = chunks * 16;
+                // Tail bytes (< 16)
+                if (done < len) {
+                    std::memcpy(d + done, s + done, len - done);
+                }
+            } else {
+                // Fallback: unaligned or tiny copy
+                std::memcpy(dest, src, len);
+            }
         }
 
         static inline unsigned char *align_ptr_to_cacheline(void *p)
