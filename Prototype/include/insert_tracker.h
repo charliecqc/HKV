@@ -43,13 +43,20 @@ class InsertTracker {
   InsertTracker& operator=(InsertTracker&&) = delete;
 
   // Tracks an insert. Should be called for each individual insert.
-  void Add(const uint64_t key) {
+  void Add(const uint64_t key) { AddWeighted(key, 1); }
+
+  // Tracks an insert with a frequency weight > 1 (for downsampled paths).
+  // weight = sampling stride: a key sampled 1-in-N times should be submitted
+  // with weight=N so the epoch counter reflects the true insert volume.
+  // The reservoir sample receives the key once (correct for distribution shape);
+  // only num_inserts_curr_epoch_ is multiplied by weight.
+  void AddWeighted(const uint64_t key, const size_t weight) {
     const std::lock_guard<std::mutex> lock(mutex_);
 
     ++num_inserts_;
 
     if (reservoir_sample_.size() < sample_size_) {
-      // Fill up the sample.
+      // Fill up the sample (unweighted — we want key diversity here).
       reservoir_sample_.push_back(key);
 
       if (reservoir_sample_.size() == sample_size_) {
@@ -60,12 +67,11 @@ class InsertTracker {
     }
 
     // Reservoir sample is full and boundaries are set.
-
-    ++num_inserts_curr_epoch_;
+    num_inserts_curr_epoch_ += weight;
     AddKeyToSample(key);
     AddKeyToCurrEpoch(key);
 
-    if (num_inserts_curr_epoch_ == num_inserts_per_epoch_) {
+    if (num_inserts_curr_epoch_ >= num_inserts_per_epoch_) {
       // "Freeze" current epoch and start a new epoch.
       partition_counters_last_epoch_.swap(partition_counters_curr_epoch_);
       partition_boundaries_last_epoch_.swap(partition_boundaries_curr_epoch_);

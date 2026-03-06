@@ -727,6 +727,51 @@ public:
         
     }
 
+    // Evict one stale (invisible, never-linked) SGP to make room, then
+    // activate a new SGP at targetKey.  Returns false if no stale SGP exists
+    // or no room could be freed.
+    bool evictStaleAndActivateSGP(Key_t targetKey)
+    {
+        if (hdr.last_sgp < 0) return false;
+
+        // Find first invisible slot (never linked → value is still sentinel)
+        uint32_t vis = sgpVisible.load(std::memory_order_relaxed);
+        int victim = -1;
+        for (int i = 0; i <= hdr.last_sgp; ++i) {
+            if (!((vis >> i) & 1u)) {  // invisible = never linked
+                victim = i;
+                break;  // evict oldest (lowest index → inserted earliest, usually)
+            }
+        }
+        if (victim < 0) return false;  // all SGPs are linked (visible)
+
+        // Remove victim slot by shifting arrays down
+        int cnt = hdr.last_sgp - victim;
+        if (cnt > 0) {
+            memmove(&sgp_keys[victim],    &sgp_keys[victim + 1],    sizeof(Key_t)   * cnt);
+            memmove(&sgp_values[victim],  &sgp_values[victim + 1],  sizeof(Val_t)   * cnt);
+            memmove(&sgp_covered[victim], &sgp_covered[victim + 1], sizeof(int16_t) * cnt);
+
+            // Shift visibility bits: remove bit at victim position
+            uint32_t below = (victim > 0) ? ((1u << victim) - 1u) : 0u;
+            uint32_t above = vis & ~((1u << (victim + 1)) - 1u);
+            uint32_t new_vis = (vis & below) | (above >> 1);
+            sgpVisible.store(new_vis, std::memory_order_relaxed);
+        } else {
+            // victim was the last slot; just clear its visibility bit
+            sgpVisible.fetch_and(~(1u << victim), std::memory_order_relaxed);
+        }
+
+        // Clear the now-freed last slot
+        sgp_keys[hdr.last_sgp]    = std::numeric_limits<Key_t>::max();
+        sgp_values[hdr.last_sgp]  = std::numeric_limits<Val_t>::max();
+        sgp_covered[hdr.last_sgp] = 0;
+        hdr.last_sgp--;
+
+        // Now there is room; activate the new SGP
+        return activateSGP(targetKey);
+    }
+
     bool findLinkingSGPPos(Key_t key, int& pos)
     {
         // boundary cases

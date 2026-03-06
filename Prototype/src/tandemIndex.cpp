@@ -1,3 +1,4 @@
+#include <cmath>
 #include <queue>
 #include <vector>
 #include "tandemIndex.h"
@@ -164,7 +165,13 @@ public:
     }
 
     void Submit(uint64_t key) {
-        queue_.enqueue(key);  // Non-blocking enqueue
+        queue_.enqueue({key, 1});  // split key: weight=1
+    }
+
+    // Submit a downsampled insert key. stride = 1/sampling_rate so the
+    // tracker's epoch counter is restored to true insert volume.
+    void SubmitInsert(uint64_t key, size_t stride) {
+        queue_.enqueue({key, stride});
     }
 
     void Stop() {
@@ -176,18 +183,18 @@ public:
 
 private:
     void WorkerLoop() {
-        uint64_t key;
+        std::pair<uint64_t, size_t> item;
         while (!stop_flag_) {
-            if (queue_.try_dequeue(key)) {
-                if (tracker_) tracker_->Add(key);  // use -> for shared_ptr
+            if (queue_.try_dequeue(item)) {
+                if (tracker_) tracker_->AddWeighted(item.first, item.second);
             } else {
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
             }
         }
     }
 
-    std::shared_ptr<tl::InsertTracker> tracker_;           // shared_ptr to tracker
-    moodycamel::ConcurrentQueue<uint64_t> queue_;          // queue member added
+    std::shared_ptr<tl::InsertTracker> tracker_;
+    moodycamel::ConcurrentQueue<std::pair<uint64_t, size_t>> queue_;
     std::vector<std::thread> workers_;
     std::atomic<bool> stop_flag_;
 };
@@ -257,9 +264,15 @@ std::unique_ptr<AsyncSpeculator> speculator_;
 
 struct InsertForecastingOptions {
     bool use_insert_forecasting = true;
-    size_t num_inserts_per_epoch = 1000; // The number of inserts in each InsertTracker epoch; the total elements of the equi-depth histogram used for insert forecasting.
-    size_t num_partitions = 100; // The number of bins in the insert forecasitng histogram. TODO: make adaptive with increased node numbers
-    size_t sample_size = 100; // The size of the reservoir sample based on which the partition boundaries are set at the beginning of each epoch.
+    // With 1/256 insert sampling (weight=256), each sample adds 256 to the
+    // epoch counter.  We need enough real samples per epoch for a meaningful
+    // histogram: 100000/256 ≈ 390 real keys per epoch → ~4 per partition.
+    // At 2.4M inserts/s this gives ~24 epochs/s (≈42 ms each).
+    size_t num_inserts_per_epoch = 100000;
+    size_t num_partitions = 100; // equi-depth bins (4 real keys/bin avg under Zipf is workable)
+    // Reservoir must be >= 10× num_partitions for quality boundaries.
+    // 1000 reservoir keys = 1000 actual samples = 256K real inserts ≈ 107 ms warm-up.
+    size_t sample_size = 1000;
     size_t random_seed = 42; // The random seed to be used by the insert tracker.
     double overestimation_factor = 1.5; // Estimated ratio of (number of records in reorg range) / (number of records that fit in base pages in reorg range).
     size_t num_future_epochs = 1; // During reorganization, the system will leave sufficient space to accommodate forecasted inserts for the next `num_future_epochs` epochs.
@@ -601,13 +614,15 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 #if ENABLE_PMEM_STATS
     std::shared_lock<std::shared_mutex> lk(pmemRecoveryArray->stats_mtx);
 #endif
-#if 0
-    tracker_->Add(key); //TODO: sampling out of the critical section
-    if (tracker_->LastEpochHistogramValid()) {
-        SpeculationToken tok(speculation_running_); 
-        if (tok.is_leader) {
-            maybeActivateHotRegion();
-        }
+#if ENABLE_SGP
+    // Sparse insert-key sampling (1/256 per thread, zero shared-state overhead).
+    // No null check: sampler_ is always non-null when ENABLE_SGP=1.
+    // Hot path cost = 1 TLS increment + 1 not-taken branch (2 instructions).
+    // Weight=256 restores true insert frequency in the tracker's epoch counter.
+    {
+        thread_local uint8_t _ins_ctr = 0;
+        if ((++_ins_ctr & 0xFF) == 0)   // every 256 inserts per thread
+            sampler_->SubmitInsert(key, 256);
     }
 #endif
     for (;;) {
@@ -833,10 +848,11 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
     });
 
 #if ENABLE_SGP
-    if (sampler_) {sampler_->Submit(next_right_min);} //sample split
-    if (tracker_ && tracker_->LastEpochHistogramValid()) { //TODO: currently one thread speculating per round
-        if (speculator_) speculator_->TrySubmit();   // TODO: optimize: avoid double atomic ops
-    }
+    // Split key (weight=1): directly reflects actual split positions.
+    // Complements insert-key samples which reflect insert frequency.
+    sampler_->Submit(next_right_min);
+    if (tracker_->LastEpochHistogramValid())
+        speculator_->TrySubmit();
 #endif
 
     bool ok = false;
@@ -928,17 +944,6 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
             parent_inode->gp_values[idx_to_next_level],
             parent_inode->gp_covered[idx_to_next_level]
         );
-#if 0
-        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
-            parent_inode->hdr.last_index, parent_inode->hdr.next,
-            parent_inode->hdr.level, parent_inode->hdr.parent_id);
-        for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
-            entry->setKeyVal(i, parent_inode->gp_keys[i],
-                                parent_inode->gp_values[i],
-                                parent_inode->gp_covered[i]);
-        }
-        ckptLog->batcher().addFull(entry);
-#endif
         SPLITPATH_INC(g_splitPath_B);
         SPLITPATH_LVL_INC(g_lvl_B, parent_inode->hdr.level);
         write_unlock(parent_inode->version);
@@ -947,6 +952,20 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
 
     // Path D: GP unbalanced, activate new GP with full log
     int pos = -1;
+#if ENABLE_SGP
+    // Last-chance Path C: try linking an inactive SGP right before
+    // taking the expensive full-log GP activation.  Splits in the B-path
+    // may have deposited SGPs that are now linkable.
+    {
+        int c_pos = -1;
+        if (parent_inode->linkInactiveSGP(targetKey, targetVnode->getId(), c_pos, 1)) {
+            SPLITPATH_INC(g_splitPath_C);
+            SPLITPATH_LVL_INC(g_lvl_C, parent_inode->hdr.level);
+            write_unlock(parent_inode->version);
+            return true;
+        }
+    }
+#endif
     if (parent_inode->activateGPForVnode(targetKey, targetVnode->getId(), pos, 1)) {
         dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
             parent_inode->hdr.last_index, parent_inode->hdr.next,
@@ -957,6 +976,13 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
                                 parent_inode->gp_covered[i]);
         }
         ckptLog->batcher().addFull(entry);
+#if ENABLE_SGP
+        // Post-D SGP placement: after a full-log GP activation, place an SGP
+        // so the next split in this range can link (Path C) without a full log.
+        if (!parent_inode->isSGPFull()) {
+            parent_inode->activateSGP(targetKey);
+        }
+#endif
         SPLITPATH_INC(g_splitPath_D);
         SPLITPATH_LVL_INC(g_lvl_D, parent_inode->hdr.level);
         write_unlock(parent_inode->version);
