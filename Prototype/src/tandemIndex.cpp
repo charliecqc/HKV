@@ -901,6 +901,23 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     // Path B: GP not yet unbalanced → covered++ with delta+full log
     if (!parent_inode->checkForActivateNextGP(idx_to_next_level)) {
         parent_inode->gp_covered[idx_to_next_level]++;
+
+#if ENABLE_SGP
+        // Inline speculative SGP: once gp_covered reaches coeff/2, proactively
+        // activate an SGP so it can be linked (Path C) on future splits without
+        // a full log write.
+        {
+            int lvl = parent_inode->hdr.level;
+            int coeff = (lvl < MAX_LEVEL)
+                            ? SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[lvl]
+                            : SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+            if (parent_inode->gp_covered[idx_to_next_level] >= std::max(2, coeff / 2) &&
+                !parent_inode->isSGPFull()) {
+                parent_inode->activateSGP(targetKey);
+            }
+        }
+#endif
+
         ckptLog->batcher().addDeltaSlot(
             parent_inode->getId(),
             parent_inode->hdr.last_index,
