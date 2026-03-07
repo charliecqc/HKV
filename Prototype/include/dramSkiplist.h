@@ -32,8 +32,7 @@ struct InodeSnapShort {
     Key_t    gp_key{0};
     int      gp_value{-1};
     Key_t    sgp_key{0};
-    int      sgp_value{-1};
-    
+    int      sgp_value{-1};    int16_t  sgp_idx{-1};       // SGP position in inode's SGP array (-1 if no SGP)    
     // 命中槽位区间（用于验证 key 是否仍命中该槽）
     Key_t    lb_key{0};
     Key_t    ub_key{std::numeric_limits<Key_t>::max()};

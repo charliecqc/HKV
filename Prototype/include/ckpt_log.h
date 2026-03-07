@@ -56,6 +56,10 @@ public:
 #define ENABLE_DELTA_LOG 1
 #endif
 
+#ifndef ENABLE_IMMEDIATE_FLUSH
+#define ENABLE_IMMEDIATE_FLUSH 0
+#endif
+
 #ifndef WAL_DELTA_STRUCTS_DEFINED
 #define WAL_DELTA_STRUCTS_DEFINED
 enum WalLogType : uint16_t {
@@ -223,8 +227,9 @@ public:
 
     // 游标
     AlignedAtomicSizeT a_consumed_start; // use: a_consumed_start.v
-    AlignedAtomicSizeT a_produced_end;   // use: a_produced_end.v
-    AlignedAtomicSizeT a_durable_end;    // use: a_durable_end.v
+    AlignedAtomicSizeT a_alloc_end;      // 已分配但可能未写完的边界
+    AlignedAtomicSizeT a_produced_end;   // 已写完并可 CLWB 的边界
+    AlignedAtomicSizeT a_durable_end;    // 已 CLWB+SFENCE 的边界
 
     std::atomic_flag flush_busy = ATOMIC_FLAG_INIT;
 
@@ -314,8 +319,8 @@ public:
     size_t suggestReclaimBatchBytes() const;
 
 
-    unsigned char* reserveChunk(size_t total_bytes_aligned);
-    void commitChunk(size_t total_bytes_aligned);
+    unsigned char* reserveChunk(size_t total_bytes_aligned, size_t& out_alloc_start);
+    void commitChunk(size_t alloc_start, size_t total_bytes_aligned);
     void enqBatch(const std::vector<dram_log_entry_t*>& entries);
     struct DeltaPack {
         WalDeltaHeader                 hdr;
@@ -359,9 +364,9 @@ public:
         using Clock = std::chrono::steady_clock;
         bool detached_{false}; 
 
-        static constexpr size_t  kMaxEntries   = 256;         //threshold of number of entries
-        static constexpr size_t  kMaxBytes     = 512 * 1024; //threshold of bytes
-        static constexpr int64_t kMaxDelayNs   = 400000;     //threshold of delay in nanoseconds
+        static constexpr size_t  kMaxEntries   = 4096;         //threshold of number of entries
+        static constexpr size_t  kMaxBytes     = 4 * 1024 * 1024; //threshold of bytes
+        static constexpr int64_t kMaxDelayNs   = 2000000;     //threshold of delay in nanoseconds
 
         enum class Kind : uint8_t { Full, Delta };
 

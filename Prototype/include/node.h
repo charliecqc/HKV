@@ -228,7 +228,9 @@ public:
                 std::cout << "Invalid position for inserting GP: " << pos << std::endl;
                 return false;
             }
-            assert(pos != 0);
+            // pos==0 means targetKey < gp_keys[0]; inserting would change
+            // the anchor key and break skiplist ordering → fall to rebalance.
+            if (pos == 0) return false;
             int old_covered_nodes = gp_covered[pos-1];
             if (old_covered_nodes < 1 || old_covered_nodes - relative_pos - 1 < 1) {
                 // Edge case: not enough covered children to split
@@ -255,7 +257,10 @@ public:
                 std::cout << "Invalid position for inserting GP: " << pos << std::endl;
                 return false;
             }
-            assert(pos != 0);
+            // pos==0 means targetKey < gp_keys[0].  Inserting here would change
+            // the inode's anchor key and break skiplist ordering.  Return false
+            // so the caller falls through to Path E (inode rebalance).
+            if (pos == 0) return false;
             this->insertAtPos(targetKey, vnode_id, pos, initial_covered_nodes);
             return true;
         }
@@ -745,6 +750,50 @@ public:
         }
         if (victim < 0) return false;  // all SGPs are linked (visible)
 
+        return evictVictimAndActivateSGP(victim, vis, targetKey);
+    }
+
+    // Evict a "spent" SGP — one that is visible but whose covered count exceeds
+    // the stability coefficient (unbalanced).  These SGPs have served their
+    // purpose and are now just occupying precious slots.
+    // Falls back to evicting invisible (stale) SGPs first.
+    bool evictSpentAndActivateSGP(Key_t targetKey)
+    {
+        if (hdr.last_sgp < 0) return false;
+
+        uint32_t vis = sgpVisible.load(std::memory_order_relaxed);
+        int victim = -1;
+
+        // Priority 1: invisible (never linked) — cheapest to evict
+        for (int i = 0; i <= hdr.last_sgp; ++i) {
+            if (!((vis >> i) & 1u)) {
+                victim = i;
+                break;
+            }
+        }
+
+        // Priority 2: visible but unbalanced (spent) — no longer useful
+        if (victim < 0) {
+            int coeff = (hdr.level < MAX_LEVEL)
+                            ? SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[hdr.level]
+                            : SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
+            for (int i = 0; i <= hdr.last_sgp; ++i) {
+                if (sgp_covered[i] > coeff) {
+                    victim = i;
+                    break;
+                }
+            }
+        }
+
+        if (victim < 0) return false;
+
+        return evictVictimAndActivateSGP(victim, vis, targetKey);
+    }
+
+private:
+    // Shared eviction logic: remove slot at `victim`, then activateSGP.
+    bool evictVictimAndActivateSGP(int victim, uint32_t vis, Key_t targetKey)
+    {
         // Remove victim slot by shifting arrays down
         int cnt = hdr.last_sgp - victim;
         if (cnt > 0) {
@@ -771,6 +820,8 @@ public:
         // Now there is room; activate the new SGP
         return activateSGP(targetKey);
     }
+
+public:
 
     bool findLinkingSGPPos(Key_t key, int& pos)
     {

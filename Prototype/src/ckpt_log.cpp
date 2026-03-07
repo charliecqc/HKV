@@ -144,6 +144,7 @@ CkptLog::CkptLog(size_t logSize, std::string storage_path)
       ckptlog(new CkptLogNVM(logSize, storage_path)) {
 #endif
     a_consumed_start.v.store(ckptlog->start, std::memory_order_relaxed);
+    a_alloc_end.v.store(ckptlog->end_persistent, std::memory_order_relaxed);
     a_durable_end.v.store(ckptlog->start_persistent, std::memory_order_relaxed);
     a_produced_end.v.store(ckptlog->end_persistent, std::memory_order_relaxed);
     current_inode_idx = 0;
@@ -168,26 +169,22 @@ void CkptLog::enq(dram_log_entry_t *entry)
     const size_t used     = tag_sz + hdr_sz + body_sz;
     const size_t entry_sz = PmemManager::align_uint_to_cacheline(static_cast<unsigned int>(used));
 
-    log_entry_hdr *slot = nullptr;
+    size_t my_start;
+    unsigned char *base;
     {
         std::unique_lock<std::shared_mutex> lk(mtx);
-        slot = nvm_log_enq(entry_sz);
+        log_entry_hdr *slot = nvm_log_enq(entry_sz);
         if (!slot) {
             throw std::runtime_error("ckpt log full");
         }
+        my_start = a_alloc_end.v.fetch_add(entry_sz, std::memory_order_acq_rel);
+        base = reinterpret_cast<unsigned char *>(slot);
     }
 
-    // 起始地址（可按字节写入）
-    auto *base = reinterpret_cast<unsigned char *>(slot);
-
-    // 1) 写类型标记：FULL
+    // 写数据（锁外，每个 writer 写自己的独占 slot）
     *reinterpret_cast<uint16_t *>(base) = WAL_LOG_TYPE_FULL;
-
-    // 2) 写 header（位于标记之后）
     auto *hdr = reinterpret_cast<log_entry_hdr *>(base + tag_sz);
-    initLogEntryHeaderFromDramLogEntry(hdr, entry); // 复用现有函数初始化头部（包含 count 等）
-
-    // 3) 写 payload（nvm_log_entry_t[count]）
+    initLogEntryHeaderFromDramLogEntry(hdr, entry);
     auto *out = reinterpret_cast<nvm_log_entry_t *>(reinterpret_cast<unsigned char *>(hdr) + sizeof(log_entry_hdr));
     for (int i = 0; i < entry->hdr.count; ++i) {
         out[i].gp_idx        = entry->gp_idx[i];
@@ -195,14 +192,12 @@ void CkptLog::enq(dram_log_entry_t *entry)
         out[i].value         = entry->value[i];
         out[i].covered_nodes = entry->covered_nodes[i];
     }
-
-    // 4) 尾部对齐填充
     if (entry_sz > used) {
         std::memset(base + used, 0, entry_sz - used);
     }
-    
-    // 5) 推进生产游标
-    a_produced_end.v.fetch_add(entry_sz, std::memory_order_release);
+
+    // Ordered commit: 等前驱写完再推进 a_produced_end
+    commitChunk(my_start, entry_sz);
 }
 
 #ifndef ENABLE_DELTA_LOG
@@ -234,13 +229,16 @@ bool CkptLog::appendDeltaLog(int32_t inode_id,
     size_t payload_bytes = sizeof(WalDeltaHeader) + entry_count * sizeof(WalDeltaEntry);
     size_t entry_size = PmemManager::align_uint_to_cacheline((unsigned)payload_bytes);
 
-    log_entry_hdr *slot = nullptr;
+    size_t my_start;
+    log_entry_hdr *slot;
     {
         std::unique_lock<std::shared_mutex> lk(mtx);
         slot = nvm_log_enq(entry_size);
         if (!slot) return false;
+        my_start = a_alloc_end.v.fetch_add(entry_size, std::memory_order_acq_rel);
     }
 
+    // 写数据（锁外）
     auto *hdr = reinterpret_cast<WalDeltaHeader *>(slot);
     hdr->type       = WAL_LOG_TYPE_DELTA;
     hdr->count      = (uint16_t)entry_count;
@@ -256,9 +254,10 @@ bool CkptLog::appendDeltaLog(int32_t inode_id,
     if (entry_size > used) {
         std::memset(reinterpret_cast<char *>(hdr) + used, 0, entry_size - used);
     }
-    
-    a_produced_end.v.fetch_add(entry_size, std::memory_order_release);
-    
+
+    // Ordered commit
+    commitChunk(my_start, entry_size);
+
     return true;
 }
 
@@ -400,6 +399,7 @@ void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
         ckptlog->start_persistent = ckptlog->end_persistent = 0;
 
         a_consumed_start.v.store(0, std::memory_order_relaxed);
+        a_alloc_end.v.store(0, std::memory_order_relaxed);
         a_durable_end.v.store(0, std::memory_order_relaxed);
         a_produced_end.v.store(0, std::memory_order_relaxed);
 
@@ -557,11 +557,13 @@ bool CkptLog::flushOnce()
 
     size_t len = produced - durable;
 
+#if !ENABLE_IMMEDIATE_FLUSH
     // 阈值门控（可调）：不足 PERSISTENT_THRESHOLD 可暂缓
     if (len < PERSISTENT_THRESHOLD) {
         flush_busy.clear(std::memory_order_release);
         return false;
     }
+#endif
 
     // 处理环形两段 flush
     size_t off = nvm_log_index(durable);
@@ -657,19 +659,24 @@ size_t CkptLog::suggestReclaimBatchBytes() const
     return a > b ? a : b;
 }
 
-unsigned char* CkptLog::reserveChunk(size_t total_bytes_aligned) {
+unsigned char* CkptLog::reserveChunk(size_t total_bytes_aligned, size_t& out_alloc_start) {
     if (!total_bytes_aligned) return nullptr;
     log_entry_hdr* slot = nullptr;
     {
         std::unique_lock<std::shared_mutex> lk(mtx);
         slot = nvm_log_enq(total_bytes_aligned);
-        if (!slot) return nullptr;
+        if (!slot) { out_alloc_start = 0; return nullptr; }
+        out_alloc_start = a_alloc_end.v.fetch_add(total_bytes_aligned, std::memory_order_acq_rel);
     }
     return reinterpret_cast<unsigned char*>(slot);
 }
 
-void CkptLog::commitChunk(size_t total_bytes_aligned) {
-    a_produced_end.v.fetch_add(total_bytes_aligned, std::memory_order_release);
+void CkptLog::commitChunk(size_t alloc_start, size_t total_bytes_aligned) {
+    // Ordered commit: spin until all preceding writers have committed
+    while (a_produced_end.v.load(std::memory_order_acquire) != alloc_start) {
+        _mm_pause();
+    }
+    a_produced_end.v.store(alloc_start + total_bytes_aligned, std::memory_order_release);
 }
 
 void CkptLog::enqBatch(const std::vector<dram_log_entry_t*>& entries) {
@@ -683,25 +690,24 @@ void CkptLog::enqBatch(const std::vector<dram_log_entry_t*>& entries) {
         sz[i] = e; total += e;
     }
 
-    unsigned char* base = reserveChunk(total);
+    size_t my_start;
+    unsigned char* base = reserveChunk(total, my_start);
     if (!base) {
         // 回退逐条
         for (auto* e : entries) enq(e);
         return;
     }
 
+    // 写数据（锁外，并发安全 —— 每个 writer 写自己的独占区域）
     size_t off = 0;
     for (size_t i = 0; i < entries.size(); ++i) {
         unsigned char* cur = base + off;
 
-        // tag
         *reinterpret_cast<uint16_t*>(cur) = WAL_LOG_TYPE_FULL;
 
-        // header
         auto* hdr = reinterpret_cast<log_entry_hdr*>(cur + sizeof(uint16_t));
         initLogEntryHeaderFromDramLogEntry(hdr, entries[i]);
 
-        // payload
         auto* out = reinterpret_cast<nvm_log_entry_t*>(
             reinterpret_cast<unsigned char*>(hdr) + sizeof(log_entry_hdr));
         for (int k = 0; k < entries[i]->hdr.count; ++k) {
@@ -711,7 +717,6 @@ void CkptLog::enqBatch(const std::vector<dram_log_entry_t*>& entries) {
             out[k].covered_nodes = entries[i]->covered_nodes[k];
         }
 
-        // padding
         const size_t used = sizeof(uint16_t) + sizeof(log_entry_hdr)
                           + entries[i]->hdr.count * sizeof(nvm_log_entry_t);
         if (sz[i] > used) std::memset(cur + used, 0, sz[i] - used);
@@ -719,7 +724,8 @@ void CkptLog::enqBatch(const std::vector<dram_log_entry_t*>& entries) {
         off += sz[i];
     }
 
-    commitChunk(total);
+    // Ordered commit
+    commitChunk(my_start, total);
 }
 
 void CkptLog::enqDeltaBatch(const std::vector<DeltaPack>& packs) {
@@ -734,7 +740,8 @@ void CkptLog::enqDeltaBatch(const std::vector<DeltaPack>& packs) {
         sz[i] = e; total += e;
     }
 
-    unsigned char* base = reserveChunk(total);
+    size_t my_start;
+    unsigned char* base = reserveChunk(total, my_start);
     if (!base) {
         // 回退逐条
         for (const auto& p : packs) {
@@ -748,6 +755,7 @@ void CkptLog::enqDeltaBatch(const std::vector<DeltaPack>& packs) {
         return;
     }
 
+    // 写数据（锁外）
     size_t off = 0;
     for (size_t i = 0; i < packs.size(); ++i) {
         unsigned char* cur = base + off;
@@ -770,12 +778,18 @@ void CkptLog::enqDeltaBatch(const std::vector<DeltaPack>& packs) {
         off += sz[i];
     }
 
-    commitChunk(total);
+    // Ordered commit
+    commitChunk(my_start, total);
 }
 
 // ===== Batcher 实现 =====
 void CkptLog::Batcher::addFull(dram_log_entry_t* e) {
     if (!e) return;
+#if ENABLE_IMMEDIATE_FLUSH
+    // 真正立即写入：跳过 Batcher 队列，直接写 PMem 环形缓冲区并持久化
+    owner_->enq(e);
+    owner_->forcePersist();
+#else
     const size_t used = sizeof(uint16_t) + sizeof(log_entry_hdr) + e->getPayLoadSize();
     const size_t aligned = PmemManager::align_uint_to_cacheline(static_cast<unsigned>(used));
     Event ev{};
@@ -786,6 +800,7 @@ void CkptLog::Batcher::addFull(dram_log_entry_t* e) {
     events_.push_back(ev);
     bytes_est_ += aligned;
     maybeFlush();
+#endif
 }
 
 void CkptLog::Batcher::addDeltaSlot(int32_t inode_id,
@@ -797,6 +812,16 @@ void CkptLog::Batcher::addDeltaSlot(int32_t inode_id,
                                     const Val_t& value,
                                     int16_t covered) {
 #if ENABLE_DELTA_LOG
+#if ENABLE_IMMEDIATE_FLUSH
+    // 真正立即写入：构造单条 WalDeltaEntry，直接写 PMem 并持久化
+    WalDeltaEntry de{};
+    de.slot    = slot;
+    de.key     = key;
+    de.value   = value;
+    de.covered = covered;
+    owner_->appendDeltaLog(inode_id, last_index, next, parent_id, &de, 1);
+    owner_->forcePersist();
+#else
     WalDeltaHeader hdr{};
     hdr.type       = WAL_LOG_TYPE_DELTA;
     hdr.inode_id   = inode_id;
@@ -823,6 +848,7 @@ void CkptLog::Batcher::addDeltaSlot(int32_t inode_id,
     events_.push_back(ev);
     bytes_est_ += aligned;
     maybeFlush();
+#endif // ENABLE_IMMEDIATE_FLUSH
 #else
     (void)inode_id;(void)last_index;(void)next;(void)parent_id;
     (void)slot;(void)key;(void)value;(void)covered;
@@ -830,10 +856,14 @@ void CkptLog::Batcher::addDeltaSlot(int32_t inode_id,
 }
 
 void CkptLog::Batcher::maybeFlush() {
+#if ENABLE_IMMEDIATE_FLUSH
+    flush();
+#else
     bool hit_cnt   = events_.size() >= kMaxEntries;
     bool hit_bytes = bytes_est_ >= kMaxBytes;
     bool hit_time  = (Clock::now() - last_flush_) >= std::chrono::nanoseconds{kMaxDelayNs};
     if (hit_cnt || hit_bytes || hit_time) flush();
+#endif
 }
 
 void CkptLog::Batcher::flush() {
@@ -891,5 +921,10 @@ void CkptLog::Batcher::flush() {
     evs.clear();
     bytes_est_  = 0;
     last_flush_ = Clock::now();
+
+#if ENABLE_IMMEDIATE_FLUSH
+    // 立即持久化：跳过 flushOnce 的阈值门控，直接 CLWB+SFENCE
+    owner_->forcePersist();
+#endif
 }
 

@@ -37,7 +37,7 @@ class TandemIndex {
         bool insertInVnodeChain(Vnode* &vnode, BloomFilter* &bloom, Key_t key, Val_t value);
         bool handleNodeFullAndSplit(Vnode* &vnode, BloomFilter* &bloom, 
                                          Key_t key, Val_t value, Vnode* &newNode, BloomFilter* &newBloom);
-        bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level, bool &is_sgp);
+        bool updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode, std::vector<Inode *> &updates, int &last_idx, int &idx_to_next_level, bool &is_sgp, int16_t snap_sgp_idx = -1, Key_t snap_sgp_key = 0);
 
         //std::thread *workerThread;kk
         std::thread *logFlushThread = nullptr;

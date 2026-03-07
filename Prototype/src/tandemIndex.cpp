@@ -376,7 +376,9 @@ TandemIndex::TandemIndex(string storage_path) {
                mainIndex->inode_count_on_each_level.data(),
                sizeof(int) * levels);
     }
+#if !ENABLE_IMMEDIATE_FLUSH
     createLogFlushThread();
+#endif
     createLogMergeThread();
     createRebalanceThread();
     Inode *index_header = mainIndex->getHeader();
@@ -696,7 +698,7 @@ bool TandemIndex::insert(Key_t key, Val_t value)
 
         //update parent inode after split
         int last_idx_mut = current_last_idx;
-        if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx, is_sgp)) {
+        if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx, is_sgp, snap.sgp_idx, snap.sgp_key)) {
             std::cerr << "Failed to update the parent inode after split." << std::endl;
             return false;
         }
@@ -871,7 +873,8 @@ bool TandemIndex::handleNodeFullAndSplit(Vnode* &left_vnode, BloomFilter* &left_
 
 bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *targetVnode,
                                                std::vector<Inode *> &updates,
-                                               int &last_idx, int &idx_to_next_level, bool &is_sgp)
+                                               int &last_idx, int &idx_to_next_level, bool &is_sgp,
+                                               int16_t snap_sgp_idx, Key_t snap_sgp_key)
 {
     write_lock(parent_inode->version);
     
@@ -886,14 +889,27 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     });
     
 #if ENABLE_SGP
-    // Path A: already linked SGP, just bump covered (zero log)
-    if (is_sgp && !parent_inode->isSGPUnbalanced(idx_to_next_level)) {
-        parent_inode->sgp_covered[idx_to_next_level]++; 
-        //TODO [ckpt] : log SGP update
-        SPLITPATH_INC(g_splitPath_A);
-        SPLITPATH_LVL_INC(g_lvl_A, parent_inode->hdr.level);
-        write_unlock(parent_inode->version);
-        return true;
+    // Path A: already linked SGP, just bump covered (zero log).
+    // Use the cached sgp_idx from the lookup snapshot.  Validate that the
+    // position hasn't shifted (SGP array may change between lookup and lock).
+    if (is_sgp) {
+        int spos = snap_sgp_idx;
+        if (spos >= 0 && spos <= parent_inode->hdr.last_sgp &&
+            parent_inode->sgp_keys[spos] == snap_sgp_key &&
+            !parent_inode->isSGPUnbalanced(spos)) {
+            parent_inode->sgp_covered[spos]++;
+            // Pre-place an SGP for the newly split vnode so future splits
+            // can link to it (Path C) without first going through Path B.
+            if (!parent_inode->isSGPFull()) {
+                parent_inode->activateSGP(targetKey);
+            } else {
+                parent_inode->evictSpentAndActivateSGP(targetKey);
+            }
+            SPLITPATH_INC(g_splitPath_A);
+            SPLITPATH_LVL_INC(g_lvl_A, parent_inode->hdr.level);
+            write_unlock(parent_inode->version);
+            return true;
+        }
     }
 
     // Path C (promoted): try to link an inactive SGP BEFORE burning a log write
@@ -921,15 +937,18 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
 #if ENABLE_SGP
         // Inline speculative SGP: once gp_covered reaches coeff/2, proactively
         // activate an SGP so it can be linked (Path C) on future splits without
-        // a full log write.
+        // a full log write.  If full, evict a spent (unbalanced) SGP first.
         {
             int lvl = parent_inode->hdr.level;
             int coeff = (lvl < MAX_LEVEL)
                             ? SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[lvl]
                             : SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL - 1];
-            if (parent_inode->gp_covered[idx_to_next_level] >= std::max(2, coeff / 2) &&
-                !parent_inode->isSGPFull()) {
-                parent_inode->activateSGP(targetKey);
+            if (parent_inode->gp_covered[idx_to_next_level] >= std::max(2, coeff / 2)) {
+                if (!parent_inode->isSGPFull()) {
+                    parent_inode->activateSGP(targetKey);
+                } else {
+                    parent_inode->evictSpentAndActivateSGP(targetKey);
+                }
             }
         }
 #endif
@@ -981,6 +1000,8 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
         // so the next split in this range can link (Path C) without a full log.
         if (!parent_inode->isSGPFull()) {
             parent_inode->activateSGP(targetKey);
+        } else {
+            parent_inode->evictSpentAndActivateSGP(targetKey);
         }
 #endif
         SPLITPATH_INC(g_splitPath_D);
@@ -1368,7 +1389,7 @@ bool TandemIndex::update(Key_t key, Val_t value)
 
         // 分裂后更新父节点（内部会短写锁再次核对 last_index）
         int last_idx_mut = current_last_idx;
-        if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx, is_sgp)) {
+        if (!updateParentInodeAfterSplit(parent_inode, new_vnode, updates, last_idx_mut, idx, is_sgp, snap.sgp_idx, snap.sgp_key)) {
             std::cerr << "Failed to update the parent inode after split." << std::endl;
             return false;
         }
@@ -2011,9 +2032,13 @@ void TandemIndex::maybeActivateHotRegion() {
             continue;
         }
         for (uint64_t k : inode_anchors) {
-            if (inode->isSGPFull())
-                break;
-            inode->activateSGP(k);
+            if (!inode->isSGPFull()) {
+                inode->activateSGP(k);
+            } else {
+                // Recycle spent SGP slots before giving up
+                if (!inode->evictSpentAndActivateSGP(k))
+                    break;
+            }
         }
         write_unlock(inode->version);
 

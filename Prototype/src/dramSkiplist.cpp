@@ -1630,6 +1630,7 @@ Inode* DramSkiplist::lookupForInsertWithSnap(Key_t key, Inode* &current, int cur
                     if(current->lookupBetterSGP(key, current->gp_keys[idx], sgp_pos)){
                         snap.sgp_key   = current->sgp_keys[sgp_pos];
                         snap.sgp_value = current->sgp_values[sgp_pos];
+                        snap.sgp_idx   = static_cast<int16_t>(sgp_pos);
 #if ENABLE_HOTPATH_DEBUG_LOG
                         std::cout << "sgp used for key: " << key << " sgp_key: " << snap.sgp_key << " sgp_value: " << snap.sgp_value << endl;
                         if(snap.sgp_key == (Val_t)-1)

@@ -9,6 +9,15 @@ typedef uint64_t Val_t; // 8 bytes
 
 const int MAX_LEVEL = 20;
 
+#if ENABLE_COEFF_ONE
+const int SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL] = {
+    1, 1,
+    1, 1, 1,
+    1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1
+};
+#else
 const int SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL] = {
     3, 3,
     1, 1, 1,
@@ -16,13 +25,14 @@ const int SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL] = {
     1, 1, 1, 1, 1,
     1, 1, 1, 1, 1
 };
+#endif
 
 #define WORKERQUEUE_NUM 1
 #define L1_CACHE_LINE_SIZE 64
 #define L1_CACHE_LINE_MASK (~(L1_CACHE_LINE_SIZE - 1))
 #define RECLAIM_THRESHOLD 4*1024*1024
 #define RECLAIM_RETRY_THRESHOLD 500000000
-#define PERSISTENT_THRESHOLD 1*1024*1024
+#define PERSISTENT_THRESHOLD 8*1024*1024
 #define MAX_NODES 600000
 #define MAX_VALUE_NODES 15000000
 #define MAX_REBALANCE_THREADS 1
