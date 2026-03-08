@@ -63,8 +63,9 @@ public:
 #ifndef WAL_DELTA_STRUCTS_DEFINED
 #define WAL_DELTA_STRUCTS_DEFINED
 enum WalLogType : uint16_t {
-    WAL_LOG_TYPE_FULL  = 0,
-    WAL_LOG_TYPE_DELTA = 1
+    WAL_LOG_TYPE_FULL   = 0,
+    WAL_LOG_TYPE_DELTA  = 1,
+    WAL_LOG_TYPE_INSERT = 2      // insert-delta: single GP insertion at a position
 };
 static constexpr int32_t WAL_META_KEEP = -1;
 
@@ -83,6 +84,21 @@ struct WalDeltaEntry {
     Key_t   key;
     Val_t   value;
 };
+// Compact insert-delta: records a single GP insertion at a given position.
+// Recovery shifts slots [insert_pos .. old_last_index] right by 1 then writes the new slot.
+struct WalInsertHeader {
+    uint16_t type;           // WAL_LOG_TYPE_INSERT
+    int16_t  insert_pos;     // position where the new GP was inserted
+    int32_t  inode_id;
+    int32_t  last_index;     // new last_index (after insert)
+    int32_t  next;           // WAL_META_KEEP if unchanged
+    int32_t  parent_id;      // WAL_META_KEEP if unchanged
+    Key_t    key;            // inserted key
+    Val_t    value;          // inserted value (vnode id)
+    int16_t  covered;        // initial covered count
+    int16_t  _pad{0};        // alignment padding
+};
+
 #endif // WAL_DELTA_STRUCTS_DEFINED
 
 class dram_log_entry_t {
@@ -307,6 +323,11 @@ public:
                            int32_t new_last_index,
                            int32_t new_next,
                            int32_t new_parent_id);
+
+    bool appendInsertLog(const WalInsertHeader &ih);
+    void enqInsertBatch(const std::vector<WalInsertHeader>& hdrs);
+
+    void applyInsertEntry(Inode *inode, const WalInsertHeader *ih);
 #endif // ENABLE_DELTA_LOG
 
     size_t getDurableGap() const;   // durable - consumed, persisted bytes that can be reclaimed
@@ -336,6 +357,15 @@ public:
             }
 
         void addFull(dram_log_entry_t* e);
+
+        void addInsertSlot(int32_t inode_id,
+                           int32_t last_index,
+                           int32_t next,
+                           int32_t parent_id,
+                           int16_t insert_pos,
+                           const Key_t& key,
+                           const Val_t& value,
+                           int16_t covered);
 
         void addDeltaSlot(int32_t inode_id,
                           int32_t last_index,
@@ -368,7 +398,7 @@ public:
         static constexpr size_t  kMaxBytes     = 4 * 1024 * 1024; //threshold of bytes
         static constexpr int64_t kMaxDelayNs   = 2000000;     //threshold of delay in nanoseconds
 
-        enum class Kind : uint8_t { Full, Delta };
+        enum class Kind : uint8_t { Full, Delta, Insert };
 
         struct EvFull {
             dram_log_entry_t* e;
@@ -380,12 +410,19 @@ public:
             WalDeltaEntry  entry;
             size_t aligned; // 预估对齐大小（用于阈值控制，最终会在 run 内聚合）
         };
+        struct EvInsert {
+            WalInsertHeader hdr;
+            size_t aligned;
+        };
         struct Event {
             Kind    kind;
             uint64_t seq; // 本线程捕获序号
-            // 简单变体
-            EvFull  f;
-            EvDelta d;
+            // Only one of these is valid, determined by 'kind'
+            union {
+                EvFull   f;
+                EvDelta  d;
+                EvInsert ins;
+            };
         };
 
         void maybeFlush();

@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# run_sgp_table.sh  –  Benchmark 5 configurations × 2 workloads
+# run_sgp_table.sh  –  Benchmark 5 configurations × 2 workloads × 2 distributions
 #
 # Configurations:
 #   1. SPECTRUMKV                          (SGP=1, FLUSH=0, coeff=3)
@@ -10,14 +10,15 @@
 #   5. SPECTRUMKV + COEFFICIENT=1          (SGP=1, FLUSH=0, coeff=1)
 #
 # Workloads: insert-only,  workload A (50% read / 50% update)
+# Distributions: zipf, unif
 ###############################################################################
-set -euo pipefail
+set -uo pipefail
 
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 PMEM_DIR="/mnt/pmem0"
 THREADS=16
-DIST="zipf"
-RUNS=3                          # trials per (config, workload) pair
+DISTS=("zipf" "unif")          # test both distributions
+RUNS=3                          # trials per (config, workload, dist) tuple
 
 MAKEFILE="$PROJ_DIR/Makefile"
 COMMON_H="$PROJ_DIR/include/common.h"
@@ -49,25 +50,30 @@ set_coefficient() {    # $1 = 1 to force all coefficients to 1, 0 for default (3
 
 build() {
     cd "$PROJ_DIR"
-    make clean >/dev/null 2>&1
-    make -j"$(nproc)" 2>&1 | tail -1
+    make clean >/dev/null 2>&1 || true
+    if ! make -j"$(nproc)" 2>&1 | tail -5; then
+        echo "*** BUILD FAILED ***"
+        return 1
+    fi
 }
 
-run_bench() {          # $1 = extra args (e.g. "--insert-only" or "")
-    local extra="$1"
-    rm -f "$PMEM_DIR"/* 2>/dev/null || true
+run_bench() {          # $1 = dist (zipf/unif), $2 = extra args (e.g. "--insert-only" or "")
+    local dist="$1"
+    local extra="$2"
+    rm -rf "$PMEM_DIR"/* 2>/dev/null || true
     numactl --cpunodebind=0 --membind=0 \
-        "$PROJ_DIR/project" a "$DIST" "$THREADS" "$PMEM_DIR" $extra 2>&1
+        "$PROJ_DIR/project" a "$dist" "$THREADS" "$PMEM_DIR" $extra 2>&1
 }
 
 run_bench_keep() {     # same but does NOT clear pmem (run on existing data)
-    local extra="$1"
+    local dist="$1"
+    local extra="$2"
     numactl --cpunodebind=0 --membind=0 \
-        "$PROJ_DIR/project" a "$DIST" "$THREADS" "$PMEM_DIR" $extra 2>&1
+        "$PROJ_DIR/project" a "$dist" "$THREADS" "$PMEM_DIR" $extra 2>&1
 }
 
 extract_throughput() { # stdin = full benchmark output, $1 = grep pattern
-    grep "$1" | awk '{print $NF}'
+    grep "$1" | awk '{print $NF}' || echo "N/A"
 }
 
 avg() {                # $@ = list of numbers
@@ -87,37 +93,41 @@ CONFIGS=(
     "SPECTRUMKV+IMMEDIATE_PERSIST           1    1      0"
     "SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST    0    1      0"
     "SPECTRUMKV+COEFFICIENT=1               1    0      1"
+    "SPECTRUMKV+COEFF=1+NO_SGP              0    0      1"
+    "SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST  0    1      1"
 )
 
 # ── Header ───────────────────────────────────────────────────────────────────
-header=$(printf "%-45s  %12s  %12s  %12s  %12s  %12s  %12s\n" \
-    "SYS/LOAD" \
-    "INSERT_R1" "INSERT_R2" "INSERT_R3" "INSERT_AVG" \
-    "WKLDA_AVG" "  ")
-
-# Re-format: two separate sub-tables
 divider="==============================================================================================================="
 
 {
 echo "$divider"
-echo "  SGP Table Benchmark   (threads=$THREADS, dist=$DIST, runs=$RUNS)"
+echo "  SGP Table Benchmark   (threads=$THREADS, dists=${DISTS[*]}, runs=$RUNS)"
 echo "  $(date)"
 echo "$divider"
+} | tee "$RESULT_FILE"
+
+# ── Main loop ────────────────────────────────────────────────────────────────
+# Keys: "${NAME}::${DIST}" → avg throughput
+declare -A INSERT_AVGS
+declare -A WKLDA_AVGS
+
+for DIST in "${DISTS[@]}"; do
+
+{
+echo ""
+echo "###  Distribution: $DIST  ###"
 echo ""
 printf "%-45s | %12s %12s %12s | %12s\n" \
     "CONFIGURATION" "Run1" "Run2" "Run3" "AVG"
 echo "----------------------------------------------+------------------------------------------+--------------"
-} | tee "$RESULT_FILE"
-
-# ── Main loop ────────────────────────────────────────────────────────────────
-declare -A INSERT_AVGS
-declare -A WKLDA_AVGS
+} | tee -a "$RESULT_FILE"
 
 for cfg_line in "${CONFIGS[@]}"; do
     read -r NAME SGP FLUSH COEFF_ONE <<< "$cfg_line"
 
     echo ""
-    echo ">>> Building: $NAME  (SGP=$SGP  FLUSH=$FLUSH  COEFF_ONE=$COEFF_ONE)"
+    echo ">>> Building: $NAME  (SGP=$SGP  FLUSH=$FLUSH  COEFF_ONE=$COEFF_ONE)  dist=$DIST"
 
     # Apply configuration
     restore_originals          # always start from clean baseline
@@ -126,16 +136,18 @@ for cfg_line in "${CONFIGS[@]}"; do
     set_coefficient "$COEFF_ONE"
     build
 
+    KEY="${NAME}::${DIST}"
+
     # ── Insert-only ──────────────────────────────────────────────────────
     insert_vals=()
     for r in $(seq 1 $RUNS); do
-        out=$(run_bench "--insert-only")
+        out=$(run_bench "$DIST" "--insert-only")
         tput=$(echo "$out" | extract_throughput "YCSB_INSERT throughput")
         insert_vals+=("$tput")
-        echo "    insert-only  run$r: $tput"
+        echo "    [$DIST] insert-only  run$r: $tput"
     done
     ins_avg=$(avg "${insert_vals[@]}")
-    INSERT_AVGS["$NAME"]="$ins_avg"
+    INSERT_AVGS["$KEY"]="$ins_avg"
 
     printf "%-45s | %12s %12s %12s | %12s\n" \
         "$NAME (insert-only)" \
@@ -146,22 +158,23 @@ for cfg_line in "${CONFIGS[@]}"; do
     wklda_vals=()
     for r in $(seq 1 $RUNS); do
         # Step 1: populate data via insert-only (clear pmem first)
-        echo "    workload-A   run$r: populating data (insert-only)..."
-        run_bench "--insert-only" >/dev/null 2>&1
+        echo "    [$DIST] workload-A   run$r: populating data (insert-only)..."
+        run_bench "$DIST" "--insert-only" >/dev/null 2>&1 || true
         # Step 2: run workload A on the populated data (no clear)
-        out=$(run_bench_keep "")
+        out=$(run_bench_keep "$DIST" "")
         tput=$(echo "$out" | extract_throughput "YCSB_A throughput")
         wklda_vals+=("$tput")
-        echo "    workload-A   run$r: $tput"
+        echo "    [$DIST] workload-A   run$r: $tput"
     done
     wa_avg=$(avg "${wklda_vals[@]}")
-    WKLDA_AVGS["$NAME"]="$wa_avg"
+    WKLDA_AVGS["$KEY"]="$wa_avg"
 
     printf "%-45s | %12s %12s %12s | %12s\n" \
         "$NAME (workload-A)" \
         "${wklda_vals[0]}" "${wklda_vals[1]}" "${wklda_vals[2]}" \
         "$wa_avg" | tee -a "$RESULT_FILE"
 done
+done  # end DIST loop
 
 # ── Summary table ────────────────────────────────────────────────────────────
 {
@@ -169,15 +182,23 @@ echo ""
 echo "$divider"
 echo "  SUMMARY"
 echo "$divider"
-printf "%-45s | %14s | %14s\n" "CONFIGURATION" "INSERT-ONLY" "WORKLOAD-A"
-echo "----------------------------------------------+----------------+----------------"
-for cfg_line in "${CONFIGS[@]}"; do
-    read -r NAME _ <<< "$cfg_line"
-    printf "%-45s | %14s | %14s\n" \
-        "$NAME" \
-        "${INSERT_AVGS[$NAME]}" \
-        "${WKLDA_AVGS[$NAME]}"
+
+for DIST in "${DISTS[@]}"; do
+    echo ""
+    echo "  Distribution: $DIST"
+    printf "  %-43s | %14s | %14s\n" "CONFIGURATION" "INSERT-ONLY" "WORKLOAD-A"
+    echo "  ---------------------------------------------+----------------+----------------"
+    for cfg_line in "${CONFIGS[@]}"; do
+        read -r NAME _ <<< "$cfg_line"
+        KEY="${NAME}::${DIST}"
+        printf "  %-43s | %14s | %14s\n" \
+            "$NAME" \
+            "${INSERT_AVGS[$KEY]}" \
+            "${WKLDA_AVGS[$KEY]}"
+    done
 done
+
+echo ""
 echo "$divider"
 } | tee -a "$RESULT_FILE"
 

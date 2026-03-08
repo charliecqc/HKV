@@ -50,6 +50,21 @@ static size_t parseApplySpan(CkptLog* self,
             consumed += entry_sz;
             continue;
         }
+
+        if (tag == WAL_LOG_TYPE_INSERT) {
+            if (consumed + sizeof(WalInsertHeader) > batch) break;
+            const auto* ih = reinterpret_cast<const WalInsertHeader*>(base);
+
+            size_t raw_sz   = sizeof(WalInsertHeader);
+            size_t entry_sz = PmemManager::align_uint_to_cacheline(static_cast<unsigned>(raw_sz));
+            if (entry_sz == 0 || consumed + entry_sz > batch) break;
+
+            Inode* inode = pmemInodePool->at(ih->inode_id);
+            self->applyInsertEntry(inode, ih);
+
+            consumed += entry_sz;
+            continue;
+        }
 #endif
         if (tag == WAL_LOG_TYPE_FULL) {
             if (consumed + sizeof(uint16_t) + sizeof(log_entry_hdr) > batch) break;
@@ -294,6 +309,61 @@ void CkptLog::applyDeltaEntries(Inode *inode,
         inode->hdr.parent_id = new_parent_id;
         PmemManager::flushNoDrain(1, &inode->hdr.parent_id, sizeof(inode->hdr.parent_id));
     }
+}
+
+bool CkptLog::appendInsertLog(const WalInsertHeader &ih)
+{
+    size_t raw_sz   = sizeof(WalInsertHeader);
+    size_t entry_sz = PmemManager::align_uint_to_cacheline(static_cast<unsigned>(raw_sz));
+
+    size_t my_start;
+    log_entry_hdr *slot;
+    {
+        std::unique_lock<std::shared_mutex> lk(mtx);
+        slot = nvm_log_enq(entry_sz);
+        if (!slot) return false;
+        my_start = a_alloc_end.v.fetch_add(entry_sz, std::memory_order_acq_rel);
+    }
+
+    // Write insert header to NVM slot
+    auto *dst = reinterpret_cast<WalInsertHeader *>(slot);
+    std::memcpy(dst, &ih, sizeof(WalInsertHeader));
+
+    // Zero-fill padding
+    if (entry_sz > raw_sz) {
+        std::memset(reinterpret_cast<char *>(dst) + raw_sz, 0, entry_sz - raw_sz);
+    }
+
+    // Ordered commit
+    commitChunk(my_start, entry_sz);
+    return true;
+}
+
+void CkptLog::applyInsertEntry(Inode *inode, const WalInsertHeader *ih)
+{
+    if (!inode || !ih) return;
+    int pos = ih->insert_pos;
+    int old_last = inode->hdr.last_index;
+
+    // Shift slots [pos .. old_last] right by 1 to make room
+    if (pos >= 0 && pos <= old_last) {
+        int cnt = old_last - pos + 1;
+        memmove(&inode->gp_keys[pos + 1],    &inode->gp_keys[pos],    sizeof(Key_t)   * cnt);
+        memmove(&inode->gp_values[pos + 1],  &inode->gp_values[pos],  sizeof(Val_t)   * cnt);
+        memmove(&inode->gp_covered[pos + 1], &inode->gp_covered[pos], sizeof(int16_t) * cnt);
+    }
+
+    // Write the new slot
+    inode->gp_keys[pos]    = ih->key;
+    inode->gp_values[pos]  = ih->value;
+    inode->gp_covered[pos] = ih->covered;
+
+    // Update metadata
+    inode->hdr.last_index = ih->last_index;
+    if (ih->next != WAL_META_KEEP)      inode->hdr.next      = ih->next;
+    if (ih->parent_id != WAL_META_KEEP) inode->hdr.parent_id = ih->parent_id;
+
+    PmemManager::flushNoDrain(1, inode, sizeof(Inode));
 }
 #endif // ENABLE_DELTA_LOG
 
@@ -782,6 +852,35 @@ void CkptLog::enqDeltaBatch(const std::vector<DeltaPack>& packs) {
     commitChunk(my_start, total);
 }
 
+void CkptLog::enqInsertBatch(const std::vector<WalInsertHeader>& hdrs) {
+    if (hdrs.empty()) return;
+
+    // Each insert header is fixed-size, cacheline-aligned
+    const size_t raw_sz   = sizeof(WalInsertHeader);
+    const size_t entry_sz = PmemManager::align_uint_to_cacheline(static_cast<unsigned>(raw_sz));
+    const size_t total    = entry_sz * hdrs.size();
+
+    size_t my_start;
+    unsigned char* base = reserveChunk(total, my_start);
+    if (!base) {
+        // Fallback: append individually
+        for (const auto& ih : hdrs) appendInsertLog(ih);
+        return;
+    }
+
+    // Write all headers contiguously (lock-free — each writer owns its chunk)
+    size_t off = 0;
+    for (size_t i = 0; i < hdrs.size(); ++i) {
+        unsigned char* cur = base + off;
+        std::memcpy(cur, &hdrs[i], raw_sz);
+        if (entry_sz > raw_sz) std::memset(cur + raw_sz, 0, entry_sz - raw_sz);
+        off += entry_sz;
+    }
+
+    // Single ordered commit for the whole batch
+    commitChunk(my_start, total);
+}
+
 // ===== Batcher 实现 =====
 void CkptLog::Batcher::addFull(dram_log_entry_t* e) {
     if (!e) return;
@@ -855,6 +954,48 @@ void CkptLog::Batcher::addDeltaSlot(int32_t inode_id,
 #endif
 }
 
+void CkptLog::Batcher::addInsertSlot(int32_t inode_id,
+                                     int32_t last_index,
+                                     int32_t next,
+                                     int32_t parent_id,
+                                     int16_t insert_pos,
+                                     const Key_t& key,
+                                     const Val_t& value,
+                                     int16_t covered) {
+#if ENABLE_DELTA_LOG
+    WalInsertHeader ih{};
+    ih.type       = WAL_LOG_TYPE_INSERT;
+    ih.insert_pos = insert_pos;
+    ih.inode_id   = inode_id;
+    ih.last_index = last_index;
+    ih.next       = next;
+    ih.parent_id  = parent_id;
+    ih.key        = key;
+    ih.value      = value;
+    ih.covered    = covered;
+
+#if ENABLE_IMMEDIATE_FLUSH
+    owner_->appendInsertLog(ih);
+    owner_->forcePersist();
+#else
+    const size_t used    = sizeof(WalInsertHeader);
+    const size_t aligned = PmemManager::align_uint_to_cacheline(static_cast<unsigned>(used));
+
+    Event ev{};
+    ev.kind = Kind::Insert;
+    ev.seq  = s_seq_++;
+    ev.ins  = EvInsert{ih, aligned};
+
+    events_.push_back(ev);
+    bytes_est_ += aligned;
+    maybeFlush();
+#endif // ENABLE_IMMEDIATE_FLUSH
+#else
+    (void)inode_id;(void)last_index;(void)next;(void)parent_id;
+    (void)insert_pos;(void)key;(void)value;(void)covered;
+#endif
+}
+
 void CkptLog::Batcher::maybeFlush() {
 #if ENABLE_IMMEDIATE_FLUSH
     flush();
@@ -887,6 +1028,12 @@ void CkptLog::Batcher::flush() {
             group.reserve(j - i);
             for (size_t t = i; t < j; ++t) group.push_back(evs[t].f.e);
             owner_->enqBatch(group);
+        } else if (k == Kind::Insert) {
+            // Batch all insert headers into a single reserveChunk + commitChunk
+            std::vector<WalInsertHeader> group;
+            group.reserve(j - i);
+            for (size_t t = i; t < j; ++t) group.push_back(evs[t].ins.hdr);
+            owner_->enqInsertBatch(group);
         } else { // Kind::Delta
             // 将 [i, j) 内连续、inode 元字段相同的 DELTA 合并成 pack
             std::vector<CkptLog::DeltaPack> packs;

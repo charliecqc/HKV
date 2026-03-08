@@ -43,6 +43,7 @@
 
 
 
+
 namespace {
 #ifdef DBG_CACHE
     // --- 新增：全面的缓存统计变量 ---
@@ -760,11 +761,7 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
     int ret = 0;
     bool created_parent = false;
 
-    //pre-allocate next_node
-    Inode *next_node = dramInodePool->getNextNode();
-    if (!next_node) return 0;
-    next_node->hdr.level = inode->hdr.level;
-    inode_count_on_each_level[next_node->hdr.level]++;
+    Inode *next_node = nullptr;  // lazy allocation: only allocate when split is confirmed needed
 
     while (true) {
         Inode* candidate_parent = nullptr;
@@ -778,7 +775,6 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
         std::vector<Inode*> nodes_to_lock;
         nodes_to_lock.reserve(4);
         if (inode)           nodes_to_lock.push_back(inode);
-        if (next_node)       nodes_to_lock.push_back(next_node);
         if (candidate_parent) nodes_to_lock.push_back(candidate_parent);
         if (header_above)     nodes_to_lock.push_back(header_above);
 
@@ -846,6 +842,17 @@ int DramSkiplist::fastRebalance(Inode* &inode, Inode* &parent_inode_hint)
                 releaseWriteLocksInOrderByVersion(nodes_to_lock);
                 continue;// retry // header above changed
             }
+        }
+
+        // Lazy-allocate next_node only when split is confirmed needed
+        if (!next_node) {
+            next_node = dramInodePool->getNextNode();
+            if (!next_node) {
+                releaseWriteLocksInOrderByVersion(nodes_to_lock);
+                return 0;
+            }
+            next_node->hdr.level = inode->hdr.level;
+            inode_count_on_each_level[next_node->hdr.level]++;
         }
 
         //split the inode, add next_node into the skiplist

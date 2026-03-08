@@ -986,15 +986,25 @@ bool TandemIndex::updateParentInodeAfterSplit(Inode *parent_inode, Vnode *target
     }
 #endif
     if (parent_inode->activateGPForVnode(targetKey, targetVnode->getId(), pos, 1)) {
-        dram_log_entry_t *entry = new dram_log_entry_t(parent_inode->getId(),
-            parent_inode->hdr.last_index, parent_inode->hdr.next,
-            parent_inode->hdr.level, parent_inode->hdr.parent_id);
-        for (int i = 0; i <= parent_inode->hdr.last_index; i++) {
-            entry->setKeyVal(i, parent_inode->gp_keys[i],
-                                parent_inode->gp_values[i],
-                                parent_inode->gp_covered[i]);
+        // Full log: insert-delta is unsafe with per-thread batchers because
+        // a later rebalance FULL entry can land in the WAL before this delta,
+        // causing the delta to be replayed on top of the post-split state,
+        // corrupting the pmem GP array.
+        {
+            auto *entry = new dram_log_entry_t(
+                parent_inode->getId(),
+                parent_inode->hdr.last_index,
+                parent_inode->hdr.next,
+                parent_inode->hdr.level,
+                parent_inode->hdr.parent_id);
+            for (int j = 0; j <= parent_inode->hdr.last_index; ++j) {
+                entry->setKeyVal(j,
+                    parent_inode->gp_keys[j],
+                    parent_inode->gp_values[j],
+                    parent_inode->gp_covered[j]);
+            }
+            ckptLog->batcher().addFull(entry);
         }
-        ckptLog->batcher().addFull(entry);
 #if ENABLE_SGP
         // Post-D SGP placement: after a full-log GP activation, place an SGP
         // so the next split in this range can link (Path C) without a full log.
