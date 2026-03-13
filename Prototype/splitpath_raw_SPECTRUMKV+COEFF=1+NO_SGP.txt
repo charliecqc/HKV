@@ -1,0 +1,27 @@
+### Loading workload file ==================================================
+Number of threads: 16
+Program will exit after insert operation
+Loaded 100000001 keys
+File does not exists: /mnt/pmem0/pmemBFPool
+Created pool: /mnt/pmem0/pmemBFPool
+File does not exists: /mnt/pmem0/pmemVnodePool
+Created pool: /mnt/pmem0/pmemVnodePool
+File does not exists: /mnt/pmem0/pmemInodePool
+Created pool: /mnt/pmem0/pmemInodePool
+File does not exists: /mnt/pmem0/ckpt_log
+Created pool: /mnt/pmem0/ckpt_log
+Populating 100000001 keys using 16 threads
+YCSB_INSERT throughput 2163522.006963
+Elapsed_time 46.220931
+Level 0 has 61563 inodes.
+Level 1 has 1825 inodes.
+Level 2 has 58 inodes.
+Level 3 has 2 inodes.
+Level 4 has 1 inodes.
+[MemoryUsage] inode.dram.used=77202624 B (73.63 MiB), inode.dram.alloc=729600000 B (695.80 MiB), inode.pmem.used=0 B (0.00 MiB), inode.pmem.alloc=729600000 B (695.80 MiB)
+[MemoryUsage] bloom.used=200733632 B (191.43 MiB), bloom.dram.alloc=118051840 B (112.58 MiB), bloom.pmem.alloc=1320000000 B (1258.85 MiB)
+[HotBloomCache] cached=1200000/1200000, evictions=0, dram_bytes=118051840 B (112.58 MiB)
+[SplitPath] A(sgp_covered++)=0 B(gp_covered+log)=848157 C(linkSGP)=0 D(activateGP+log)=1369669 E(rebalance)=62040 | total=2279866 log_avoided=0 log_needed=2217826 avoid_rate=0.0%
+[RebalSGP] A(sgp_covered++)=0 C(linkSGP)=0 total_parent_updates=0
+[Level 0] coeff=1.0 A=0 B=848157 C=0 D=1369669 E=62040 total=2279866 sgp_avoid=0.0%
+[ChainHop] total_hops=0 lookups=0

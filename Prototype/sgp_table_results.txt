@@ -1,70 +1,11 @@
 ===============================================================================================================
-  SGP Table Benchmark   (threads=16, dists=zipf unif, runs=3)
-  Sun 08 Mar 2026 04:20:01 AM UTC
+  SGP Table Benchmark   (threads=16, dists=zipf, runs=3)
+  Mon 09 Mar 2026 07:59:51 AM UTC
 ===============================================================================================================
 
 ###  Distribution: zipf  ###
 
 CONFIGURATION                                 |         Run1         Run2         Run3 |          AVG
 ----------------------------------------------+------------------------------------------+--------------
-SPECTRUMKV (insert-only)                      | 2322614.093714 2333376.410294 2329506.801649 |   2328499.10
-SPECTRUMKV (workload-A)                       |  4.11303e+06  3.96785e+06  4.07282e+06 |             
-SPECTRUMKV+NO_SGP (insert-only)               | 2156756.676900 2168106.078404 2161705.686831 |   2162189.48
-SPECTRUMKV+NO_SGP (workload-A)                |  3.86213e+06  3.93261e+06  3.86704e+06 |             
-SPECTRUMKV+IMMEDIATE_PERSIST (insert-only)    | 2244999.505372 2282119.507210 2289277.044377 |   2272132.01
-SPECTRUMKV+IMMEDIATE_PERSIST (workload-A)     |  3.91811e+06  3.90417e+06  3.98063e+06 |             
-SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST (insert-only) | 2061324.419515 2045386.529839 2041631.575456 |   2049447.50
-SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST (workload-A) |  3.94054e+06  3.94648e+06  3.94556e+06 |             
-SPECTRUMKV+COEFFICIENT=1 (insert-only)        | 2353490.974830 2376876.745452 2359505.177505 |   2363290.96
-SPECTRUMKV+COEFFICIENT=1 (workload-A)         |  4.24726e+06  4.45965e+06   4.2431e+06 |             
-SPECTRUMKV+COEFF=1+NO_SGP (insert-only)       | 2174441.973832 2167514.751852 2128221.533417 |   2156726.08
-SPECTRUMKV+COEFF=1+NO_SGP (workload-A)        |  4.07588e+06  4.11214e+06  4.11983e+06 |             
-SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST (insert-only) | 1835595.157553 1757512.877151 1860327.832419 |   1817811.95
-SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST (workload-A) |  4.01424e+06  4.08064e+06  3.93846e+06 |             
-
-###  Distribution: unif  ###
-
-CONFIGURATION                                 |         Run1         Run2         Run3 |          AVG
-----------------------------------------------+------------------------------------------+--------------
-SPECTRUMKV (insert-only)                      | 2328603.185282 2336649.037114 2301667.466252 |   2322306.56
-SPECTRUMKV (workload-A)                       |  2.53695e+06  2.54839e+06  2.58529e+06 |             
-SPECTRUMKV+NO_SGP (insert-only)               | 2174385.757323 2183669.133999 2168346.299952 |   2175467.06
-SPECTRUMKV+NO_SGP (workload-A)                |   2.5328e+06   2.5134e+06  2.53544e+06 |             
-SPECTRUMKV+IMMEDIATE_PERSIST (insert-only)    | 2284615.183131 2267920.749595 2273599.988746 |   2275378.64
-SPECTRUMKV+IMMEDIATE_PERSIST (workload-A)     |  2.56925e+06  2.56742e+06  2.55919e+06 |             
-SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST (insert-only) | 2079482.285683 2094458.630950 2026322.926373 |   2066754.61
-SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST (workload-A) |  2.53578e+06  2.52148e+06  2.51694e+06 |             
-SPECTRUMKV+COEFFICIENT=1 (insert-only)        | 2355718.445521 2335553.205724 2345578.791487 |   2345616.81
-SPECTRUMKV+COEFFICIENT=1 (workload-A)         |  2.68574e+06   2.7183e+06          N/A |             
-SPECTRUMKV+COEFF=1+NO_SGP (insert-only)       | 2169862.968158 2175752.527918 2127688.197725 |   2157767.89
-SPECTRUMKV+COEFF=1+NO_SGP (workload-A)        |          N/A   2.6962e+06  2.67885e+06 |             
-SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST (insert-only) | 1853307.956406 1802569.103065 1883647.355518 |   1846508.13
-SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST (workload-A) |  2.45076e+06  2.39854e+06  2.42973e+06 |             
-
-===============================================================================================================
-  SUMMARY
-===============================================================================================================
-
-  Distribution: zipf
-  CONFIGURATION                               |    INSERT-ONLY |     WORKLOAD-A
-  ---------------------------------------------+----------------+----------------
-  SPECTRUMKV                                  |     2328499.10 |               
-  SPECTRUMKV+NO_SGP                           |     2162189.48 |               
-  SPECTRUMKV+IMMEDIATE_PERSIST                |     2272132.01 |               
-  SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST         |     2049447.50 |               
-  SPECTRUMKV+COEFFICIENT=1                    |     2363290.96 |               
-  SPECTRUMKV+COEFF=1+NO_SGP                   |     2156726.08 |               
-  SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST       |     1817811.95 |               
-
-  Distribution: unif
-  CONFIGURATION                               |    INSERT-ONLY |     WORKLOAD-A
-  ---------------------------------------------+----------------+----------------
-  SPECTRUMKV                                  |     2322306.56 |               
-  SPECTRUMKV+NO_SGP                           |     2175467.06 |               
-  SPECTRUMKV+IMMEDIATE_PERSIST                |     2275378.64 |               
-  SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST         |     2066754.61 |               
-  SPECTRUMKV+COEFFICIENT=1                    |     2345616.81 |               
-  SPECTRUMKV+COEFF=1+NO_SGP                   |     2157767.89 |               
-  SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST       |     1846508.13 |               
-
-===============================================================================================================
+SPECTRUMKV (insert-only)                      | 2349209.332135 2323813.154113 2326545.421099 |   2333189.30
+SPECTRUMKV (workload-A)                       |  3.98378e+06  4.12665e+06  3.72178e+06 |             

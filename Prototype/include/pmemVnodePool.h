@@ -57,7 +57,11 @@ public:
             cout << "No more nodes in the pool." << endl;
             return nullptr;
         }
-        pmemVnodePool[numNodes - 1]->hdr.next = idx;
+        // Persist allocation watermark every 64 allocations to reduce
+        // cross-NUMA contention while keeping crash-recovery bounded.
+        if ((idx & 63) == 0) {
+            pmemVnodePool[numNodes - 1]->hdr.next = idx;
+        }
         return pmemVnodePool[idx];
     }
 

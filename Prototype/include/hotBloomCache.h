@@ -32,7 +32,7 @@
 // ---------------------------------------------------------------------------
 
 #ifndef HOT_BLOOM_MAX_CACHED
-#define HOT_BLOOM_MAX_CACHED 1200000UL
+#define HOT_BLOOM_MAX_CACHED 1500000UL
 #endif
 
 class HotBloomCache {

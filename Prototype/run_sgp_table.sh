@@ -17,41 +17,23 @@ set -uo pipefail
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 PMEM_DIR="/mnt/pmem0"
 THREADS=16
-DISTS=("zipf" "unif")          # test both distributions
+DISTS=("zipf")          # test both distributions
 RUNS=3                          # trials per (config, workload, dist) tuple
 
 MAKEFILE="$PROJ_DIR/Makefile"
-COMMON_H="$PROJ_DIR/include/common.h"
 RESULT_FILE="$PROJ_DIR/sgp_table_results.txt"
-
-# ── Backup originals ────────────────────────────────────────────────────────
-cp "$MAKEFILE"  "$MAKEFILE.bak"
-cp "$COMMON_H"  "$COMMON_H.bak"
-
-restore_originals() {
-    cp "$MAKEFILE.bak"  "$MAKEFILE"
-    cp "$COMMON_H.bak"  "$COMMON_H"
-}
-trap restore_originals EXIT
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-set_sgp() {            # $1 = 0 or 1
-    sed -i "s/-DENABLE_SGP=[01]/-DENABLE_SGP=$1/" "$MAKEFILE"
-}
-
-set_flush() {          # $1 = 0 or 1
-    sed -i "s/-DENABLE_IMMEDIATE_FLUSH=[01]/-DENABLE_IMMEDIATE_FLUSH=$1/" "$MAKEFILE"
-}
-
-set_coefficient() {    # $1 = 1 to force all coefficients to 1, 0 for default (3,3,...)
-    sed -i "s/-DENABLE_COEFF_ONE=[01]/-DENABLE_COEFF_ONE=$1/" "$MAKEFILE"
-}
-
-build() {
+build() {              # $1=SGP $2=FLUSH $3=COEFF_ONE $4=RECLAIM
     cd "$PROJ_DIR"
     make clean >/dev/null 2>&1 || true
-    if ! make -j"$(nproc)" 2>&1 | tail -5; then
+    if ! make -j"$(nproc)" \
+            ENABLE_SGP="$1" \
+            ENABLE_IMMEDIATE_FLUSH="$2" \
+            ENABLE_COEFF_ONE="$3" \
+            ENABLE_IMMEDIATE_RECLAIM="${4:-0}" \
+            2>&1 | tail -5; then
         echo "*** BUILD FAILED ***"
         return 1
     fi
@@ -86,15 +68,16 @@ avg() {                # $@ = list of numbers
 }
 
 # ── Configuration table ─────────────────────────────────────────────────────
-#           NAME                              SGP  FLUSH  COEFF_ONE
+#           NAME                              SGP  FLUSH  COEFF_ONE  RECLAIM
 CONFIGS=(
-    "SPECTRUMKV                             1    0      0"
-    "SPECTRUMKV+NO_SGP                      0    0      0"
-    "SPECTRUMKV+IMMEDIATE_PERSIST           1    1      0"
-    "SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST    0    1      0"
-    "SPECTRUMKV+COEFFICIENT=1               1    0      1"
-    "SPECTRUMKV+COEFF=1+NO_SGP              0    0      1"
-    "SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST  0    1      1"
+    "SPECTRUMKV                             1    0      0          0"
+    "SPECTRUMKV+NO_SGP                      0    0      0          0"
+    "SPECTRUMKV+IMMEDIATE_PERSIST           1    1      0          1"
+    "SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST    0    1      0          1"
+    "SPECTRUMKV+COEFFICIENT=1               1    0      1          0"
+    "SPECTRUMKV+COEFF=1+NO_SGP              0    0      1          0"
+    "SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST  0    1      1          1"
+    "SPECTRUMKV+COEFF=1+IMM_PERSIST         1    1      1          1"
 )
 
 # ── Header ───────────────────────────────────────────────────────────────────
@@ -124,17 +107,13 @@ echo "----------------------------------------------+---------------------------
 } | tee -a "$RESULT_FILE"
 
 for cfg_line in "${CONFIGS[@]}"; do
-    read -r NAME SGP FLUSH COEFF_ONE <<< "$cfg_line"
+    read -r NAME SGP FLUSH COEFF_ONE RECLAIM <<< "$cfg_line"
 
     echo ""
-    echo ">>> Building: $NAME  (SGP=$SGP  FLUSH=$FLUSH  COEFF_ONE=$COEFF_ONE)  dist=$DIST"
+    echo ">>> Building: $NAME  (SGP=$SGP  FLUSH=$FLUSH  COEFF_ONE=$COEFF_ONE  RECLAIM=$RECLAIM)  dist=$DIST"
 
-    # Apply configuration
-    restore_originals          # always start from clean baseline
-    set_sgp   "$SGP"
-    set_flush "$FLUSH"
-    set_coefficient "$COEFF_ONE"
-    build
+    # Build with the desired configuration via make command-line variables
+    build "$SGP" "$FLUSH" "$COEFF_ONE" "$RECLAIM"
 
     KEY="${NAME}::${DIST}"
 

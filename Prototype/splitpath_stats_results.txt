@@ -1,0 +1,136 @@
+=================================================================================================================================
+  Split-Path Stats Benchmark   (threads=16, dist=zipf)
+  Workload: insert-only, 1 run per config, ENABLE_SPLITPATH_STATS=1
+  Wed 11 Mar 2026 07:28:14 AM UTC
+=================================================================================================================================
+
+=================================================================================================================================
+>>> Config: SPECTRUMKV  (SGP=1  FLUSH=0  COEFF_ONE=0  RECLAIM=0)
+=================================================================================================================================
+    Running insert-only (dist=zipf, threads=16)...
+    Throughput: 2304739.656816
+
+    ── Split-Path Stats ──
+    [SplitPath] A(sgp_covered++)=489140 B(gp_covered+log)=681383 C(linkSGP)=831398 D(activateGP+log)=262362 E(rebalance)=16638 | total=2280921 log_avoided=1320538 log_needed=943745 avoid_rate=57.9%
+    [RebalSGP] A(sgp_covered++)=0 C(linkSGP)=0 total_parent_updates=0
+    [Level 0] coeff=3.0 A=489140 B=681383 C=831398 D=262362 E=16638 total=2280921 sgp_avoid=57.9%
+    [ChainHop] total_hops=0 lookups=0
+
+    Full output saved to: /home/charliecqc/1206/HKV/Prototype/splitpath_raw_SPECTRUMKV.txt
+
+=================================================================================================================================
+>>> Config: SPECTRUMKV+NO_SGP  (SGP=0  FLUSH=0  COEFF_ONE=0  RECLAIM=0)
+=================================================================================================================================
+    Running insert-only (dist=zipf, threads=16)...
+    Throughput: 2166100.885845
+
+    ── Split-Path Stats ──
+    [SplitPath] A(sgp_covered++)=0 B(gp_covered+log)=1382188 C(linkSGP)=0 D(activateGP+log)=858811 E(rebalance)=38999 | total=2279998 log_avoided=0 log_needed=2240999 avoid_rate=0.0%
+    [RebalSGP] A(sgp_covered++)=0 C(linkSGP)=0 total_parent_updates=0
+    [Level 0] coeff=3.0 A=0 B=1382188 C=0 D=858811 E=38999 total=2279998 sgp_avoid=0.0%
+    [ChainHop] total_hops=0 lookups=0
+
+    Full output saved to: /home/charliecqc/1206/HKV/Prototype/splitpath_raw_SPECTRUMKV+NO_SGP.txt
+
+=================================================================================================================================
+>>> Config: SPECTRUMKV+IMMEDIATE_PERSIST  (SGP=1  FLUSH=1  COEFF_ONE=0  RECLAIM=1)
+=================================================================================================================================
+    Running insert-only (dist=zipf, threads=16)...
+    Throughput: 2155997.759129
+
+    ── Split-Path Stats ──
+    [SplitPath] A(sgp_covered++)=494039 B(gp_covered+log)=661975 C(linkSGP)=861221 D(activateGP+log)=250491 E(rebalance)=13246 | total=2280972 log_avoided=1355260 log_needed=912466 avoid_rate=59.4%
+    [RebalSGP] A(sgp_covered++)=0 C(linkSGP)=0 total_parent_updates=0
+    [Level 0] coeff=3.0 A=494039 B=661975 C=861221 D=250491 E=13246 total=2280972 sgp_avoid=59.4%
+    [ChainHop] total_hops=0 lookups=0
+
+    Full output saved to: /home/charliecqc/1206/HKV/Prototype/splitpath_raw_SPECTRUMKV+IMMEDIATE_PERSIST.txt
+
+=================================================================================================================================
+>>> Config: SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST  (SGP=0  FLUSH=1  COEFF_ONE=0  RECLAIM=1)
+=================================================================================================================================
+    Running insert-only (dist=zipf, threads=16)...
+    Throughput: 1609602.257716
+
+    ── Split-Path Stats ──
+    [SplitPath] A(sgp_covered++)=0 B(gp_covered+log)=1381165 C(linkSGP)=0 D(activateGP+log)=858909 E(rebalance)=39402 | total=2279476 log_avoided=0 log_needed=2240074 avoid_rate=0.0%
+    [RebalSGP] A(sgp_covered++)=0 C(linkSGP)=0 total_parent_updates=0
+    [Level 0] coeff=3.0 A=0 B=1381165 C=0 D=858909 E=39402 total=2279476 sgp_avoid=0.0%
+    [ChainHop] total_hops=0 lookups=0
+
+    Full output saved to: /home/charliecqc/1206/HKV/Prototype/splitpath_raw_SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST.txt
+
+=================================================================================================================================
+>>> Config: SPECTRUMKV+COEFFICIENT=1  (SGP=1  FLUSH=0  COEFF_ONE=1  RECLAIM=0)
+=================================================================================================================================
+    Running insert-only (dist=zipf, threads=16)...
+    Throughput: 2354629.946142
+
+    ── Split-Path Stats ──
+    [SplitPath] A(sgp_covered++)=289058 B(gp_covered+log)=361974 C(linkSGP)=1188311 D(activateGP+log)=417320 E(rebalance)=23952 | total=2280615 log_avoided=1477369 log_needed=779294 avoid_rate=64.8%
+    [RebalSGP] A(sgp_covered++)=0 C(linkSGP)=0 total_parent_updates=0
+    [Level 0] coeff=1.0 A=289058 B=361974 C=1188311 D=417320 E=23952 total=2280615 sgp_avoid=64.8%
+    [ChainHop] total_hops=0 lookups=0
+
+    Full output saved to: /home/charliecqc/1206/HKV/Prototype/splitpath_raw_SPECTRUMKV+COEFFICIENT=1.txt
+
+=================================================================================================================================
+>>> Config: SPECTRUMKV+COEFF=1+NO_SGP  (SGP=0  FLUSH=0  COEFF_ONE=1  RECLAIM=0)
+=================================================================================================================================
+    Running insert-only (dist=zipf, threads=16)...
+    Throughput: 2163522.006963
+
+    ── Split-Path Stats ──
+    [SplitPath] A(sgp_covered++)=0 B(gp_covered+log)=848157 C(linkSGP)=0 D(activateGP+log)=1369669 E(rebalance)=62040 | total=2279866 log_avoided=0 log_needed=2217826 avoid_rate=0.0%
+    [RebalSGP] A(sgp_covered++)=0 C(linkSGP)=0 total_parent_updates=0
+    [Level 0] coeff=1.0 A=0 B=848157 C=0 D=1369669 E=62040 total=2279866 sgp_avoid=0.0%
+    [ChainHop] total_hops=0 lookups=0
+
+    Full output saved to: /home/charliecqc/1206/HKV/Prototype/splitpath_raw_SPECTRUMKV+COEFF=1+NO_SGP.txt
+
+=================================================================================================================================
+>>> Config: SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST  (SGP=0  FLUSH=1  COEFF_ONE=1  RECLAIM=1)
+=================================================================================================================================
+    Running insert-only (dist=zipf, threads=16)...
+    Throughput: 1428033.218705
+
+    ── Split-Path Stats ──
+    [SplitPath] A(sgp_covered++)=0 B(gp_covered+log)=847709 C(linkSGP)=0 D(activateGP+log)=1369189 E(rebalance)=62219 | total=2279117 log_avoided=0 log_needed=2216898 avoid_rate=0.0%
+    [RebalSGP] A(sgp_covered++)=0 C(linkSGP)=0 total_parent_updates=0
+    [Level 0] coeff=1.0 A=0 B=847709 C=0 D=1369189 E=62219 total=2279117 sgp_avoid=0.0%
+    [ChainHop] total_hops=0 lookups=0
+
+    Full output saved to: /home/charliecqc/1206/HKV/Prototype/splitpath_raw_SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST.txt
+
+=================================================================================================================================
+>>> Config: SPECTRUMKV+COEFF=1+IMM_PERSIST  (SGP=1  FLUSH=1  COEFF_ONE=1  RECLAIM=1)
+=================================================================================================================================
+    Running insert-only (dist=zipf, threads=16)...
+    Throughput: 2075769.508882
+
+    ── Split-Path Stats ──
+    [SplitPath] A(sgp_covered++)=309991 B(gp_covered+log)=380670 C(linkSGP)=1107543 D(activateGP+log)=453367 E(rebalance)=29581 | total=2281152 log_avoided=1417534 log_needed=834037 avoid_rate=62.1%
+    [RebalSGP] A(sgp_covered++)=0 C(linkSGP)=0 total_parent_updates=0
+    [Level 0] coeff=1.0 A=309991 B=380670 C=1107543 D=453367 E=29581 total=2281152 sgp_avoid=62.1%
+    [ChainHop] total_hops=0 lookups=0
+
+    Full output saved to: /home/charliecqc/1206/HKV/Prototype/splitpath_raw_SPECTRUMKV+COEFF=1+IMM_PERSIST.txt
+
+=================================================================================================================================
+  SUMMARY
+=================================================================================================================================
+
+CONFIGURATION                                 |     THROUGHPUT |        A        B        C        D        E | AVOID_RATE |      TOTAL
+----------------------------------------------+----------------+-----------------------------------------------+------------+------------
+SPECTRUMKV                                    | 2304739.656816 |   489140   681383   831398   262362    16638 |      57.9% |    2280921
+SPECTRUMKV+NO_SGP                             | 2166100.885845 |        0  1382188        0   858811    38999 |       0.0% |    2279998
+SPECTRUMKV+IMMEDIATE_PERSIST                  | 2155997.759129 |   494039   661975   861221   250491    13246 |      59.4% |    2280972
+SPECTRUMKV+NO_SGP+IMMEDIATE_PERSIST           | 1609602.257716 |        0  1381165        0   858909    39402 |       0.0% |    2279476
+SPECTRUMKV+COEFFICIENT=1                      | 2354629.946142 |   289058   361974  1188311   417320    23952 |      64.8% |    2280615
+SPECTRUMKV+COEFF=1+NO_SGP                     | 2163522.006963 |        0   848157        0  1369669    62040 |       0.0% |    2279866
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         | 1428033.218705 |        0   847709        0  1369189    62219 |       0.0% |    2279117
+SPECTRUMKV+COEFF=1+IMM_PERSIST                | 2075769.508882 |   309991   380670  1107543   453367    29581 |      62.1% |    2281152
+
+=================================================================================================================================
+  Finished: Wed 11 Mar 2026 07:45:52 AM UTC
+=================================================================================================================================

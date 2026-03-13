@@ -1,0 +1,220 @@
+=================================================================================================================================
+  Full Benchmark   (threads=1 4 8 16, dists=zipf unif, rounds=1)
+  Round pattern: Load → C → B → D → A → clear pmem
+  Thu 12 Mar 2026 11:33:38 PM UTC
+=================================================================================================================================
+
+================================================================================
+>>> Building: SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST  (SGP=0  FLUSH=1  COEFF_ONE=1  RECLAIM=1)
+================================================================================
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=zipf | threads=1 | 1 rounds of Load→C→B→D→A→clear ---
+  == Round 1 / 1 ==
+    [load] clearing pmem and running load...
+    [load] round1: 324543.820216
+    [c] running workload c on populated data...
+    [c] round1: 1.15006e+06
+    [b] running workload b on populated data...
+    [b] round1: 992879
+    [d] running workload d on populated data...
+    [d] round1: 978376
+    [a] running workload a on populated data...
+    [a] round1: 575172
+    [cleanup] clearing pmem...
+
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=1 | load => R1=324543.820216 R2=N/A          R3=N/A          AVG=324543.82
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=1 | c  => R1=1.15006e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=1 | b  => R1=992879       R2=N/A          R3=N/A          AVG=992879.00
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=1 | d  => R1=978376       R2=N/A          R3=N/A          AVG=978376.00
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=1 | a  => R1=575172       R2=N/A          R3=N/A          AVG=575172.00
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=zipf | threads=4 | 1 rounds of Load→C→B→D→A→clear ---
+  == Round 1 / 1 ==
+    [load] clearing pmem and running load...
+    [load] round1: 1007167.262630
+    [c] running workload c on populated data...
+    [c] round1: 4.84953e+06
+    [b] running workload b on populated data...
+    [b] round1: 3.86303e+06
+    [d] running workload d on populated data...
+    [d] round1: 3.85096e+06
+    [a] running workload a on populated data...
+    [a] round1: 1.9414e+06
+    [cleanup] clearing pmem...
+
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=4 | load => R1=1007167.262630 R2=N/A          R3=N/A          AVG=1007167.26
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=4 | c  => R1=4.84953e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=4 | b  => R1=3.86303e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=4 | d  => R1=3.85096e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=4 | a  => R1=1.9414e+06   R2=N/A          R3=N/A          AVG=
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=zipf | threads=8 | 1 rounds of Load→C→B→D→A→clear ---
+  == Round 1 / 1 ==
+    [load] clearing pmem and running load...
+    [load] round1: 1435647.358929
+    [c] running workload c on populated data...
+    [c] round1: 9.17749e+06
+    [b] running workload b on populated data...
+    [b] round1: 7.03071e+06
+    [d] running workload d on populated data...
+    [d] round1: 7.01803e+06
+    [a] running workload a on populated data...
+    [a] round1: 3.0249e+06
+    [cleanup] clearing pmem...
+
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=8 | load => R1=1435647.358929 R2=N/A          R3=N/A          AVG=1435647.35
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=8 | c  => R1=9.17749e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=8 | b  => R1=7.03071e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=8 | d  => R1=7.01803e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=8 | a  => R1=3.0249e+06   R2=N/A          R3=N/A          AVG=
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=zipf | threads=16 | 1 rounds of Load→C→B→D→A→clear ---
+  == Round 1 / 1 ==
+    [load] clearing pmem and running load...
+    [load] round1: 1100278.729649
+    [c] running workload c on populated data...
+    [c] round1: 1.22675e+07
+    [b] running workload b on populated data...
+    [b] round1: 9.5638e+06
+    [d] running workload d on populated data...
+    [d] round1: 9.52691e+06
+    [a] running workload a on populated data...
+    [a] round1: 3.19852e+06
+    [cleanup] clearing pmem...
+
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=16 | load => R1=1100278.729649 R2=N/A          R3=N/A          AVG=1100278.72
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=16 | c => R1=1.22675e+07  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=16 | b => R1=9.5638e+06   R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=16 | d => R1=9.52691e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | zipf | T=16 | a => R1=3.19852e+06  R2=N/A          R3=N/A          AVG=
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=unif | threads=1 | 1 rounds of Load→C→B→D→A→clear ---
+  == Round 1 / 1 ==
+    [load] clearing pmem and running load...
+    [load] round1: 323547.476201
+    [c] running workload c on populated data...
+    [c] round1: 485553
+    [b] running workload b on populated data...
+    [b] round1: 470374
+    [d] running workload d on populated data...
+    [d] round1: 466495
+    [a] running workload a on populated data...
+    [a] round1: 345503
+    [cleanup] clearing pmem...
+
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=1 | load => R1=323547.476201 R2=N/A          R3=N/A          AVG=323547.47
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=1 | c  => R1=485553       R2=N/A          R3=N/A          AVG=485553.00
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=1 | b  => R1=470374       R2=N/A          R3=N/A          AVG=470374.00
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=1 | d  => R1=466495       R2=N/A          R3=N/A          AVG=466495.00
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=1 | a  => R1=345503       R2=N/A          R3=N/A          AVG=345503.00
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=unif | threads=4 | 1 rounds of Load→C→B→D→A→clear ---
+  == Round 1 / 1 ==
+    [load] clearing pmem and running load...
+    [load] round1: 1006227.663978
+    [c] running workload c on populated data...
+    [c] round1: 1.87999e+06
+    [b] running workload b on populated data...
+    [b] round1: 1.77204e+06
+    [d] running workload d on populated data...
+    [d] round1: 1.77259e+06
+    [a] running workload a on populated data...
+    [a] round1: 1.18544e+06
+    [cleanup] clearing pmem...
+
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=4 | load => R1=1006227.663978 R2=N/A          R3=N/A          AVG=1006227.66
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=4 | c  => R1=1.87999e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=4 | b  => R1=1.77204e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=4 | d  => R1=1.77259e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=4 | a  => R1=1.18544e+06  R2=N/A          R3=N/A          AVG=
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=unif | threads=8 | 1 rounds of Load→C→B→D→A→clear ---
+  == Round 1 / 1 ==
+    [load] clearing pmem and running load...
+    [load] round1: 1427876.659390
+    [c] running workload c on populated data...
+    [c] round1: 3.48213e+06
+    [b] running workload b on populated data...
+    [b] round1: 3.19446e+06
+    [d] running workload d on populated data...
+    [d] round1: 3.19204e+06
+    [a] running workload a on populated data...
+    [a] round1: 1.89298e+06
+    [cleanup] clearing pmem...
+
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=8 | load => R1=1427876.659390 R2=N/A          R3=N/A          AVG=1427876.65
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=8 | c  => R1=3.48213e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=8 | b  => R1=3.19446e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=8 | d  => R1=3.19204e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=8 | a  => R1=1.89298e+06  R2=N/A          R3=N/A          AVG=
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=unif | threads=16 | 1 rounds of Load→C→B→D→A→clear ---
+  == Round 1 / 1 ==
+    [load] clearing pmem and running load...
+    [load] round1: 1159912.749895
+    [c] running workload c on populated data...
+    [c] round1: 4.79041e+06
+    [b] running workload b on populated data...
+    [b] round1: 4.22141e+06
+    [d] running workload d on populated data...
+    [d] round1: 4.22993e+06
+    [a] running workload a on populated data...
+    [a] round1: 1.86836e+06
+    [cleanup] clearing pmem...
+
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=16 | load => R1=1159912.749895 R2=N/A          R3=N/A          AVG=1159912.74
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=16 | c => R1=4.79041e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=16 | b => R1=4.22141e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=16 | d => R1=4.22993e+06  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | unif | T=16 | a => R1=1.86836e+06  R2=N/A          R3=N/A          AVG=
+
+=================================================================================================================================
+  SUMMARY
+=================================================================================================================================
+
+CONFIGURATION                                 |   DIST |   THR | WORKLOAD | AVG THROUGHPUT
+----------------------------------------------+--------+-------+----------+----------------
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     1 |     load |      324543.82
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     1 |        c |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     1 |        b |      992879.00
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     1 |        d |      978376.00
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     1 |        a |      575172.00
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     4 |     load |     1007167.26
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     4 |        c |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     4 |        b |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     4 |        d |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     4 |        a |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     8 |     load |     1435647.35
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     8 |        c |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     8 |        b |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     8 |        d |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     8 |        a |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |    16 |     load |     1100278.72
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |    16 |        c |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |    16 |        b |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |    16 |        d |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |    16 |        a |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     1 |     load |      323547.47
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     1 |        c |      485553.00
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     1 |        b |      470374.00
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     1 |        d |      466495.00
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     1 |        a |      345503.00
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     4 |     load |     1006227.66
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     4 |        c |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     4 |        b |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     4 |        d |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     4 |        a |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     8 |     load |     1427876.65
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     8 |        c |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     8 |        b |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     8 |        d |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     8 |        a |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |    16 |     load |     1159912.74
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |    16 |        c |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |    16 |        b |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |    16 |        d |               
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |    16 |        a |               
+
+=================================================================================================================================
+  Finished: Fri 13 Mar 2026 01:01:35 AM UTC
+=================================================================================================================================

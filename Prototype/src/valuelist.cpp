@@ -13,7 +13,7 @@ ValueList::ValueList(string storagePath, PmemBFPool *bfPool) {
         slot.store(nullptr, std::memory_order_relaxed);
     }
 #endif
-#if ENABLE_DRAM_BLOOM_HOT
+#if ENABLE_DRAM_BLOOM_HOT && ENABLE_SGP
     hotBloomCache_ = new HotBloomCache(pmemBFPool);
 #endif
     fileName = storagePath;
@@ -128,6 +128,8 @@ BloomFilter *ValueList::getBloom(size_t vnodeId)
     if (vnodeId >= MAX_VALUE_NODES) {
         return nullptr;
     }
+    if (!hotBloomCache_)
+        return pmemBFPool->at(vnodeId);
     return hotBloomCache_->getBloom(vnodeId);
 #else
     return pmemBFPool->at(vnodeId);
@@ -143,6 +145,8 @@ BloomFilter *ValueList::getBloomForWrite(size_t vnodeId)
     if (vnodeId >= MAX_VALUE_NODES) {
         return nullptr;
     }
+    if (!hotBloomCache_)
+        return pmemBFPool->at(vnodeId);
     return hotBloomCache_->getBloomForWrite(vnodeId);
 #else
     // No DRAM cache: direct PMEM
