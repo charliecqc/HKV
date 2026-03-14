@@ -21,7 +21,7 @@ set -uo pipefail
 
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 PMEM_DIR="/mnt/pmem0"
-RUNS=3                                  # number of rounds
+RUNS=1                                  # number of rounds
 
 THREAD_COUNTS=(32)
 DISTS=("zipf")
@@ -105,8 +105,8 @@ throughput_pattern() {  # $1 = workload name
 # ── Configuration table ──────────────────────────────────────────────────────
 #           NAME                              SGP  FLUSH  COEFF_ONE  RECLAIM
 CONFIGS=(
-    #"SPECTRUMKV                             1    0      0          0"
-    "SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST  0    1      1          1"
+    "SPECTRUMKV                             1    0      0          0"
+    #"SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST  0    1      1          1"
 )
 
 # ── Header ───────────────────────────────────────────────────────────────────

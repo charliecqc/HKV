@@ -60,11 +60,11 @@ all: $(TARGET)
 
 # Linking
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ -lpmemobj -lpthread
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpmemobj -lpthread -lnuma
 
 # Compiling
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -c -o $@ $< -lpmemobj -lpthread
+	$(CXX) $(CXXFLAGS) -c -o $@ $< -lpmemobj -lpthread -lnuma
 
 # Create build directory if it doesn't exist
 $(BUILD_DIR):

@@ -9,6 +9,8 @@
 #include "common.h"
 #include "concurrentqueue/concurrentqueue.h"
 #include <sys/syscall.h>
+#include <numa.h>
+#include <numaif.h>
 #if ENABLE_SGP
 #include "insert_tracker.h"
 #endif
@@ -303,7 +305,44 @@ struct SpeculationToken {
 
 #define LOG_SIZE 10UL*1024UL*1024UL*1024UL
 
+static void bind_to_numa_node(const string &path) {
+    int node = -1;
+    if (path.find("pmem0") != string::npos) {
+        node = 0;
+    } else if (path.find("pmem1") != string::npos) {
+        node = 1;
+    }
+    if (node < 0) return;
+
+    if (numa_available() < 0) {
+        fprintf(stderr, "Warning: NUMA is not available, skipping NUMA binding\n");
+        return;
+    }
+
+    // Bind CPU affinity to the NUMA node (equivalent to numactl --cpunodebind)
+    if (numa_run_on_node(node) != 0) {
+        fprintf(stderr, "Warning: Failed to bind CPU to NUMA node %d\n", node);
+    }
+
+    // Bind memory allocation to the NUMA node (equivalent to numactl --membind)
+    struct bitmask *nodemask = numa_allocate_nodemask();
+    numa_bitmask_setbit(nodemask, node);
+    numa_set_membind(nodemask);
+
+    // Migrate pages already allocated on other nodes to the target node
+    struct bitmask *from_nodes = numa_allocate_nodemask();
+    for (int i = 0; i < numa_num_configured_nodes(); i++) {
+        if (i != node) numa_bitmask_setbit(from_nodes, i);
+    }
+    numa_migrate_pages(0, from_nodes, nodemask);
+    numa_bitmask_free(from_nodes);
+    numa_bitmask_free(nodemask);
+
+    fprintf(stderr, "Bound to NUMA node %d (path contains pmem%d)\n", node, node);
+}
+
 TandemIndex::TandemIndex(string storage_path) {
+    bind_to_numa_node(storage_path);
     g_endTandem.store(false,std::memory_order_relaxed);
     storagePath = storage_path;
     pmemBFPool = new PmemBFPool(MAX_VALUE_NODES, storagePath);

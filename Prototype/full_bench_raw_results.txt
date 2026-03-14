@@ -1,38 +1,46 @@
 =================================================================================================================================
   Raw Benchmark: SPECTRUMKV & SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST
-  threads=32, dists=zipf, rounds=3
+  threads=32, dists=zipf, rounds=1
   Round pattern: Load → C → B → D → A → clear pmem
-  Wed 11 Mar 2026 09:34:46 PM UTC
+  Fri 13 Mar 2026 05:50:57 AM UTC
 =================================================================================================================================
 
 ================================================================================
->>> Building: SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST  (SGP=0  FLUSH=1  COEFF_ONE=1  RECLAIM=1)
+>>> Building: SPECTRUMKV  (SGP=1  FLUSH=0  COEFF_ONE=0  RECLAIM=0)
 ================================================================================
 
---- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=zipf | threads=32 | 3 rounds of Load→C→B→D→A→clear ---
-  == Round 1 / 3 ==
+--- SPECTRUMKV | dist=zipf | threads=32 | 1 rounds of Load→C→B→D→A→clear ---
+  == Round 1 / 1 ==
     [load] clearing pmem and running load...
-    [load] round1: 11226.690975
+    [load] round1: 2484901.638882
     [c] running workload c on populated data...
-    [c] round1: 1.28807e+07
+    [c] round1: 1.20295e+07
     [b] running workload b on populated data...
-    [b] round1: 1.06571e+07
+    [b] round1: 1.25258e+07
     [d] running workload d on populated data...
-    [d] round1: 1.10941e+07
+    [d] round1: 1.24801e+07
     [a] running workload a on populated data...
-    [a] round1: 243066
+    [a] round1: 4.24692e+06
     [cleanup] clearing pmem...
-  == Round 2 / 3 ==
-    [load] clearing pmem and running load...
-    [load] round2: 11110.868724
-    [c] running workload c on populated data...
-    [c] round2: 1.307e+07
-    [b] running workload b on populated data...
-    [b] round2: 1.10182e+07
-    [d] running workload d on populated data...
-    [d] round2: 1.07576e+07
-    [a] running workload a on populated data...
-    [a] round2: 324384
-    [cleanup] clearing pmem...
-  == Round 3 / 3 ==
-    [load] clearing pmem and running load...
+
+    SPECTRUMKV | zipf | T=32 | load                         => R1=2484901.638882 R2=N/A          R3=N/A          AVG=2484901.63
+    SPECTRUMKV | zipf | T=32 | c                            => R1=1.20295e+07  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV | zipf | T=32 | b                            => R1=1.25258e+07  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV | zipf | T=32 | d                            => R1=1.24801e+07  R2=N/A          R3=N/A          AVG=
+    SPECTRUMKV | zipf | T=32 | a                            => R1=4.24692e+06  R2=N/A          R3=N/A          AVG=
+
+=================================================================================================================================
+  SUMMARY
+=================================================================================================================================
+
+CONFIGURATION                                 |   DIST |   THR | WORKLOAD | AVG THROUGHPUT
+----------------------------------------------+--------+-------+----------+----------------
+SPECTRUMKV                                    |   zipf |    32 |     load |     2484901.63
+SPECTRUMKV                                    |   zipf |    32 |        c |               
+SPECTRUMKV                                    |   zipf |    32 |        b |               
+SPECTRUMKV                                    |   zipf |    32 |        d |               
+SPECTRUMKV                                    |   zipf |    32 |        a |               
+
+=================================================================================================================================
+  Finished: Fri 13 Mar 2026 05:55:20 AM UTC
+=================================================================================================================================

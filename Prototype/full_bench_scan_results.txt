@@ -2,7 +2,7 @@
   Scan Benchmark (YCSB-E): SPECTRUMKV & SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST
   threads=1 4 8 16 32, dists=zipf unif, 1 run each
   Pattern: Load → YCSB-E → clear pmem
-  Thu 12 Mar 2026 05:11:06 AM UTC
+  Fri 13 Mar 2026 02:51:37 PM UTC
 =================================================================================================================================
 
 ================================================================================
@@ -11,33 +11,195 @@
 
 --- SPECTRUMKV | dist=zipf | threads=1 | Load → YCSB-E → clear ---
     [load] clearing pmem and running load...
-    [load] throughput: 346204.057629
+    [load] throughput: 393670.120747
     [e] running YCSB-E on populated data...
-    [e] throughput: 345553
+    [e] throughput: 410283
     [cleanup] clearing pmem...
 
 --- SPECTRUMKV | dist=zipf | threads=4 | Load → YCSB-E → clear ---
     [load] clearing pmem and running load...
-    [load] throughput: 1213282.108059
+    [load] throughput: 1335115.973981
     [e] running YCSB-E on populated data...
-    [e] throughput: 1.36853e+06
+    [e] throughput: 1.58301e+06
     [cleanup] clearing pmem...
 
 --- SPECTRUMKV | dist=zipf | threads=8 | Load → YCSB-E → clear ---
     [load] clearing pmem and running load...
-    [load] throughput: 1997018.032077
+    [load] throughput: 2135532.570442
     [e] running YCSB-E on populated data...
-    [e] throughput: 2.64409e+06
+    [e] throughput: 2.8598e+06
     [cleanup] clearing pmem...
 
 --- SPECTRUMKV | dist=zipf | threads=16 | Load → YCSB-E → clear ---
     [load] clearing pmem and running load...
-    [load] throughput: 2315005.817006
+    [load] throughput: 2515655.396090
     [e] running YCSB-E on populated data...
-    [e] throughput: 4.09539e+06
+    [e] throughput: 4.23628e+06
     [cleanup] clearing pmem...
 
 --- SPECTRUMKV | dist=zipf | threads=32 | Load → YCSB-E → clear ---
     [load] clearing pmem and running load...
-    [load] throughput: N/A
+    [load] throughput: 2484146.438229
     [e] running YCSB-E on populated data...
+    [e] throughput: 4.19972e+06
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV | dist=unif | threads=1 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 391731.905329
+    [e] running YCSB-E on populated data...
+    [e] throughput: 210696
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV | dist=unif | threads=4 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 1318837.598653
+    [e] running YCSB-E on populated data...
+    [e] throughput: 784582
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV | dist=unif | threads=8 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 2136124.142710
+    [e] running YCSB-E on populated data...
+    [e] throughput: 1.37629e+06
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV | dist=unif | threads=16 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 2475260.296118
+    [e] running YCSB-E on populated data...
+    [e] throughput: 1.63656e+06
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV | dist=unif | threads=32 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 2491060.918169
+    [e] running YCSB-E on populated data...
+    [e] throughput: 1.6176e+06
+    [cleanup] clearing pmem...
+
+================================================================================
+>>> Building: SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST  (SGP=0  FLUSH=1  COEFF_ONE=1  RECLAIM=1)
+================================================================================
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=zipf | threads=1 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 348320.465859
+    [e] running YCSB-E on populated data...
+    [e] throughput: 449382
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=zipf | threads=4 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 1050627.244612
+    [e] running YCSB-E on populated data...
+    [e] throughput: 1.71468e+06
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=zipf | threads=8 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 1448248.716326
+    [e] running YCSB-E on populated data...
+    [e] throughput: 3.0701e+06
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=zipf | threads=16 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 1439111.368181
+    [e] running YCSB-E on populated data...
+    [e] throughput: 3.64833e+06
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=zipf | threads=32 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 913590.392066
+    [e] running YCSB-E on populated data...
+    [e] throughput: 3.71647e+06
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=unif | threads=1 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 348547.919293
+    [e] running YCSB-E on populated data...
+    [e] throughput: 222920
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=unif | threads=4 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 1048506.830005
+    [e] running YCSB-E on populated data...
+    [e] throughput: 827124
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=unif | threads=8 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 1448320.999318
+    [e] running YCSB-E on populated data...
+    [e] throughput: 1.33211e+06
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=unif | threads=16 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 1438657.687792
+    [e] running YCSB-E on populated data...
+    [e] throughput: 1.36927e+06
+    [cleanup] clearing pmem...
+
+--- SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST | dist=unif | threads=32 | Load → YCSB-E → clear ---
+    [load] clearing pmem and running load...
+    [load] throughput: 901745.365019
+    [e] running YCSB-E on populated data...
+    [e] throughput: 1.50528e+06
+    [cleanup] clearing pmem...
+
+=================================================================================================================================
+  SUMMARY
+=================================================================================================================================
+
+CONFIGURATION                                 |   DIST |   THR | WORKLOAD |     THROUGHPUT
+----------------------------------------------+--------+-------+----------+----------------
+SPECTRUMKV                                    |   zipf |     1 |     load |  393670.120747
+SPECTRUMKV                                    |   zipf |     1 |        e |         410283
+SPECTRUMKV                                    |   zipf |     4 |     load | 1335115.973981
+SPECTRUMKV                                    |   zipf |     4 |        e |    1.58301e+06
+SPECTRUMKV                                    |   zipf |     8 |     load | 2135532.570442
+SPECTRUMKV                                    |   zipf |     8 |        e |     2.8598e+06
+SPECTRUMKV                                    |   zipf |    16 |     load | 2515655.396090
+SPECTRUMKV                                    |   zipf |    16 |        e |    4.23628e+06
+SPECTRUMKV                                    |   zipf |    32 |     load | 2484146.438229
+SPECTRUMKV                                    |   zipf |    32 |        e |    4.19972e+06
+SPECTRUMKV                                    |   unif |     1 |     load |  391731.905329
+SPECTRUMKV                                    |   unif |     1 |        e |         210696
+SPECTRUMKV                                    |   unif |     4 |     load | 1318837.598653
+SPECTRUMKV                                    |   unif |     4 |        e |         784582
+SPECTRUMKV                                    |   unif |     8 |     load | 2136124.142710
+SPECTRUMKV                                    |   unif |     8 |        e |    1.37629e+06
+SPECTRUMKV                                    |   unif |    16 |     load | 2475260.296118
+SPECTRUMKV                                    |   unif |    16 |        e |    1.63656e+06
+SPECTRUMKV                                    |   unif |    32 |     load | 2491060.918169
+SPECTRUMKV                                    |   unif |    32 |        e |     1.6176e+06
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     1 |     load |  348320.465859
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     1 |        e |         449382
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     4 |     load | 1050627.244612
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     4 |        e |    1.71468e+06
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     8 |     load | 1448248.716326
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |     8 |        e |     3.0701e+06
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |    16 |     load | 1439111.368181
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |    16 |        e |    3.64833e+06
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |    32 |     load |  913590.392066
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   zipf |    32 |        e |    3.71647e+06
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     1 |     load |  348547.919293
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     1 |        e |         222920
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     4 |     load | 1048506.830005
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     4 |        e |         827124
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     8 |     load | 1448320.999318
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |     8 |        e |    1.33211e+06
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |    16 |     load | 1438657.687792
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |    16 |        e |    1.36927e+06
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |    32 |     load |  901745.365019
+SPECTRUMKV+COEFF=1+NO_SGP+IMM_PERSIST         |   unif |    32 |        e |    1.50528e+06
+
+=================================================================================================================================
+  Finished: Fri 13 Mar 2026 04:02:45 PM UTC
+=================================================================================================================================
