@@ -6,6 +6,8 @@
 #include <cassert>
 #include <cstddef>
 #include <type_traits>
+#include <iostream>
+#include <iomanip>
 
 #ifndef CKPLOGPOOL
 #define CKPLOGPOOL 3
@@ -22,6 +24,11 @@ static_assert(std::is_same<decltype(WalDeltaHeader{}.type), uint16_t>::value,
 #endif
 
 // 统一解析并应用一段连续缓冲 [base0, base0+batch)
+// Thread-local counters accumulated during parseApplySpan calls
+static thread_local size_t tl_replay_full_count   = 0;
+static thread_local size_t tl_replay_delta_count  = 0;
+static thread_local size_t tl_replay_insert_count = 0;
+
 static size_t parseApplySpan(CkptLog* self,
                              const unsigned char* base0,
                              size_t batch,
@@ -47,6 +54,7 @@ static size_t parseApplySpan(CkptLog* self,
             self->applyDeltaEntries(inode, entries, dh->count,
                                     dh->last_index, dh->next, dh->parent_id);
 
+            ++tl_replay_delta_count;
             consumed += entry_sz;
             continue;
         }
@@ -62,6 +70,7 @@ static size_t parseApplySpan(CkptLog* self,
             Inode* inode = pmemInodePool->at(ih->inode_id);
             self->applyInsertEntry(inode, ih);
 
+            ++tl_replay_insert_count;
             consumed += entry_sz;
             continue;
         }
@@ -110,6 +119,7 @@ static size_t parseApplySpan(CkptLog* self,
             }
             PmemManager::flushNoDrain(1, inode, sizeof(Inode)); //1: INDEXPOOL
 
+            ++tl_replay_full_count;
             consumed += entry_sz;
             continue;
         }
@@ -121,7 +131,8 @@ static size_t parseApplySpan(CkptLog* self,
     return consumed;
 }
 
-int CkptLogNVM::init(root_obj *root, size_t maxSize) {
+int CkptLogNVM::init(size_t maxSize) {
+    root_obj *root = nullptr;
     bool isCreate;
     bool ret = PmemManager::createOrOpenPool(CKPLOGPOOL, fileName.c_str(), maxSize+1024*1024*1024, (void **)&root, isCreate);
     if (!ret) {
@@ -140,31 +151,93 @@ int CkptLogNVM::init(root_obj *root, size_t maxSize) {
         this->_buf= static_cast<unsigned char *> (pmemobj_direct(root->ptr[0]));
         this->buf = PmemManager::align_ptr_to_cacheline((void *)this->_buf);
         PmemManager::flushToNVM(CKPLOGPOOL, (char *)(this->buf), maxSize+L1_CACHE_LINE_SIZE);
+
+#if ENABLE_LOG_REPLAY
+        // Allocate NVM metadata for crash recovery (root->ptr[1])
+        int ret_meta = pmemobj_alloc(pop, &root->ptr[1], sizeof(CkptLogPersistMeta), 0, NULL, NULL);
+        if (ret_meta == 0) {
+            nvm_meta = static_cast<CkptLogPersistMeta *>(pmemobj_direct(root->ptr[1]));
+            nvm_meta->start_cursor = 0;
+            nvm_meta->end_cursor = 0;
+            nvm_meta->magic = CKPT_LOG_META_MAGIC;
+            PmemManager::flushToNVM(CKPLOGPOOL, (char *)nvm_meta, sizeof(CkptLogPersistMeta));
+        }
+        wasRecovered = false;
+#endif
         return 0;
     }else {
         this->_buf= static_cast<unsigned char *> (pmemobj_direct(root->ptr[0]));
         this->buf = PmemManager::align_ptr_to_cacheline((void *)this->_buf);
+
+#if ENABLE_LOG_REPLAY
+        // Retrieve NVM metadata for crash recovery
+        if (!OID_IS_NULL(root->ptr[1])) {
+            nvm_meta = static_cast<CkptLogPersistMeta *>(pmemobj_direct(root->ptr[1]));
+            if (nvm_meta->magic == CKPT_LOG_META_MAGIC &&
+                nvm_meta->end_cursor > nvm_meta->start_cursor) {
+                wasRecovered = true;
+            } else {
+                nvm_meta->start_cursor = 0;
+                nvm_meta->end_cursor = 0;
+                nvm_meta->magic = CKPT_LOG_META_MAGIC;
+                PmemManager::flushToNVM(CKPLOGPOOL, (char *)nvm_meta, sizeof(CkptLogPersistMeta));
+                wasRecovered = false;
+            }
+        } else {
+            // Old pool without metadata — allocate now
+            int ret_meta = pmemobj_alloc(pop, &root->ptr[1], sizeof(CkptLogPersistMeta), 0, NULL, NULL);
+            if (ret_meta == 0) {
+                nvm_meta = static_cast<CkptLogPersistMeta *>(pmemobj_direct(root->ptr[1]));
+                nvm_meta->start_cursor = 0;
+                nvm_meta->end_cursor = 0;
+                nvm_meta->magic = CKPT_LOG_META_MAGIC;
+                PmemManager::flushToNVM(CKPLOGPOOL, (char *)nvm_meta, sizeof(CkptLogPersistMeta));
+            }
+            wasRecovered = false;
+        }
+#endif
         return 0;
     }
 }
 
+#if ENABLE_LOG_REPLAY
+void CkptLogNVM::persistCursors() {
+    if (nvm_meta) {
+        nvm_meta->start_cursor = start_persistent;
+        nvm_meta->end_cursor = end_persistent;
+        PmemManager::flushNoDrain(CKPLOGPOOL, nvm_meta, sizeof(CkptLogPersistMeta));
+    }
+}
+#endif
+
 // 构造函数
 #if ENABLE_PMEM_STATS
 CkptLog::CkptLog(size_t logSize, int current_highest_level, ValueList *va_list, std::string storage_path)
-    : retry_count(0), current_highest_level(current_highest_level), valueList(va_list),
+    : retry_count(0), reclaim_exec_count(0), current_highest_level(current_highest_level), valueList(va_list),
       ckptlog(new CkptLogNVM(logSize, storage_path)) {
 #else
 CkptLog::CkptLog(size_t logSize, std::string storage_path)
-    : retry_count(0),
+    : retry_count(0), reclaim_exec_count(0),
       ckptlog(new CkptLogNVM(logSize, storage_path)) {
 #endif
-    a_consumed_start.v.store(ckptlog->start, std::memory_order_relaxed);
-    a_alloc_end.v.store(ckptlog->end_persistent, std::memory_order_relaxed);
-    a_durable_end.v.store(ckptlog->start_persistent, std::memory_order_relaxed);
-    a_produced_end.v.store(ckptlog->end_persistent, std::memory_order_relaxed);
+#if ENABLE_LOG_REPLAY
+    if (ckptlog->wasRecovered) {
+        // Crash recovery: restore cursors from persisted NVM metadata
+        a_consumed_start.v.store(ckptlog->start_persistent, std::memory_order_relaxed);
+        a_alloc_end.v.store(ckptlog->end_persistent, std::memory_order_relaxed);
+        a_durable_end.v.store(ckptlog->end_persistent, std::memory_order_relaxed);
+        a_produced_end.v.store(ckptlog->end_persistent, std::memory_order_relaxed);
+    } else
+#endif
+    {
+        a_consumed_start.v.store(0, std::memory_order_relaxed);
+        a_alloc_end.v.store(0, std::memory_order_relaxed);
+        a_durable_end.v.store(0, std::memory_order_relaxed);
+        a_produced_end.v.store(0, std::memory_order_relaxed);
+    }
     current_inode_idx = 0;
     current_highest_level = 0;
-    inode_count_on_each_level.reserve(MAX_LEVEL);
+    inode_count_on_each_level.resize(MAX_LEVEL, 0);
 }
 
 // 析构函数
@@ -415,7 +488,11 @@ void CkptLog::forcePersist()
 
         // 持久化元数据（可恢复 durable 边界）
         ckptlog->end_persistent = produced;
+        ckptlog->start_persistent = a_consumed_start.v.load(std::memory_order_relaxed);
         PmemManager::flushNoDrain(CKPLOGPOOL, &ckptlog->end_persistent, sizeof(ckptlog->end_persistent));
+#if ENABLE_LOG_REPLAY
+        ckptlog->persistCursors();
+#endif
         PmemManager::drain(CKPLOGPOOL);
 
         a_durable_end.v.store(produced, std::memory_order_release);
@@ -473,10 +550,73 @@ void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
         a_durable_end.v.store(0, std::memory_order_relaxed);
         a_produced_end.v.store(0, std::memory_order_relaxed);
 
+#if ENABLE_LOG_REPLAY
+        // Clear NVM recovery metadata
+        if (ckptlog->nvm_meta) {
+            ckptlog->nvm_meta->start_cursor = 0;
+            ckptlog->nvm_meta->end_cursor = 0;
+            PmemManager::flushNoDrain(CKPLOGPOOL, ckptlog->nvm_meta, sizeof(CkptLogPersistMeta));
+        }
+#endif
+
         PmemManager::flushNoDrain(CKPLOGPOOL, ckptlog, sizeof(*ckptlog));
         PmemManager::drain(CKPLOGPOOL);
     }
 }
+
+#if ENABLE_LOG_REPLAY
+CkptLog::LogReplayStats CkptLog::replayLog(PmemInodePool *pmemInodePool)
+{
+    LogReplayStats stats;
+
+    if (!ckptlog->wasRecovered) return stats;
+
+    size_t consumed = a_consumed_start.v.load(std::memory_order_acquire);
+    size_t durable  = a_durable_end.v.load(std::memory_order_acquire);
+
+    if (consumed >= durable) {
+        std::cout << "[Recovery] No pending log entries to replay." << std::endl;
+        return stats;
+    }
+
+    stats.was_replay_needed = true;
+    stats.total_bytes = durable - consumed;
+
+    std::cout << "[Recovery] Replaying WAL log entries ["
+              << consumed << ", " << durable << ") ("
+              << stats.total_bytes << " bytes)" << std::endl;
+
+    // Reset thread-local counters before replay
+    tl_replay_full_count   = 0;
+    tl_replay_delta_count  = 0;
+    tl_replay_insert_count = 0;
+
+    auto t0 = std::chrono::steady_clock::now();
+
+    forceReclaim(pmemInodePool);
+
+    auto t1 = std::chrono::steady_clock::now();
+    stats.replay_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    stats.full_entries   = tl_replay_full_count;
+    stats.delta_entries  = tl_replay_delta_count;
+    stats.insert_entries = tl_replay_insert_count;
+    stats.total_entries  = stats.full_entries + stats.delta_entries + stats.insert_entries;
+
+    std::cout << "[Recovery] Log replay completed in "
+              << std::fixed << std::setprecision(3) << stats.replay_time_ms << " ms" << std::endl;
+    std::cout << "[Recovery]   total_bytes=" << stats.total_bytes
+              << ", entries_replayed=" << stats.total_entries
+              << " (full=" << stats.full_entries
+              << ", delta=" << stats.delta_entries
+              << ", insert=" << stats.insert_entries << ")" << std::endl;
+    std::cout << "[Recovery]   current_highest_level="
+              << current_highest_level << ", current_inode_idx="
+              << current_inode_idx << std::endl;
+
+    return stats;
+}
+#endif // ENABLE_LOG_REPLAY
 
 size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
 {
@@ -513,6 +653,8 @@ size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
 
     PmemManager::drain(1); // 1: INDEXPOOL
     a_consumed_start.v.fetch_add(consumed, std::memory_order_acq_rel);
+    // Keep legacy cursor in sync so nvm_log_enq overflow check stays valid
+    ckptlog->start = a_consumed_start.v.load(std::memory_order_relaxed);
     return consumed;
 }
 
@@ -520,18 +662,54 @@ void CkptLog::reclaim(double dramSearchEfficincy, long vnode_count, PmemInodePoo
 {
     try {
 #if !ENABLE_IMMEDIATE_RECLAIM
+
+#if ENABLE_DT_ONLY_RECLAIM
+        // === DT-only reclaim mode (SpectrumKV) ===
+        // Divergence threshold is the sole controller of reclaim timing.
+        // Higher DT → more divergence allowed → less frequent reclaim → better
+        // write throughput but longer recovery after crash.
+        // WAL high watermark is a safety net to prevent ring overflow.
+        {
+            size_t q = getLogQueueSize();
+            size_t wal_capacity = ckptlog->log_size;
+            size_t high_watermark = static_cast<size_t>(
+                wal_capacity * WAL_HIGH_WATERMARK_RATIO);
+            bool wal_emergency = (q >= high_watermark);
+
+            if (!wal_emergency) {
+                // PMem stats uninitialized (first reclaim never ran) → must not skip
+                bool stats_initialized = (current_highest_level > 0);
+                if (stats_initialized) {
+                    double pmemE = calculatePmemSearchEfficiency(vnode_count);
+                    double threshold = pmemE / dramSearchEfficincy;
+                    if (threshold <= DIVERGENCE_THRESHOLD) {
+                        return;  // Divergence within tolerance
+                    }
+                }
+            }
+            // Incremental: one bounded batch per call to avoid long pauses
+            reclaimBatch(pmemInodePool, PERSISTENT_THRESHOLD);
+            reclaim_exec_count++;
+        }
+#else
+        // === Original 3-condition gate (RT + retry + DT) ===
         size_t q = getLogQueueSize();
         double pmemSearchEfficiency = calculatePmemSearchEfficiency(vnode_count);
         double threshold = pmemSearchEfficiency / dramSearchEfficincy;
-        if (q < RECLAIM_THRESHOLD && retry_count < RECLAIM_RETRY_THRESHOLD && threshold <= 1.2) {
+        if (q < RECLAIM_THRESHOLD && retry_count < RECLAIM_RETRY_THRESHOLD && threshold <= DIVERGENCE_THRESHOLD) {
             retry_count++;
             return;
         }
         retry_count = 0;
-#endif
 
-        const size_t BATCH_BYTES = std::max<size_t>(PERSISTENT_THRESHOLD, RECLAIM_THRESHOLD);
-        while (reclaimBatch(pmemInodePool, BATCH_BYTES) > 0) { /* loop */ }
+        {
+            const size_t BATCH_BYTES = std::max<size_t>(PERSISTENT_THRESHOLD, RECLAIM_THRESHOLD);
+            while (reclaimBatch(pmemInodePool, BATCH_BYTES) > 0) { /* loop */ }
+            reclaim_exec_count++;
+        }
+#endif /* ENABLE_DT_ONLY_RECLAIM */
+
+#endif /* !ENABLE_IMMEDIATE_RECLAIM */
 #if ENABLE_PMEM_STATS
         {
             std::shared_lock<std::shared_mutex> lk(pmemInodePool->stats_mtx);
@@ -657,6 +835,9 @@ bool CkptLog::flushOnce()
     if (lk.owns_lock()) {
         ckptlog->end_persistent   = produced;
         ckptlog->start_persistent = a_consumed_start.v.load(std::memory_order_relaxed);
+#if ENABLE_LOG_REPLAY
+        ckptlog->persistCursors();
+#endif
     }
 
     flush_busy.clear(std::memory_order_release);

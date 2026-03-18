@@ -29,7 +29,11 @@ LogMergeThread::LogMergeThread(int tid, CkptLog *cklog, PmemInodePool *pmemInode
 
 LogMergeThread::~LogMergeThread() {
     if(!ckptLog->isLogEmpty()) {
+        auto t0 = std::chrono::steady_clock::now();
         ckptLog->forceReclaim(pmemInodePool);
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::cout << "[~LogMergeThread] forceReclaim time: " << ms << " ms" << std::endl;
     }
 }
 

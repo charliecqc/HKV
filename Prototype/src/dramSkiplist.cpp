@@ -1161,12 +1161,21 @@ void DramSkiplist::printStats()
 
 void DramSkiplist::fillInodeCountEachLevel(int level)
 {
-    int max_level_idx = level - 1;               
+    int max_level_idx = level - 1;
+    size_t max_inodes = dramInodePool->getCurrentIdx();
     for (int i = 0; i <= max_level_idx; ++i) {
         Inode* current = header[i];
         long long count = 0;
-        while (current->hdr.next != tail[i]->getId()) {
-            current = dramInodePool->at(current->hdr.next);
+        int32_t tail_id = static_cast<int32_t>(tail[i]->getId());
+        while (current->hdr.next != tail_id) {
+            uint32_t next_id = static_cast<uint32_t>(current->hdr.next);
+            // Stop if the next pointer is out of the recovered range
+            if (next_id >= max_inodes || isTail(next_id)) {
+                // Patch the broken chain: point to tail so lookups terminate
+                current->hdr.next = tail_id;
+                break;
+            }
+            current = dramInodePool->at(next_id);
             ++count;
         }
         inode_count_on_each_level[i] = count;

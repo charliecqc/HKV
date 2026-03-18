@@ -166,6 +166,20 @@ public:
     }
 };
 
+#ifndef ENABLE_LOG_REPLAY
+#define ENABLE_LOG_REPLAY 1
+#endif
+
+#if ENABLE_LOG_REPLAY
+// Persistent metadata for crash recovery (stored in NVM via root->ptr[1])
+struct CkptLogPersistMeta {
+    size_t start_cursor;   // last consumed position
+    size_t end_cursor;     // last durable position
+    uint64_t magic;        // validity marker
+};
+static constexpr uint64_t CKPT_LOG_META_MAGIC = 0x434B50544C4F4721ULL; // "CKPTLOG!"
+#endif
+
 class CkptLogNVM {
 private:
     std::string fileName;
@@ -181,24 +195,43 @@ public:
     size_t log_size;
     size_t mask;
     bool isFull;
+#if ENABLE_LOG_REPLAY
+    CkptLogPersistMeta *nvm_meta = nullptr;
+    bool wasRecovered = false;
+#endif
     
 
 public:
     CkptLogNVM(size_t maxSize,std::string storage_path) : maxSize(maxSize), start(0), end(0), isFull(false) {
         fileName = storage_path + "/ckpt_log";
-        root_obj *root = nullptr;
-        init(root,maxSize);
-        start = 0;
-        end = 0;
-        current_update = 0;
-        end_persistent = 0;
-        start_persistent = 0;
+        init(maxSize);
+#if ENABLE_LOG_REPLAY
+        if (wasRecovered && nvm_meta &&
+            nvm_meta->magic == CKPT_LOG_META_MAGIC &&
+            nvm_meta->end_cursor > nvm_meta->start_cursor) {
+            start_persistent = nvm_meta->start_cursor;
+            end_persistent = nvm_meta->end_cursor;
+            start = nvm_meta->start_cursor;
+            end = nvm_meta->end_cursor;
+            current_update = nvm_meta->end_cursor;
+        } else
+#endif
+        {
+            start = 0;
+            end = 0;
+            current_update = 0;
+            end_persistent = 0;
+            start_persistent = 0;
+        }
         log_size = maxSize;
         // 要求 log_size 为 2 的幂
         mask = log_size - 1;
     }
 
-    int init(root_obj *root, size_t maxSize);
+    int init(size_t maxSize);
+#if ENABLE_LOG_REPLAY
+    void persistCursors();
+#endif
 
     ~CkptLogNVM() {
         // Deallocate memory blocks
@@ -239,6 +272,7 @@ class CkptLog {
 public:
     std::shared_mutex mtx;
     int retry_count;
+    uint64_t reclaim_exec_count;
     CkptLogNVM *ckptlog;
     ValueList *valueList;
     int current_highest_level;
@@ -343,6 +377,20 @@ public:
 
     size_t suggestReclaimBatchBytes() const;
 
+#if ENABLE_LOG_REPLAY
+    struct LogReplayStats {
+        size_t total_bytes       = 0;
+        size_t full_entries      = 0;
+        size_t delta_entries     = 0;
+        size_t insert_entries    = 0;
+        size_t total_entries     = 0;
+        double replay_time_ms    = 0.0;
+        bool   was_replay_needed = false;
+    };
+
+    LogReplayStats replayLog(PmemInodePool *pmemInodePool);
+    bool wasLogRecovered() const { return ckptlog->wasRecovered; }
+#endif
 
     unsigned char* reserveChunk(size_t total_bytes_aligned, size_t& out_alloc_start);
     void commitChunk(size_t alloc_start, size_t total_bytes_aligned);

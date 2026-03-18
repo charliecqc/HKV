@@ -342,6 +342,9 @@ static void bind_to_numa_node(const string &path) {
 }
 
 TandemIndex::TandemIndex(string storage_path) {
+#if ENABLE_LOG_REPLAY
+    auto recovery_t0 = std::chrono::steady_clock::now();
+#endif
     bind_to_numa_node(storage_path);
     g_endTandem.store(false,std::memory_order_relaxed);
     storagePath = storage_path;
@@ -372,8 +375,17 @@ TandemIndex::TandemIndex(string storage_path) {
         }
     }
 
+    {
+        size_t vnode_idx = valueList->pmemVnodePool->getCurrentIdx();
+        std::cout << "[Init] pmemVnodePool currentIdx=" << vnode_idx
+                  << ", isDataLoaded=" << (vnode_idx > 1 ? "true" : "false") << std::endl;
+    }
     if(valueList->pmemVnodePool->getCurrentIdx() > 1) {
         if(pmemBFPool->at(0)->next_id == -1) {
+           // First pass: reset ALL PMem bloom versions so promoteInternal won't hang
+           for(size_t i = 0; i <= valueList->pmemVnodePool->getCurrentIdx(); i++) {
+               pmemBFPool->at(i)->version.store(0, std::memory_order_relaxed);
+           }
            for(size_t i = 0; i <= valueList->pmemVnodePool->getCurrentIdx(); i++) {
                BloomFilter *bloom = valueList->getBloomForWrite(i);
                Vnode *vnode = valueList->pmemVnodePool->at(i);
@@ -414,6 +426,57 @@ TandemIndex::TandemIndex(string storage_path) {
         memcpy(ckptLog->inode_count_on_each_level.data(),
                mainIndex->inode_count_on_each_level.data(),
                sizeof(int) * levels);
+
+#if ENABLE_LOG_REPLAY
+        // Replay pending WAL log entries if crash recovery detected
+        auto log_replay_stats = ckptLog->replayLog(pmemRecoveryArray);
+
+        // Refresh DRAM inode copies after log replay
+        if (ckptLog->wasLogRecovered()) {
+            auto dram_refresh_t0 = std::chrono::steady_clock::now();
+            if (ckptLog->current_inode_idx > static_cast<long>(dramInodePool->getCurrentIdx())) {
+                dramInodePool->setCurrentIdx(static_cast<size_t>(ckptLog->current_inode_idx));
+            }
+            Inode *pmemPool = pmemRecoveryArray->at(0);
+            Inode *dramPool = dramInodePool->at(0);
+            PmemManager::memcpyToDRAM(1, reinterpret_cast<char *>(dramPool),
+                reinterpret_cast<char *>(pmemPool),
+                sizeof(Inode) * dramInodePool->getCurrentIdx());
+            int newLevels = ckptLog->current_highest_level + 1;
+            if (newLevels > levels) {
+                levels = newLevels;
+                mainIndex->setLevel(levels);
+            }
+            auto dram_refresh_t1 = std::chrono::steady_clock::now();
+            double dram_refresh_ms = std::chrono::duration<double, std::milli>(dram_refresh_t1 - dram_refresh_t0).count();
+            std::cout << "[Recovery] DRAM inode refresh: " << dramInodePool->getCurrentIdx()
+                      << " inodes, " << std::fixed << std::setprecision(3)
+                      << dram_refresh_ms << " ms" << std::endl;
+        }
+
+        auto recovery_t1 = std::chrono::steady_clock::now();
+        double total_recovery_ms = std::chrono::duration<double, std::milli>(recovery_t1 - recovery_t0).count();
+
+        std::cout << "[Recovery] === Recovery Summary ===" << std::endl;
+        std::cout << "[Recovery]   inode_copy_from_pmem: "
+                  << dramInodePool->getCurrentIdx() << " inodes, "
+                  << levels << " levels" << std::endl;
+        if (log_replay_stats.was_replay_needed) {
+            std::cout << "[Recovery]   log_replay: "
+                      << log_replay_stats.total_entries << " entries ("
+                      << log_replay_stats.total_bytes << " bytes), "
+                      << std::fixed << std::setprecision(3)
+                      << log_replay_stats.replay_time_ms << " ms" << std::endl;
+            std::cout << "[Recovery]     full=" << log_replay_stats.full_entries
+                      << ", delta=" << log_replay_stats.delta_entries
+                      << ", insert=" << log_replay_stats.insert_entries << std::endl;
+        } else {
+            std::cout << "[Recovery]   log_replay: not needed (log was clean)" << std::endl;
+        }
+        std::cout << "[Recovery]   total_recovery_time: "
+                  << std::fixed << std::setprecision(3)
+                  << total_recovery_ms << " ms" << std::endl;
+#endif // ENABLE_LOG_REPLAY
     }
 #if !ENABLE_IMMEDIATE_FLUSH
     createLogFlushThread();
@@ -482,8 +545,13 @@ TandemIndex::~TandemIndex() {
     }
 
     if (ckptLog) {
+        std::cout << "[Reclaim] exec count: " << ckptLog->reclaim_exec_count << std::endl;
         if(!ckptLog->isLogEmpty()) {
+            auto fr_t0 = std::chrono::steady_clock::now();
             ckptLog->forceReclaim(pmemRecoveryArray);
+            auto fr_t1 = std::chrono::steady_clock::now();
+            double fr_ms = std::chrono::duration<double, std::milli>(fr_t1 - fr_t0).count();
+            std::cout << "[~TandemIndex] forceReclaim time: " << fr_ms << " ms" << std::endl;
         }
         assert(ckptLog->isLogEmpty());
         delete ckptLog;
